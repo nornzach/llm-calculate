@@ -60,8 +60,12 @@ func mustLoad() {
 		}
 	}
 	patchSparse(models)
-	// 合并 HF 采集库（磁盘实时读取，无需重新编译）；人工收录同 id 优先
-	if fb, err := os.ReadFile("data/models_hf.json"); err == nil {
+	// 开发时优先读取磁盘，便于刷新模型库；独立二进制回退内嵌数据。
+	fb, err := os.ReadFile("data/models_hf.json")
+	if err != nil {
+		fb, err = embedded.ReadFile("data/models_hf.json")
+	}
+	if err == nil {
 		if fetched, err := calc.LoadModels(fb); err == nil {
 			have := map[string]bool{}
 			for _, m := range models {
