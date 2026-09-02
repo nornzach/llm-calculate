@@ -90,10 +90,25 @@ type msFilesResponse struct {
 	} `json:"Data"`
 }
 
+type hfQuantConfig struct {
+	Method       string                  `json:"quant_method"`
+	Format       string                  `json:"format"`
+	ConfigGroups map[string]hfQuantGroup `json:"config_groups"`
+}
+
+type hfQuantGroup struct {
+	Format  string `json:"format"`
+	Weights struct {
+		NumBits int    `json:"num_bits"`
+		Type    string `json:"type"`
+	} `json:"weights"`
+}
+
 type hfConfig struct {
 	ModelType            string    `json:"model_type"`
 	Architectures        []string  `json:"architectures"`
 	TorchDType           string    `json:"torch_dtype"`
+	DType                string    `json:"dtype"`
 	RopeTheta            float64   `json:"rope_theta"`
 	Layers               int       `json:"num_hidden_layers"`
 	Hidden               float64   `json:"hidden_size"`
@@ -138,9 +153,7 @@ type hfConfig struct {
 		NumHeads       int   `json:"num_heads"`
 		HeadDim        int   `json:"head_dim"`
 	} `json:"linear_attn_config"`
-	QuantConfig *struct {
-		Method string `json:"quant_method"`
-	} `json:"quantization_config"`
+	QuantConfig *hfQuantConfig `json:"quantization_config"`
 }
 
 type outModel struct {
@@ -190,7 +203,7 @@ type outModel struct {
 	Notes           string   `json:"notes,omitempty"`
 }
 
-var skipRe = regexp.MustCompile(`(?i)(lora|-ft\b|finetune|checkpoint|merge|obliterat|abliterat|uncensored|heretic|derestricted|dspark|speculat|medusa|eagle)`)
+var skipRe = regexp.MustCompile(`(?i)(lora|-ft\b|finetune|checkpoint|merge|obliterat|abliterat|uncensored|heretic|derestricted|dspark|speculat|medusa|eagle|-mtpv?\d*\b)`)
 var packagedRe = regexp.MustCompile(`(?i)(?:^|[-_.])(awq|gptq|gguf|fp8|fp4|nvfp4|int4|int8|bnb|quant(?:ized)?|compressed|pruned?)(?:[-_.]|$)`)
 
 // 搬运/微调/草稿模型组织：全量采集时跳过（-only 点名不受限）
@@ -230,6 +243,7 @@ var officialActive = map[string]float64{
 	"deepseek-ai/deepseek-r1-0528":        37,
 	"deepseek-ai/deepseek-r1-zero":        37,
 	"qwen/qwen3.5-35b-a3b":                3,
+	"stepfun-ai/step-3.5-flash":           11,
 	"qwen/qwen3.8-flash-next":             6,
 	"zai-org/glm-5.3":                     40,
 	"zai-org/glm-5.3-flash":               18,
@@ -386,6 +400,7 @@ func main() {
 	if *all && authors == "" {
 		authors = defaultPublishers
 	}
+	officialPublishers := publisherSet(defaultPublishers)
 	publishers := publisherSet(authors)
 	c := &http.Client{Timeout: 30 * time.Second}
 
@@ -430,7 +445,6 @@ func main() {
 				if seenID[e.ID] {
 					continue
 				}
-				e.Official = true
 				seenID[e.ID] = true
 				entries = append(entries, e)
 				added++
@@ -449,7 +463,6 @@ func main() {
 					if seenID[e.ID] {
 						continue
 					}
-					e.Official = true
 					seenID[e.ID] = true
 					entries = append(entries, e)
 					added++
@@ -483,8 +496,8 @@ func main() {
 					continue
 				}
 				e.ID = id
-				e.Official = publishers[strings.ToLower(strings.SplitN(id, "/", 2)[0])]
 			}
+			e.Official = officialPublishers[strings.ToLower(strings.SplitN(id, "/", 2)[0])]
 			entries = append(entries, e)
 		}
 		fmt.Printf("only 模式：%d 个指定仓库\n", len(entries))
@@ -541,11 +554,19 @@ func main() {
 	seen := 0
 
 	for _, e := range entries {
+		slash := strings.IndexByte(e.ID, '/')
+		if slash < 1 {
+			continue
+		}
+		e.Official = officialPublishers[strings.ToLower(e.ID[:slash])]
+		if !e.Official {
+			continue
+		}
 		if !*all && seen >= *limit && *only == "" {
 			break
 		}
-		name := e.ID[strings.IndexByte(e.ID, '/')+1:]
-		if *only == "" && (skipRe.MatchString(name) || skipOrg[strings.ToLower(e.ID[:strings.IndexByte(e.ID, '/')])]) {
+		name := e.ID[slash+1:]
+		if *only == "" && (skipRe.MatchString(name) || skipOrg[strings.ToLower(e.ID[:slash])]) {
 			continue
 		}
 		if *minYear > 0 && len(e.CreatedAt) >= 4 {
@@ -581,7 +602,8 @@ func main() {
 	fresh := len(models)
 	models, carried := mergeModels(models, old)
 	sort.Slice(models, func(i, j int) bool {
-		pi, pj := packagedRe.MatchString(models[i].Name), packagedRe.MatchString(models[j].Name)
+		pi := models[i].NativeQuant != "" && models[i].NativeQuant != "fp16" || packagedRe.MatchString(models[i].Name)
+		pj := models[j].NativeQuant != "" && models[j].NativeQuant != "fp16" || packagedRe.MatchString(models[j].Name)
 		if pi != pj {
 			return !pi
 		}
@@ -632,7 +654,7 @@ func mergeModels(fresh, old []outModel) ([]outModel, int) {
 func keepPublishers(models []outModel, publishers map[string]bool) []outModel {
 	kept := models[:0]
 	for _, m := range models {
-		if publishers[strings.ToLower(m.Org)] {
+		if publishers[strings.ToLower(m.Org)] && !skipRe.MatchString(m.Name) {
 			m.Official = true
 			kept = append(kept, m)
 		}
@@ -727,8 +749,11 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 			localLayers -= cfg.Layers / cfg.SlidingWindowPattern
 		}
 	}
+	kvLayers = min(kvLayers, cfg.Layers)
+	localLayers = min(localLayers, kvLayers)
 	window := cfg.SlidingWindow
-	if localLayers == 0 {
+	if localLayers == 0 || window <= 0 {
+		localLayers = 0
 		window = 0
 	}
 	stateMB := 0.0
@@ -776,18 +801,35 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 		}
 	}
 	nativeQuant, bytesPer := "fp16", 2.0
-	if cfg.QuantConfig != nil {
-		switch strings.ToLower(cfg.QuantConfig.Method) {
-		case "mxfp4":
+	quantStorage := false
+	if qc := cfg.QuantConfig; qc != nil {
+		format := strings.ToLower(qc.Method + " " + qc.Format)
+		quantStorage = qc.Format != "" || len(qc.ConfigGroups) > 0
+		bits, weightType := 0, ""
+		for _, group := range qc.ConfigGroups {
+			format += " " + strings.ToLower(group.Format)
+			if group.Weights.NumBits > 0 {
+				bits, weightType = group.Weights.NumBits, strings.ToLower(group.Weights.Type)
+			}
+		}
+		switch {
+		case strings.Contains(format, "mxfp4"):
 			nativeQuant, bytesPer = "mxfp4", 0.5
-		case "fp4", "nvfp4":
+		case strings.Contains(format, "nvfp4") || strings.Contains(format, "fp4"):
 			nativeQuant, bytesPer = "fp4", 0.5
-		case "fp8":
+		case strings.Contains(format, "fp8"):
 			nativeQuant, bytesPer = "fp8", 1
-		case "int8", "w8a8", "int8_quanto":
-			nativeQuant, bytesPer = "int8", 1
-		case "compressed-tensors":
-			nativeQuant, bytesPer = "compressed", 1
+		case bits > 0 && bits <= 4 && weightType == "float":
+			nativeQuant, bytesPer = "fp4", 0.5
+		case bits > 0 && bits <= 4:
+			nativeQuant, bytesPer = "int4", 0.55
+		case bits > 0 && bits <= 8:
+			nativeQuant, bytesPer = "int8", 1.05
+		case strings.Contains(format, "int8") || strings.Contains(format, "w8a8"):
+			nativeQuant, bytesPer = "int8", 1.05
+		case strings.Contains(format, "awq") || strings.Contains(format, "gptq") || strings.Contains(format, "int4"):
+			nativeQuant, bytesPer = "int4", 0.55
+			quantStorage = true
 		}
 	}
 	var params float64
@@ -809,9 +851,9 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 		return m, false, "参数量越界或未知"
 	}
 	params = math.Round(params*10) / 10
-	// 配置里的 quantization_config 可能只描述运行时能力而非仓库存储格式。
-	// safetensors payload / 参数量可直接判定实际位宽族，避免把 BF16 权重当 FP8。
-	if checkpointGB > 0 {
+	// 只有包含具体打包格式/分组的量化配置能证明仓库存储格式；否则 payload/参数量优先，
+	// 避免把仅声明运行时能力的 BF16 权重误标为 FP8。
+	if checkpointGB > 0 && !quantStorage {
 		bpp := checkpointGB / params
 		switch {
 		case bpp >= 1.45:
@@ -955,6 +997,9 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 		architecture = e.Config.Architectures[0]
 	}
 	dtype := cfg.TorchDType
+	if dtype == "" {
+		dtype = cfg.DType
+	}
 	if dtype == "" && e.Safetensors != nil {
 		var largest int64
 		for stored, count := range e.Safetensors.Parameters {

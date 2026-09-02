@@ -149,7 +149,7 @@ func TestPlanner(t *testing.T) {
 	}
 }
 
-// 备选列表按（硬件×卡数）去重，不出现同卡变体重复行，条数上限 20
+// 备选列表按（硬件×卡数）去重，不出现同卡变体重复行，条数上限 200
 func TestPlannerDedup(t *testing.T) {
 	hws := []HW{hw4090, h200, b200, hw("a100", 80, 2039), hw("mi300x", 192, 5300)}
 	for _, obj := range []string{"", "cost", "latency", "avail"} {
@@ -185,50 +185,53 @@ func TestDefaultEquivalence(t *testing.T) {
 	}
 }
 
-// 推测解码：DFlash 单流大幅加速；EAGLE-3 高并发衰减可反噬；none 恒 1
+// 推测方法的场景公式可计算，但没有同模型、同 workload 的实测 τ/开销时不得改变结果。
 func TestSpecGain(t *testing.T) {
 	if g := SpecByID("none").gain(1); g != 1 {
 		t.Errorf("none gain 应为 1，得 %.2f", g)
 	}
 	if g := SpecByID("dflash").gain(1); g < 4 || g > 6 {
-		t.Errorf("dflash b=1 净加速应在 4~6×（论文均值 4.9×），得 %.2f", g)
-	}
-	d32 := SpecByID("dflash").gain(32)
-	if d32 < 2 || d32 > 4 {
-		t.Errorf("dflash b=32 应仍有 2~4×（实测 2.8×），得 %.2f", d32)
+		t.Errorf("dflash 场景公式 b=1 得 %.2f", g)
 	}
 	e32 := SpecByID("eagle3").gain(32)
 	if e32 >= 1.0 {
-		t.Errorf("eagle3 b=32 应反噬 <1（实测 0.5×），得 %.2f", e32)
+		t.Errorf("eagle3 高并发场景应允许反噬，得 %.2f", e32)
 	}
-	p1 := Throughput(hw4090, qwen7b, QuantByID("int4"), 4096, 1, 1, Opts{Spec: "eagle3"})
-	p0 := Throughput(hw4090, qwen7b, QuantByID("int4"), 4096, 1, 1, Opts{})
-	if p1.SingleTPS < p0.SingleTPS*1.5 {
-		t.Errorf("eagle3 单流应显著加速: %.1f vs %.1f", p1.SingleTPS, p0.SingleTPS)
+	base := Throughput(hw4090, qwen7b, QuantByID("int4"), 4096, 1, 1, Opts{})
+	uncalibrated := Throughput(hw4090, qwen7b, QuantByID("int4"), 4096, 1, 1, Opts{Spec: "eagle3"})
+	if uncalibrated.SingleTPS != base.SingleTPS || uncalibrated.SpecApplied {
+		t.Errorf("未校准推测解码不得套默认倍率: %.1f vs %.1f", uncalibrated.SingleTPS, base.SingleTPS)
+	}
+	calibrated := Throughput(hw4090, qwen7b, QuantByID("int4"), 4096, 1, 1, Opts{Spec: "eagle3", SpecTau: 2.8, SpecOvh: 0.15})
+	if calibrated.SingleTPS <= base.SingleTPS || !calibrated.SpecApplied {
+		t.Errorf("提供实测 τ/开销后应应用场景增益: %.1f vs %.1f", calibrated.SingleTPS, base.SingleTPS)
 	}
 }
 
-// KV 量化：容量按格式压缩；只有受支持的硬件/引擎组合才计读取提速。
+// KV 量化只有硬件与引擎路径同时受支持时才改变容量和读取量。
 func TestKVQuant(t *testing.T) {
 	m0 := Memory(hw4090, llama70, QuantByID("int4"), 32768, 8, 2, Opts{})
 	m8 := Memory(hw4090, llama70, QuantByID("int4"), 32768, 8, 2, Opts{KVQuant: "fp8"})
 	m4 := Memory(hw4090, llama70, QuantByID("int4"), 32768, 8, 2, Opts{KVQuant: "fp4"})
-	if m8.KV > m0.KV*0.51 || m4.KV > m0.KV*0.29 {
-		t.Errorf("KV 量化压缩不符: fp16 %.2f / fp8 %.2f / fp4 %.2f", m0.KV, m8.KV, m4.KV)
+	if m8.KV > m0.KV*0.51 {
+		t.Errorf("4090+vLLM FP8 KV 应压缩容量: fp16 %.2f / fp8 %.2f", m0.KV, m8.KV)
+	}
+	if m4.KV != m0.KV {
+		t.Errorf("4090+vLLM 不支持 FP4 KV，不得只套容量倍率: fp16 %.2f / fp4 %.2f", m0.KV, m4.KV)
 	}
 	p0 := Throughput(hw4090, llama70, QuantByID("int4"), 32768, 8, 2, Opts{})
 	p8 := Throughput(hw4090, llama70, QuantByID("int4"), 32768, 8, 2, Opts{KVQuant: "fp8"})
 	p4 := Throughput(hw4090, llama70, QuantByID("int4"), 32768, 8, 2, Opts{KVQuant: "fp4"})
-	if p8.AggTPS <= p0.AggTPS {
-		t.Errorf("FP8 KV 长上下文应提升聚合吞吐: %.1f vs %.1f", p8.AggTPS, p0.AggTPS)
+	if p8.AggTPS <= p0.AggTPS || !p8.KVSupported {
+		t.Errorf("受支持 FP8 KV 应降低读取量: %.1f vs %.1f", p8.AggTPS, p0.AggTPS)
 	}
-	if p4.AggTPS != p0.AggTPS {
-		t.Errorf("4090+vLLM 无 FP4 KV fused 路径，不应虚构读取提速: %.1f vs %.1f", p4.AggTPS, p0.AggTPS)
+	if p4.AggTPS != p0.AggTPS || p4.KVSupported {
+		t.Errorf("不支持的 FP4 KV 不得改变结果: %.1f vs %.1f", p4.AggTPS, p0.AggTPS)
 	}
 	s0 := Throughput(b200, llama70, QuantByID("int4"), 32768, 8, 1, Opts{Engine: "sglang"})
 	s4 := Throughput(b200, llama70, QuantByID("int4"), 32768, 8, 1, Opts{Engine: "sglang", KVQuant: "fp4"})
-	if s4.AggTPS <= s0.AggTPS {
-		t.Errorf("B200+SGLang FP4 KV 应降低读取量: %.1f vs %.1f", s4.AggTPS, s0.AggTPS)
+	if s4.AggTPS <= s0.AggTPS || s4.Mem.KV >= s0.Mem.KV || !s4.KVSupported {
+		t.Errorf("B200+SGLang FP4 KV 应同时降低容量与读取量")
 	}
 }
 
@@ -390,14 +393,14 @@ func TestQuantEngineMismatch(t *testing.T) {
 	}
 }
 
-// fit 矩阵只展示 main 列（5 档）
+// fit 矩阵展示所有主档位，包括官方 MXFP4 checkpoint。
 func TestMainQuants(t *testing.T) {
-	if n := len(MainQuants()); n != 5 {
-		t.Errorf("fit 矩阵应为 5 列，得 %d", n)
+	if n := len(MainQuants()); n != 6 {
+		t.Errorf("fit 矩阵应为 6 列，得 %d", n)
 	}
-	rows := FitMatrix(hw4090, []Model{qwen7b}, 1, 8192, 8, Opts{})
-	if len(rows[0].Cells) != 5 {
-		t.Errorf("fit 行应有 5 个单元格，得 %d", len(rows[0].Cells))
+	rows := FitMatrix(h100, []Model{llama8b}, 1, 4096, 1, Opts{})
+	if len(rows[0].Cells) != 6 {
+		t.Errorf("fit 行应有 6 个单元格，得 %d", len(rows[0].Cells))
 	}
 }
 
@@ -457,17 +460,21 @@ func TestHybridStateMemory(t *testing.T) {
 	}
 }
 
-func TestMTPRequiresModelMetadata(t *testing.T) {
+func TestMTPRequiresMetadataAndCalibration(t *testing.T) {
 	base := Throughput(h100, qwen7b, QuantByID("fp16"), 4096, 1, 1, Opts{})
-	off := Throughput(h100, qwen7b, QuantByID("fp16"), 4096, 1, 1, Opts{Spec: "mtp"})
-	if off.SingleTPS != base.SingleTPS {
-		t.Errorf("无 MTP 元数据的模型不应获得加速: %.1f vs %.1f", off.SingleTPS, base.SingleTPS)
+	noMetadata := Throughput(h100, qwen7b, QuantByID("fp16"), 4096, 1, 1, Opts{Spec: "mtp", SpecTau: 1.9, SpecOvh: 0.06})
+	if noMetadata.SingleTPS != base.SingleTPS {
+		t.Errorf("无 MTP 元数据的模型不应获得加速: %.1f vs %.1f", noMetadata.SingleTPS, base.SingleTPS)
 	}
 	m := qwen7b
 	m.MTP = true
-	on := Throughput(h100, m, QuantByID("fp16"), 4096, 1, 1, Opts{Spec: "mtp"})
-	if on.SingleTPS <= base.SingleTPS {
-		t.Errorf("有 MTP 元数据且显式启用时应使用场景增益: %.1f vs %.1f", on.SingleTPS, base.SingleTPS)
+	uncalibrated := Throughput(h100, m, QuantByID("fp16"), 4096, 1, 1, Opts{Spec: "mtp"})
+	if uncalibrated.SingleTPS != base.SingleTPS {
+		t.Errorf("有 MTP 但无实测 τ/开销时不应套倍率")
+	}
+	on := Throughput(h100, m, QuantByID("fp16"), 4096, 1, 1, Opts{Spec: "mtp", SpecTau: 1.9, SpecOvh: 0.06})
+	if on.SingleTPS <= base.SingleTPS || !on.SpecApplied {
+		t.Errorf("元数据和校准齐全时应应用 MTP 场景增益: %.1f vs %.1f", on.SingleTPS, base.SingleTPS)
 	}
 }
 
@@ -519,6 +526,34 @@ func TestCheckpointPayloadOnlyMatchesNativeQuant(t *testing.T) {
 	}
 	if got := (Opts{WeightGB: 7.25}).weightGB(m, QuantByID("fp16")); got != 7.25 {
 		t.Errorf("用户实测权重应优先，得 %.2fGB", got)
+	}
+}
+
+func TestNativeCheckpointLocksWeightQuantization(t *testing.T) {
+	m := llama8b
+	m.NativeQuant, m.CheckpointGB = "fp8", 9.5
+	p := Throughput(h100, m, QuantByID("int4"), 4096, 1, 1, Opts{})
+	if p.QuantID != "fp8" || !p.QuantLocked || p.Mem.Weights != 9.5 {
+		t.Fatalf("预量化 checkpoint 未锁定原生格式: %+v", p)
+	}
+	rows := FitMatrix(h100, []Model{m}, 1, 4096, 1, Opts{})
+	applicable := 0
+	for _, cell := range rows[0].Cells {
+		if cell.Applicable {
+			applicable++
+			if cell.Quant != "fp8" {
+				t.Fatalf("fit 矩阵放行了非原生格式: %+v", cell)
+			}
+		}
+	}
+	if applicable != 1 {
+		t.Fatalf("预量化模型应仅有一个可用权重格式，得 %d", applicable)
+	}
+	plans := Planner([]HW{h100}, m, PlanOpts{TargetTPM: 60, QuantOnly: "int4"}, 4096, 1, Opts{})
+	for _, plan := range plans {
+		if plan.Quant != "fp8" {
+			t.Fatalf("规划器绕过了原生格式锁定: %+v", plan)
+		}
 	}
 }
 
@@ -618,5 +653,23 @@ func TestErlangCAndPlannerLoadMetrics(t *testing.T) {
 			math.IsInf(p.WaitAvgMs, 0) || math.IsInf(p.WaitP95Ms, 0) {
 			t.Errorf("规划负载指标必须稳定且自洽: %+v", p)
 		}
+	}
+}
+
+func TestCatalogLoadersRejectConflictingMetadata(t *testing.T) {
+	_, err := LoadModels([]byte(`[{"id":"bad","name":"Bad","org":"x","params":2,"active":3,"layers":1,"hidden":1,"kvt":"gqa","kvh":1,"dim":1,"ctx":1}]`))
+	if err == nil {
+		t.Fatal("active > total parameters must fail catalog loading")
+	}
+	_, err = LoadModels([]byte(`[{"id":"bad","name":"Bad","org":"x","params":3,"active":2,"layers":1,"hidden":1,"kvt":"gqa","kvh":1,"dim":1,"ctx":1,"native_quant":"compressed"}]`))
+	if err == nil {
+		t.Fatal("unknown native quant must fail catalog loading")
+	}
+	_, err = LoadHW([]byte(`[{"id":"bad","name":"Bad","vendor":"x","vram":1,"bw":0,"tf":1,"prec":["fp16"]}]`))
+	if err == nil {
+		t.Fatal("local hardware without bandwidth must fail catalog loading")
+	}
+	if _, err = LoadHW([]byte(`[{"id":"service","name":"Service","vendor":"x","svc":true}]`)); err != nil {
+		t.Fatalf("API-only hardware is exempt from roofline inputs: %v", err)
 	}
 }

@@ -63,6 +63,7 @@ func TestSkipDerivedInferenceCheckpoints(t *testing.T) {
 		"Model-EAGLE3",
 		"Model-Medusa",
 		"Model-Speculative-Head",
+		"Nemotron-120B-MTPv2",
 	} {
 		if !skipRe.MatchString(name) {
 			t.Errorf("应过滤辅助/衍生 checkpoint %q", name)
@@ -84,6 +85,28 @@ func TestPackagedCheckpointsSortAfterCanonicalModels(t *testing.T) {
 	}
 }
 
+func TestCompressedTensorFormatMapsToExecutableQuant(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/acme/Model-8B/resolve/main/config.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"num_hidden_layers":32,"hidden_size":4096,"num_attention_heads":32,"num_key_value_heads":8,"head_dim":128,"max_position_embeddings":8192,"quantization_config":{"quant_method":"compressed-tensors","format":"mxfp4-pack-quantized","config_groups":{"group_0":{"weights":{"num_bits":4,"type":"float"}}}}}`))
+	})
+	mux.HandleFunc("/acme/Model-8B/resolve/main/model.safetensors.index.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"metadata":{"total_size":12000000000}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	m, ok, why := parseOne(srv.Client(), srv.URL, hfEntry{ID: "acme/Model-8B"}, 1)
+	if !ok {
+		t.Fatalf("parseOne failed: %s", why)
+	}
+	if m.NativeQuant != "mxfp4" || m.CheckpointGB != 12 {
+		t.Fatalf("explicit compressed-tensors storage must beat aggregate payload heuristics: %+v", m)
+	}
+}
+
 func TestOfficialDiscoveryIncludesMultimodalAndDropsCommunityRepos(t *testing.T) {
 	hasMultimodal := false
 	for _, pipeline := range officialPipelines {
@@ -96,8 +119,9 @@ func TestOfficialDiscoveryIncludesMultimodalAndDropsCommunityRepos(t *testing.T)
 	models := []outModel{
 		{ID: "qwen--qwen3.5-35b-a3b", Org: "Qwen"},
 		{ID: "community--qwen3.5-35b-a3b-gguf", Org: "community"},
+		{ID: "nvidia--nemotron-mtpv2", Name: "Nemotron-MTPv2", Org: "nvidia"},
 	}
-	got := keepPublishers(models, publisherSet("Qwen"))
+	got := keepPublishers(models, publisherSet("Qwen,nvidia"))
 	if len(got) != 1 || got[0].Org != "Qwen" || !got[0].Official {
 		t.Fatalf("official cleanup kept the wrong repositories: %+v", got)
 	}

@@ -11,16 +11,16 @@
 <header class="top">
   <div class="brand">
     <svg class="mark" width="22" height="22" viewBox="0 0 22 22" aria-hidden="true">
-      <rect x="1" y="1" width="4" height="4" fill="#3a3d32"/><rect x="9" y="1" width="4" height="4" fill="#3a3d32"/><rect x="17" y="1" width="4" height="4" fill="#3a3d32"/>
-      <rect x="1" y="9" width="4" height="4" fill="#3a3d32"/><rect x="9" y="9" width="4" height="4" fill="#ff5a1f"/><rect x="17" y="9" width="4" height="4" fill="#3a3d32"/>
-      <rect x="1" y="17" width="4" height="4" fill="#3a3d32"/><rect x="9" y="17" width="4" height="4" fill="#3a3d32"/><rect x="17" y="17" width="4" height="4" fill="#3a3d32"/>
+      <rect x="1" y="1" width="4" height="4"/><rect x="9" y="1" width="4" height="4"/><rect x="17" y="1" width="4" height="4"/>
+      <rect x="1" y="9" width="4" height="4"/><rect class="mark-hot" x="9" y="9" width="4" height="4"/><rect x="17" y="9" width="4" height="4"/>
+      <rect x="1" y="17" width="4" height="4"/><rect x="9" y="17" width="4" height="4"/><rect x="17" y="17" width="4" height="4"/>
     </svg>
     <div class="brand-t">
       <h1>推理计算器</h1>
       <span>LLM INFERENCE CALCULATOR</span>
     </div>
   </div>
-  <div class="meta mono" id="dbMeta"></div>
+  <div class="topmeta"><div class="meta mono" id="dbMeta"></div><button type="button" class="theme-btn" id="themeBtn" aria-label="切换深浅配色">深色</button></div>
 </header>
 
 <nav class="tabs" id="tabs">
@@ -31,6 +31,7 @@
   <button data-v="hw">硬件库<small>HARDWARE</small></button>
   <button data-v="models">模型库<small>MODELS</small></button>
   <button data-v="quick">速查<small>CHEAT SHEET</small></button>
+  <button data-v="glossary">术语库<small>GLOSSARY</small></button>
 </nav>
 
 <main>
@@ -65,7 +66,7 @@
     <div class="grp">
       <label class="lab">KV 量化 · KV CACHE</label>
       <div class="seg seg3" id="f-kvq">
-        <button data-v="fp16" class="on">FP16</button><button data-v="fp8">FP8</button><button data-v="int4">INT4</button>
+        <button data-v="fp16" class="on">FP16</button><button data-v="fp8">FP8</button><button data-v="fp4">FP4*</button>
       </div>
     </div>
     <div class="grp">
@@ -101,6 +102,7 @@
     <div class="grp">
       <label class="lab">量化 · QUANT</label>
       <div class="cs" id="p-quant"></div>
+      <p class="field-note" id="p-quant-note">基础权重可模拟不同部署量化；预量化检查点会自动锁定。</p>
     </div>
     <div class="grp">
       <label class="lab">上下文 · CONTEXT</label>
@@ -144,7 +146,7 @@
       <div>
         <div class="seclab">显存分解 · MEMORY BREAKDOWN<span id="perfFitState"></span></div>
         <div id="vramBar"></div>
-        <div class="seclab">聚合吞吐 — 并发曲线 · TPS vs BATCH</div>
+        <div class="seclab">部署仿真 · CONCURRENCY SWEEP<span>同一公式逐点重算</span></div>
         <div id="curveBox"></div>
       </div>
       <div>
@@ -213,6 +215,7 @@
     <div class="grp">
       <label class="lab">量化范围 · QUANT</label>
       <div class="cs" id="pl-qonly"></div>
+      <p class="field-note" id="pl-quant-note">基础权重枚举量化方案；预量化检查点只使用自身格式。</p>
     </div>
     <div class="grp">
       <label class="lab">上下文 · CONTEXT</label>
@@ -309,10 +312,26 @@
   </div>
 </section>
 
+<!-- ============ 术语库 ============ -->
+<section class="view" id="v-glossary">
+  <div class="result wide glossary">
+    <div class="library-head">
+      <div>
+        <div class="eyebrow">REFERENCE · 可搜索</div>
+        <h2>推理系统术语库</h2>
+        <p>简写、全称、实际作用，以及它如何影响本计算器。技术名词不再只靠悬浮提示。</p>
+      </div>
+      <input type="text" id="g-q" placeholder="搜索 TP、KV cache、首 token…">
+    </div>
+    <div class="glossary-meta" id="g-meta"></div>
+    <div class="glossary-grid" id="glossaryGrid"></div>
+  </div>
+</section>
+
 </main>
 
 <footer>
-  <span>一阶 roofline 容量筛选；未建模排队分布、算子融合、EP/DP/PP/CP、KV offload、PD 传输和模型特定内核。生产前必须用目标模型、引擎版本和真实流量校准。</span>
+  <span>一阶 roofline 与静态容量仿真；未建模 continuous batching 轨迹、kernel fusion、分层网络拥塞、cache 驱逐和生产尾延迟分布。采购或 SLA 前必须按目标 checkpoint、引擎和真实流量校准。</span>
   <span class="mono" id="footMeta"></span>
 </footer>
 

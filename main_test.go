@@ -56,3 +56,28 @@ func TestFetchedCatalogContainsCurrentOfficialModels(t *testing.T) {
 		}
 	}
 }
+
+func TestEmbeddedHardwareCatalogIsStructurallyValid(t *testing.T) {
+	b, err := embedded.ReadFile("data/hardware.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hardware, err := calc.LoadHW(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hardware) != 121 {
+		t.Fatalf("unexpected hardware catalog size: %d", len(hardware))
+	}
+}
+
+func TestValidStackRejectsUnknownOptions(t *testing.T) {
+	if !validStack("vllm", "none", "fp16") {
+		t.Fatal("known inference stack must be accepted")
+	}
+	for _, bad := range [][3]string{{"bogus", "none", "fp16"}, {"vllm", "bogus", "fp16"}, {"vllm", "none", "int4"}} {
+		if validStack(bad[0], bad[1], bad[2]) {
+			t.Fatalf("unknown inference option must be rejected: %v", bad)
+		}
+	}
+}

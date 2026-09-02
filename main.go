@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 
 	"llmcalc/calc"
@@ -215,6 +216,18 @@ func clampF64(v, lo, hi, def float64) float64 {
 	return v
 }
 
+func validStack(engine, spec, kv string) bool {
+	validEngine := engine == ""
+	for _, e := range calc.Engines {
+		validEngine = validEngine || e.ID == engine
+	}
+	validSpec := spec == ""
+	for _, s := range calc.SpecMethods {
+		validSpec = validSpec || s.ID == spec
+	}
+	return validEngine && validSpec && (kv == "" || kv == "fp16" || kv == "fp8" || kv == "fp4")
+}
+
 // sanitizeCustom 校验/兜底用户输入的假想模型参数，避免除零与离谱值。
 func sanitizeCustom(m *calc.Model) calc.Model {
 	clampF := func(v, lo, hi, def float64) float64 {
@@ -346,9 +359,17 @@ func main() {
 			writeErr(w, 400, err.Error())
 			return
 		}
+		if !validStack(req.Eng, req.Spec, req.KVQ) {
+			writeErr(w, 400, "unknown engine, speculative method, or KV format")
+			return
+		}
 		h := findHW(req.HW)
 		if h == nil {
 			writeErr(w, 404, "unknown hardware")
+			return
+		}
+		if h.Svc {
+			writeErr(w, 422, "hardware has no local roofline inputs")
 			return
 		}
 		n := clamp(req.N, 1, 8, 1)
@@ -364,30 +385,52 @@ func main() {
 			writeErr(w, 400, err.Error())
 			return
 		}
+		if !validStack(req.Eng, req.Spec, req.KVQ) {
+			writeErr(w, 400, "unknown engine, speculative method, or KV format")
+			return
+		}
 		h := findHW(req.HW)
 		m := findModel(req.Model)
 		if h == nil || m == nil {
 			writeErr(w, 404, "unknown hardware or model")
 			return
 		}
+		if h.Svc {
+			writeErr(w, 422, "hardware has no local roofline inputs")
+			return
+		}
 		n := clamp(req.N, 1, 8, 1)
 		ctx := clamp(req.Ctx, 512, 1048576, 8192)
 		batch := clamp(req.Batch, 1, 256, 8)
-		q := calc.QuantByID(req.Quant)
+		if req.Quant == "" {
+			req.Quant = "fp16"
+		}
+		q, ok := calc.LookupQuant(req.Quant)
+		if !ok {
+			writeErr(w, 400, "unknown quantization")
+			return
+		}
 		o := req.Advanced
 		o.Engine, o.Spec, o.KVQuant = req.Eng, req.Spec, req.KVQ
 		o.HitRate = clampF64(req.Hit, 0, 0.9, 0)
 		o.OutLen = clamp(req.OutLen, 16, 8192, 512)
 		p := calc.Throughput(*h, *m, q, ctx, batch, n, o)
-		// 并发扫描曲线
+		// 所有点复用同一计算函数；额外插入当前并发，避免图表与主指标口径分叉。
 		type pt struct {
-			B   int     `json:"b"`
-			Agg float64 `json:"agg"`
+			B      int     `json:"b"`
+			Agg    float64 `json:"agg"`
+			Single float64 `json:"single"`
+			Used   float64 `json:"used"`
+			Cap    float64 `json:"cap"`
+			Fit    bool    `json:"fit"`
 		}
-		var curve []pt
-		for _, b := range []int{1, 2, 4, 8, 16, 32, 64, 128} {
+		batches := append([]int{1, 2, 4, 8, 16, 32, 64, 128}, batch)
+		slices.Sort(batches)
+		batches = slices.Compact(batches)
+		curve := make([]pt, 0, len(batches))
+		for _, b := range batches {
 			pp := calc.Throughput(*h, *m, q, ctx, b, n, o)
-			curve = append(curve, pt{B: b, Agg: pp.AggTPS})
+			curve = append(curve, pt{B: b, Agg: pp.AggTPS, Single: pp.SingleTPS, Used: pp.Mem.Total, Cap: pp.Mem.Cap, Fit: pp.Fit})
 		}
 		writeJSON(w, map[string]any{"perf": p, "curve": curve})
 	})
@@ -397,6 +440,16 @@ func main() {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeErr(w, 400, err.Error())
 			return
+		}
+		if !validStack(req.Eng, req.Spec, req.KVQ) {
+			writeErr(w, 400, "unknown engine, speculative method, or KV format")
+			return
+		}
+		if req.QuantOnly != "" {
+			if _, ok := calc.LookupQuant(req.QuantOnly); !ok {
+				writeErr(w, 400, "unknown quantization")
+				return
+			}
 		}
 		var m calc.Model
 		if req.Custom != nil {

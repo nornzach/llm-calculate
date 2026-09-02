@@ -1,6 +1,6 @@
 # LLM 推理计算器审计报告
 
-**审计日期：** 2026-09-02  
+**审计日期：** 2026-09-03
 **审计范围：** 模型元数据、加速卡、量化、推理引擎、推测解码、缓存、并行部署、显存与性能公式  
 **结论：** 未校准结果适合显存可行性和一阶容量筛选；完整填写同条件实测利用率后可作为部署 what-if。任何口径都不应脱离压测直接用于采购承诺、生产 SLA 或成本预算。
 
@@ -10,13 +10,13 @@
 
 | 部分 | 当前用途 | 可信度边界 |
 |---|---|---|
-| 权重显存 | 初筛/校准 | 优先使用用户实测加载 GB；原生量化匹配时使用 safetensors payload；否则按参数量×格式 bytes/parameter。混合精度、padding 和运行时重排仍需实测 |
-| KV/固定状态显存 | 初筛 | 已区分 MHA/GQA/MLA、全局/滑窗/线性 attention、共享前缀、KV allocator、量化、CP 与 offload；未模拟驱逐、远端容量上限和逐层混合 dtype |
+| 权重显存 | 初筛/校准 | 用户实测加载 GB 优先；带具体存储格式的预量化 checkpoint 自动锁定并使用 safetensors payload；只有基础权重可切换假想量化。混合精度、padding 和运行时重排仍需实测 |
+| KV/固定状态显存 | 初筛 | 已区分 MHA/GQA/MLA、全局/滑窗/线性 attention、共享前缀、KV allocator、量化、CP 与 offload；FP8/FP4 KV 仅在硬件与引擎组合支持时压缩，未模拟驱逐、远端容量上限和逐层混合 dtype |
 | 可部署性 | 静态容量判断 | 引擎预算、运行时、workspace、adapter/draft 均可覆盖；默认预算仍是场景值，不是设备探测 |
-| Decode/Prefill | 一阶 roofline | 已建模 HBM、算力、TP/PP/EP/CP 通信、chunked prefill、媒体 encoder 与 offload；analytical 无统计置信区间 |
+| Decode/Prefill | 一阶 roofline | 已建模 HBM、算力、TP/PP/EP/CP 通信、chunked prefill、媒体 encoder 与 offload；推测解码只在填写同条件实测接受 token/开销后应用，analytical 无统计置信区间 |
 | 校准模式 | 同部署 what-if | 只有 HBM/算力/调度及多卡互联利用率均有实测输入时标为 `calibrated`；校准值不可跨模型、版本和负载迁移 |
 | 规划器 | 候选枚举 | 显示容量、目标到达率、利用率及 M/M/c 平均/p95 排队等待；其泊松到达、指数服务和独立副本假设不等于生产 SLA |
-| 自动采集模型 | 发现与粗筛 | 结构和 payload 覆盖大幅补齐；`conf=fetched` 仍不是官方背书，模型更新后必须重新采集 |
+| 自动采集模型 | 官方发布机构发现与粗筛 | 当前 2,195 条均来自内置已核实发布机构且保留源 URL；`conf=fetched` 描述字段提取方式，不等于逐字段人工核验，模型更新后必须重新采集 |
 | 硬件与价格 | 规格检索 | 关键旗舰逐精度 dense 峰值附一手来源；缺逐精度峰值时明确使用倍率估算，`reported` 和价格不能当采购报价 |
 
 ## 2. 本次全量修正
@@ -25,7 +25,7 @@
 
 采集器现在优先使用 Hugging Face `safetensors.total` 作为与存储 dtype 无关的参数量，并独立保存 safetensors payload。分片仓库读取 index `metadata.total_size`；单文件仓库从 `siblings[].size` 汇总。
 
-存储精度不再盲信 `quantization_config`：payload bytes/parameter ≥1.45 判为 FP16/BF16 族，0.72–1.45 判为 8-bit 族，更低判为 4-bit 族并保留已知 MXFP4/NVFP4 格式。因此 DeepSeek-V3-0324 的 1,369 GB 源仓库被正确识别为 FP16/BF16 payload，而不是因配置能力误标 FP8。
+存储精度优先读取 compressed-tensors/AWQ/GPTQ 的具体 `format`、权重位数和类型，并映射到计算器已有的 INT4/FP4/MXFP4 等执行格式。只有配置未描述具体打包存储时，才用 payload bytes/parameter（≥1.45 为 FP16/BF16 族，0.72–1.45 为 8-bit 族，更低为 4-bit 族）纠正仅声明运行时能力的配置。因此 DeepSeek-V3-0324 的 1,369 GB 源仓库保持 FP16/BF16，而 Gemma 4 QAT W4A16 与 Kimi K3 分别保持 INT4、MXFP4。
 
 MoE active 参数优先级：
 
@@ -39,17 +39,18 @@ MoE active 参数优先级：
 | 模型 | 总参数 | 激活参数 | 路由 | Payload / 原生格式 |
 |---|---:|---:|---|---|
 | OpenAI GPT-OSS-120B | 116.8B | 5.1B 官方 | 128×Top4，36 MoE 层 | 65.25 GB / MXFP4 |
-| Qwen3-30B-A3B-Instruct-2507 | 30.5B | 3.3B 结构推导 | 128×Top8，48 MoE 层 | 61.06 GB / FP16 |
 | DeepSeek-V3-0324 | 684.5B | 37B 官方 | 256×Top8，58 MoE 层 | 1,369.06 GB / FP16 |
-| Kimi-K2-Instruct | 1,026.4B | 32B 官方 | 384×Top8，60 MoE 层 | 1,029.19 GB / FP8 |
+| Kimi K3 | 2,779.9B | 104B | 896×Top16，93 层 | 1,560.86 GB / MXFP4 |
+| Step 3.5 Flash | 199.3B payload 计数 | 11B 官方 | 288×Top8，45 层，MTP-3 | 398.77 GB / FP16 |
+| Gemma 4 12B QAT W4A16 | 13.3B | 13.3B | Dense，48 层 | 10.26 GB / INT4 |
 
-模型字段新增 `model_type`、dense/MoE intermediate、shared experts、MoE layers、MTP heads、multimodal、encoder params、checkpoint GB、native quant 和 source URL。完整刷新结果：
+模型字段包含 `model_type`、dense/MoE intermediate、shared experts、MoE layers、MTP heads、multimodal、encoder params、checkpoint GB、native quant 和 source URL。完整刷新与校验结果：
 
-- 445 条 HF 自动记录；与 62 条精选记录合并后运行时共 507 个模型；
-- 190 条 MoE，`experts/topk` 缺失为 0；
-- 153 条 active 由结构推导，8 条仍为明确标识的启发式；
-- 418 条取得 checkpoint payload，445 条均有源仓库 URL；
-- 97 条 local/sliding attention、18 条 hybrid recurrent state、57 条 MTP、12 条多模态包装模型。
+- 2,195 条 HF 自动记录；与 62 条精选记录合并后运行时共 2,257 个模型，无重复 ID；
+- 502 条 MoE，`experts/topk` 缺失为 0；386 条 active 由结构推导，启发估计为 0；
+- 1,901 条取得 checkpoint payload，2,195 条均有官方发布机构源 URL；
+- 原生格式分布：FP16 1,737、FP8 340、INT4 112、MXFP4 6；
+- 188 条 local/sliding attention、105 条 hybrid recurrent state、184 条 MTP、298 条多模态包装模型。
 
 ### 2.2 显存与 KV
 
@@ -119,11 +120,12 @@ KV 处理：
 | 选择项 | 当前解释 | 边界 |
 |---|---|---|
 | FP8/INT8 W8A8 | 容量约 1 byte/parameter；优先用硬件逐精度峰值 | kernel、scale、未量化层需按 checkpoint/引擎核对 |
-| INT4/AWQ、GGUF、MLX、EXL3 | W4A16/格式级容量与带宽收益 | 不自动套 4×算力 |
+| INT4·W4A16、GGUF、MLX、EXL3 | 4-bit/格式级容量与带宽收益 | 不自动套 4×算力；AWQ/GPTQ/QAT 是该档覆盖的不同存储实现 |
 | NVFP4 | NVIDIA W4A4 路径 | 只有硬件和引擎支持时使用 FP4 峰值 |
-| MXFP4 | MXFP4 权重路径 | 不等于通用 W4A4；GPT-OSS 仍按其实际执行栈校准 |
-| FP8/FP4 KV | 分别按 0.5 / 0.281 容量 | FP4 读取加速仅在 SGLang+FP4 GPU 路径计入 |
-| Adapter/draft/MTP | 显式 GB 加入权重与访存；MTP 需模型元数据 | 推测增益由 `spec_tau/spec_ovh` 实测覆盖，不保证默认倍率 |
+| MXFP4 | MXFP4 权重路径 | 不等于通用 W4A4；GPT-OSS/Kimi K3 仍按实际执行栈校准 |
+| 预量化 checkpoint | 自动锁定 `native_quant`，使用匹配 safetensors payload；矩阵与规划器不枚举虚构格式 | 若要比较重定量化，必须选择对应基础权重记录；可再用该部署的实际 `weight_gb` 覆盖容量 |
+| FP8/FP4 KV | FP8 仅在 FP8 硬件 + vLLM/SGLang/TensorRT-LLM 时压缩；FP4 仅在 FP4 硬件 + SGLang 时压缩 | 不支持时容量与时延均按 FP16，结果返回 `kv_supported=false` |
+| Adapter/draft/MTP | 显式 GB 加入权重与访存；MTP 需模型元数据 | 选中方法只预留内存；仅同时填写 `spec_tau/spec_ovh` 时应用实测推测增益 |
 
 ### 2.6 服务负载
 
@@ -149,10 +151,10 @@ UI 同时显示容量 QPS、目标 QPS、利用率、平均/p95 等待，并明�
 
 ### 3.2 数据完整性
 
-- 自动模型 445 条中，MoE 路由字段已全覆盖；仍有 8 条 active 只能启发式，27 条未取得 payload；
-- 12 条自动多模态记录能识别包装模型，但缺独立 encoder 参数时只计算文本塔并告警；用户可用 `encoder_params`/`media_tokens` 补齐；
-- 121 条硬件中 39 条为 `reported`，7 条缺 TDP，13 条缺参考价；仅 11 条附逐项一手 URL；
-- 37 条宣称 FP8 能力但缺逐卡 FP8 dense 峰值，11 条 FP4、97 条 INT8 记录缺对应逐精度峰值；计算器会标成倍率估算而非伪装成精确规格。
+- 2,195 条自动模型中，502 条 MoE 路由字段已全覆盖；没有启发式 active，294 条未取得 payload；
+- 298 条自动多模态记录能识别包装模型，但缺独立 encoder 参数时只计算文本塔并告警；用户可用 `encoder_params`/`media_tokens` 补齐；
+- 121 条硬件中 82 条为 `official`、39 条为 `reported`，7 条缺 TDP，13 条缺参考价，仅 11 条附逐项一手 URL；
+- 37 条宣称 FP8 能力但缺逐卡 FP8 dense 峰值，11 条 FP4、97 条 INT8 记录缺对应逐精度峰值；计算器会标成倍率估算而非伪装成精确规格。7 条只提供托管服务/整机口径且缺本地 roofline 的硬件会被容量/性能 API 拒绝。
 
 ### 3.3 尚未自动覆盖
 
@@ -204,25 +206,24 @@ UI 同时显示容量 QPS、目标 QPS、利用率、平均/p95 等待，并明�
 
 回归契约覆盖：
 
-- checkpoint payload 只在原生量化匹配时使用，用户实测权重优先；
-- 系统预留不重复扣减，workspace 不再按权重百分比伪造；
-- GQA/MLA TP 复制、PP/CP 分片、EP expert 分片与 TopK All-to-All；
-- 无效拓扑回退、逐精度峰值 exact/estimated 状态；
-- prefix 共享驻留、KV allocator、量化与 offload 的容量/时延交换；
-- chunked prefill 重复读权重、多模态 encoder、adapter/draft；
-- decode HBM/compute/communication/schedule roofline 与 long-context attention；
-- 校准状态、TTFT/TPOT/E2E、req/s、mixed TPM；
-- Erlang-C 解析值、规划容量/目标 QPS/利用率/平均和 p95 等待；
-- collector 的结构 active 推导、payload 位宽判定、单文件 safetensors 汇总。
+- 原生量化 checkpoint 锁定、payload 复用、基础权重自由量化，以及矩阵/规划器不枚举不适用格式；
+- compressed-tensors MXFP4/INT4 存储格式解析、辅助 MTP 仓库过滤、定向刷新不丢失官方来源；
+- 硬件/模型 ID、核心维度、attention 层数、KV 维度和量化枚举加载校验；
+- 系统预留不重复扣减，GQA/MLA TP 复制、PP/CP/EP 分片、prefix 共享、KV allocator 与 offload；
+- KV 格式按硬件/引擎支持门控；不支持的 FP4 请求与 FP16 得到相同容量/吞吐；
+- 推测解码在缺实测 `τ/overhead` 时不改变吞吐，填写后按场景公式应用；MTP 另校验模型元数据；
+- decode/prefill roofline、通信、校准状态、TTFT/TPOT/E2E、req/s、mixed TPM 与 Erlang-C。
 
 最终验证：
 
-- `go test ./...` 全部通过；
-- `node --check web/app.js` 通过，`data/hardware.json` 解析为 121 条；
-- 最终服务加载 121 个硬件、507 个去重模型；
-- 浏览器实测高级面板 22 个字段；输入 TP4、HBM/FLOPs/link/调度校准和 50% KV offload 后，API 返回 `calibrated`、`TP4 · PP1 · EP1 · CP1`、26.84 ms offload、0.671 GB 外部 KV；
-- 自定义 30.5B/3.3B MoE（128×Top8、48 MoE 层、MTP、encoder）规划返回 133 个候选，并显示 M/M/c 容量、目标利用率和平均/p95 等待；
-- 模型库展示 HF 一手链接与 checkpoint GB/native quant，硬件库展示逐精度峰值与已录入的一手链接；全页无横向溢出。
+- `go test ./...`、`node --check web/app.js`、`go build -trimpath -o llmcalc .` 全部通过；
+- 数据校验：121 个唯一硬件、2,257 个唯一模型、零重复 ID、零无效核心/KV/attention/原生量化记录；2,195 条 HF 记录均来自允许的官方发布机构且均有源 URL；
+- API 实测：任意 batch 7 被插入曲线；RTX 4090 + vLLM 请求 FP4 KV 返回 `kv_supported=false`，容量/吞吐与 FP16 相同；未校准 EAGLE-3 保持 482.7 tok/s，填写 `τ=2/overhead=0.2` 后返回 `spec_applied=true` 与 716.7 tok/s；
+- API 实测：请求 Kimi K3 + INT4 自动返回 MXFP4/locked；FitMatrix 只有 MXFP4 可用，Gemma 4 QAT W4A16 规划器忽略冲突的 FP8 过滤并只返回 INT4；
+- API 边界：未知量化返回 400，缺本地 roofline 的 Groq LPU 返回 422；
+- 浏览器实测：默认浅色正文/弱化文字对比度分别 14.91:1、5.13:1，深色切换可恢复；吞吐与显存两张 SVG 使用 API 同一批曲线数据并标记选中 batch/超显存点；
+- 浏览器实测：Kimi K3 自动锁定 MXFP4、Gemma 4 QAT 自动锁定 INT4、基础 Llama 解锁；99 项术语可搜索；390 px 视口吞吐页与术语页均无横向溢出；规划器返回 71 条默认候选。
+- 生产服务 `127.0.0.1:8317` 已加载 121 个硬件/2,257 个模型，Gemma 4 QAT 请求冲突的 FP8 时返回 INT4/locked，batch 7 曲线字段完整。
 
 ## 7. 一手资料
 
@@ -246,22 +247,24 @@ UI 同时显示容量 QPS、目标 QPS、利用率、平均/p95 等待，并明�
 13. [OpenAI GPT-OSS-120B model card](https://huggingface.co/openai/gpt-oss-120b)
 14. [Kimi-K2-Instruct model card](https://huggingface.co/moonshotai/Kimi-K2-Instruct)
 15. [Kimi K3 model card](https://huggingface.co/moonshotai/Kimi-K3)
-16. [Qwen3.8-2.4T-A95B model card](https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B)
-17. [GLM-5 repository](https://github.com/zai-org/GLM-5)
-18. [Mistral Small 4 model card](https://huggingface.co/mistralai/Mistral-Small-4-119B-2603)
+16. [Gemma 4 12B QAT W4A16 model card](https://huggingface.co/google/gemma-4-12B-it-qat-w4a16-ct)
+17. [Step 3.5 Flash model card](https://huggingface.co/stepfun-ai/Step-3.5-Flash)
+18. [Qwen3.8-2.4T-A95B model card](https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B)
+19. [GLM-5 repository](https://github.com/zai-org/GLM-5)
+20. [Mistral Small 4 model card](https://huggingface.co/mistralai/Mistral-Small-4-119B-2603)
 
 ### 量化、缓存与服务
 
-19. [vLLM quantization](https://docs.vllm.ai/en/latest/features/quantization/)
-20. [vLLM quantized KV cache](https://docs.vllm.ai/en/latest/features/quantization/quantized_kvcache/)
-21. [vLLM speculative decoding](https://docs.vllm.ai/en/latest/features/speculative_decoding/)
-22. [vLLM disaggregated prefill](https://docs.vllm.ai/en/latest/features/disagg_prefill/)
-23. [vLLM hybrid attention support](https://vllm.ai/blog/2025-09-11-qwen3-next)
-24. [SGLang documentation index](https://docs.sglang.io/llms.txt)
-25. [SGLang quantized KV cache](https://docs.sglang.ai/advanced_features/quantized_kv_cache.html)
-26. [SGLang production metrics](https://docs.sglang.io/docs/references/production_metrics.md)
-27. [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM)
-28. [llama.cpp quantization](https://github.com/ggml-org/llama.cpp/blob/master/tools/quantize/README.md)
-29. [MLX-LM](https://github.com/ml-explore/mlx-lm)
-30. [ExLlamaV3](https://github.com/turboderp-org/exllamav3)
-31. [LLM inference performance modeling survey](https://arxiv.org/html/2402.16363)
+21. [vLLM quantization](https://docs.vllm.ai/en/latest/features/quantization/)
+22. [vLLM quantized KV cache](https://docs.vllm.ai/en/latest/features/quantization/quantized_kvcache/)
+23. [vLLM speculative decoding](https://docs.vllm.ai/en/latest/features/speculative_decoding/)
+24. [vLLM disaggregated prefill](https://docs.vllm.ai/en/latest/features/disagg_prefill/)
+25. [vLLM hybrid attention support](https://vllm.ai/blog/2025-09-11-qwen3-next)
+26. [SGLang documentation index](https://docs.sglang.io/llms.txt)
+27. [SGLang quantized KV cache](https://docs.sglang.ai/advanced_features/quantized_kv_cache.html)
+28. [SGLang production metrics](https://docs.sglang.io/docs/references/production_metrics.md)
+29. [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM)
+30. [llama.cpp quantization](https://github.com/ggml-org/llama.cpp/blob/master/tools/quantize/README.md)
+31. [MLX-LM](https://github.com/ml-explore/mlx-lm)
+32. [ExLlamaV3](https://github.com/turboderp-org/exllamav3)
+33. [LLM inference performance modeling survey](https://arxiv.org/html/2402.16363)

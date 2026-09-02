@@ -1,20 +1,19 @@
 # llm-calculate
 
-面向大语言模型推理部署的本地计算器。输入模型、硬件、量化、上下文和并发参数，即可完成显存可行性检查、吞吐/时延估算及部署方案枚举。
-
-一个面向本地大模型部署的容量与吞吐计算器。内置 **121 款硬件**、**2,258 个模型**，覆盖显存可行性、吞吐估算、硬件方案搜索、硬件库、模型库和速查表。
+面向大语言模型推理部署的本地容量与吞吐计算器。内置 **121 款硬件**、**2,257 个模型**，覆盖显存可行性、吞吐/时延估算、部署方案搜索、硬件库、模型库、速查表和术语库。
 
 > 这是容量规划和方案初筛工具，不是基准测试。未填写实测校准参数时，性能结果为无统计置信区间的 analytical roofline，不能直接作为采购承诺或生产 SLA。
 
 ## 功能
 
-- **能装什么**：按硬件、卡数、上下文和并发生成 FP16、FP8、INT4、FP4、GGUF 等显存可行性矩阵。
-- **能跑多快**：输出 decode 单流/聚合 TPS、prefill TPS、TTFT、TPOT、请求时延、req/s 和 mixed TPM。
+- **能装什么**：按硬件、卡数、上下文和并发生成 FP16、FP8、INT4、FP4、MXFP4、GGUF 等显存可行性矩阵；预量化 checkpoint 只显示其实际权重格式。
+- **能跑多快**：输出 decode 单流/聚合 TPS、prefill TPS、TTFT、TPOT、请求时延、req/s 和 mixed TPM，并用同一公式绘制并发吞吐与显存曲线。
 - **怎么配**：按目标吞吐、单流下限、成本/时延/可用性目标枚举硬件、量化、卡数和副本数。
 - **并行与通信**：支持 TP、PP、EP、CP；计入 TP collective、MoE TopK All-to-All、CP 和 PP 通信。
-- **缓存与显存**：支持共享前缀、FP8/FP4 KV、allocator 开销、KV offload、adapter/draft、MTP 和媒体 encoder。
-- **高级校准**：可填写实际权重、运行时显存、workspace、HBM/FLOPs/link 利用率及调度开销。
+- **缓存与显存**：支持共享前缀、FP8/FP4 KV、allocator 开销、KV offload、adapter/draft、MTP 和媒体 encoder；KV 压缩只在硬件与引擎都支持时应用。
+- **高级校准**：可填写实际权重、运行时显存、workspace、HBM/FLOPs/link 利用率、调度开销及推测解码实测接受 token/开销。未填写推测校准时不虚构加速收益。
 - **数据可追踪**：模型展示 Hugging Face / ModelScope 来源、架构、dtype、许可证、发布时间和 checkpoint payload；硬件记录逐精度 dense 峰值及厂商来源。
+- **可读界面**：默认浅色主题，可切换深色；99 项中英术语库解释缩写、公式含义和对本计算器的影响。
 
 ## 截图
 
@@ -87,11 +86,11 @@ pkill -TERM -x llmcalc
 
 ### 2. 能跑多快
 
-1. 选择硬件、模型、权重量化、上下文和 batch。
+1. 选择硬件、模型、权重量化、上下文和 batch。预量化 checkpoint 会自动带入并锁定原生权重格式；KV cache 精度仍独立选择。
 2. 查看顶部 TPS、TTFT、TPOT、请求时延、req/s 和瓶颈类型。
 3. 显存条展示权重、KV、框架、workspace、adapter/draft、系统预留和空闲空间。
-4. 并发曲线展示 batch 变化时的聚合 decode TPS；右侧公式追踪列出每一步假设和分项耗时。
-5. 展开“高级参数”可设置 TP/PP/EP/CP、KV offload、prefill chunk 和实测校准值。
+4. 部署仿真分别展示 batch 变化时的聚合/单流 decode TPS 与总显存/物理上限；当前任意 batch 都会成为曲线采样点。右侧公式追踪列出每一步假设和分项耗时。
+5. 展开“高级参数”可设置 TP/PP/EP/CP、KV offload、prefill chunk、推测接受 token/开销和其他实测校准值。
 
 只有以下关键值均已填写时，单卡结果才标记为 `calibrated`：
 
@@ -110,11 +109,12 @@ pkill -TERM -x llmcalc
 
 M/M/c 使用泊松到达、指数服务和独立副本假设，仅用于候选比较；生产尾延迟应使用真实请求 trace 和压测验证。
 
-### 4. 数据库与速查
+### 4. 数据库、速查与术语
 
 - **硬件库**：显存、带宽、互联、支持精度、逐精度峰值、TDP、参考价和来源。
-- **模型库**：总/激活参数、attention/MoE 结构、KV 大小、上下文、checkpoint payload 和来源。
+- **模型库**：总/激活参数、attention/MoE 结构、KV 大小、上下文、checkpoint payload、原生量化和来源。
 - **速查**：按默认服务预算快速查看单卡可承载的 FP16/INT4 模型规模。
+- **术语库**：可搜索 99 项缩写、英文全称、中文解释及其对计算器公式/结果的影响。
 
 ## HTTP API
 
@@ -161,9 +161,9 @@ go run ./scripts/collect -source hf -all -min-year 2023
 go run ./scripts/collect -source modelscope -all -min-year 2023
 ```
 
-结果分别写入 `data/models_hf.json` 和 `data/models_modelscope.json`。同一官方范围内采用 **只增不删**：同 ID 使用新元数据更新，本次解析失败的旧条目原样保留；执行 `-all` 时会清除不在已核实发布机构列表中的自动采集条目。可用 `-orgs Qwen,deepseek-ai,...` 指定发布机构，`-refresh` 强制重拉已有条目。
+结果分别写入 `data/models_hf.json` 和 `data/models_modelscope.json`。同一官方范围内采用 **只增不删**：同 ID 使用新元数据更新，本次解析失败的旧条目原样保留；执行 `-all` 时会清除不在已核实发布机构列表中的自动采集条目。可用 `-orgs Qwen,deepseek-ai,...` 缩小内置已核实发布机构范围，`-refresh` 强制重拉已有条目；非内置机构不会写入默认库。
 
-模型平台包含大量社区改名、剪枝、LoRA、训练中间 checkpoint 和二次量化仓库；这些不代表官方独立推理架构，不进入默认模型库。发布机构自己提供的量化 checkpoint 会保留并标为官方来源。
+采集器优先读取 compressed-tensors/AWQ/GPTQ 等具体存储配置并映射到计算器可执行格式；没有具体打包信息时，才用 safetensors payload/参数量区分 FP16、8-bit 与 4-bit 仓库。模型平台中的社区改名、剪枝、LoRA、训练中间 checkpoint、辅助 MTP 仓库和二次量化仓库不进入默认模型库；发布机构自己的量化 checkpoint 会保留、标记官方来源，并在界面自动锁定其权重格式。
 
 ModelScope OpenAPI 对单个发布机构查询设有 3,000 条上限；超过该上限需要按更细的发布机构范围分批同步。
 
@@ -174,7 +174,7 @@ go test ./...
 node --check web/app.js
 ```
 
-浏览器验证应至少覆盖：显存矩阵、吞吐页、并行/校准参数、KV offload、自定义 MoE 和规划器排队指标。
+浏览器验证应至少覆盖：默认浅色/深色切换、原生量化锁定、显存矩阵、两张部署仿真图、并行/校准参数、KV 支持门控与 offload、自定义 MoE、规划器排队指标、术语搜索和移动端无横向溢出。
 
 ## 项目结构
 

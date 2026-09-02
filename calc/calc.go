@@ -116,9 +116,9 @@ var Quants = []Quant{
 	{ID: "fp16", Name: "FP16/BF16", Bytes: 2.0, Eta: 0.50, W: "16bit", A: "FP16", Mul: 1, Need: "fp16", Fam: "std", Main: true, Note: "基准精度"},
 	{ID: "fp8", Name: "FP8·W8A8", Bytes: 1.0, Eta: 0.62, W: "8bit", A: "FP8", Mul: 2, Need: "fp8", Fam: "std", Main: true, Note: "Ada/Hopper+ 权重激活双 FP8，prefill 2×"},
 	{ID: "int8", Name: "INT8·W8A8", Bytes: 1.05, Eta: 0.60, W: "8bit", A: "INT8", Mul: 2, Need: "int8", Fam: "std", Note: "SmoothQuant 系，Ampere+ INT8 tensor 2×"},
-	{ID: "int4", Name: "INT4·AWQ", Bytes: 0.55, Eta: 0.60, W: "4bit", A: "FP16", Mul: 1, Need: "int4", Fam: "std", Main: true, Note: "W4A16：省显存带宽，Marlin 内核加速"},
+	{ID: "int4", Name: "INT4·W4A16", Bytes: 0.55, Eta: 0.60, W: "4bit", A: "FP16", Mul: 1, Need: "int4", Fam: "std", Main: true, Note: "AWQ/GPTQ/QAT 等权重量化：省显存与带宽；硬件内核决定实际收益"},
 	{ID: "fp4", Name: "FP4·NVFP4", Bytes: 0.55, Eta: 0.62, W: "4bit", A: "FP4", Mul: 4, Need: "fp4", Fam: "std", Main: true, Note: "Blackwell 全 FP4 管线，prefill 4×；其余卡仅省显存"},
-	{ID: "mxfp4", Name: "FP4·MXFP4", Bytes: 0.55, Eta: 0.58, W: "4bit", A: "FP16/MXFP8", Mul: 1, Need: "fp4", Fam: "std", Note: "仅表示 MXFP4 权重；激活精度和未量化张量由检查点决定，不套 W4A4 峰值"},
+	{ID: "mxfp4", Name: "FP4·MXFP4", Bytes: 0.55, Eta: 0.58, W: "4bit", A: "FP16/MXFP8", Mul: 1, Need: "fp4", Fam: "std", Main: true, Note: "MXFP4 权重；激活精度和未量化张量由检查点决定，不等于通用 W4A4"},
 	// ---- GGUF（llama.cpp 生态）----
 	{ID: "q8", Name: "GGUF·Q8_0", Bytes: 1.06, Eta: 0.52, W: "8bit", A: "FP16", Mul: 1, Fam: "gguf", Note: "近无损，CPU/Metal/CUDA 通吃"},
 	{ID: "q6", Name: "GGUF·Q6_K", Bytes: 0.83, Eta: 0.53, W: "6bit", A: "FP16", Mul: 1, Fam: "gguf", Note: "质量/体积甜点"},
@@ -142,13 +142,40 @@ func MainQuants() []Quant {
 	return out
 }
 
-func QuantByID(id string) Quant {
+func LookupQuant(id string) (Quant, bool) {
 	for _, q := range Quants {
 		if q.ID == id {
-			return q
+			return q, true
 		}
 	}
+	return Quant{}, false
+}
+
+func QuantByID(id string) Quant {
+	if q, ok := LookupQuant(id); ok {
+		return q
+	}
 	return Quants[0]
+}
+
+// FixedQuantID 返回预量化仓库锁定的权重格式。FP16/BF16 基础仓库仍可模拟再量化。
+func (m Model) FixedQuantID() string {
+	if m.NativeQuant == "" || m.NativeQuant == "fp16" {
+		return ""
+	}
+	for _, q := range Quants {
+		if q.ID == m.NativeQuant {
+			return q.ID
+		}
+	}
+	return ""
+}
+
+func (m Model) effectiveQuant(q Quant) (Quant, bool) {
+	if id := m.FixedQuantID(); id != "" {
+		return QuantByID(id), true
+	}
+	return q, false
 }
 
 // ---------- 推理栈：框架 / 推测解码 / KV 量化 / 缓存 ----------
@@ -371,45 +398,90 @@ func (o Opts) norm() Opts {
 	return o
 }
 
-// kvMemF KV cache 量化对逐 token KV 容量的压缩比。FP4 block16 按
-// SGLang 文档的 3.56× BF16 token 容量折算；线性注意力 state 不随之量化。
-func (o Opts) kvMemF() float64 {
+// kvSupported 只接受当前计算器明确建模的运行时路径；不把“能存更小”
+// 与“所选引擎能执行该 KV 格式”混为一谈。
+func (o Opts) kvSupported(h HW, eng Engine) bool {
+	switch o.KVQuant {
+	case "", "fp16":
+		return true
+	case "fp8":
+		return precHas(h, "fp8") && (eng.ID == "vllm" || eng.ID == "sglang" || eng.ID == "trtllm")
+	case "fp4":
+		return precHas(h, "fp4") && eng.ID == "sglang"
+	default:
+		return false
+	}
+}
+
+// kvMemF 返回可执行 KV 格式的容量比；不支持的组合按 FP16 保守计算。
+func (o Opts) kvMemF(h HW, eng Engine) float64 {
+	if !o.kvSupported(h, eng) {
+		return 1
+	}
 	switch o.KVQuant {
 	case "fp8":
 		return 0.5
 	case "fp4":
 		return 1 / 3.56
 	default:
-		return 1.0
+		return 1
 	}
 }
 
 func (o Opts) kvReadF(h HW, eng Engine) float64 {
-	switch o.KVQuant {
-	case "fp8":
-		if precHas(h, "fp8") {
-			return 0.5
-		}
-	case "fp4":
-		// 当前一手文档明确的 fused FP4 KV 路径是 SGLang + FP4 GPU。
-		if eng.ID == "sglang" && precHas(h, "fp4") {
-			return 1 / 3.56
-		}
-	}
-	return 1
+	return o.kvMemF(h, eng)
 }
 
 // LoadHW / LoadModels 解析嵌入的 JSON 数据。
 func LoadHW(b []byte) ([]HW, error) {
 	var v []HW
-	err := json.Unmarshal(b, &v)
-	return v, err
+	if err := json.Unmarshal(b, &v); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(v))
+	for _, h := range v {
+		if h.ID == "" || h.Name == "" || h.Vendor == "" || seen[h.ID] {
+			return nil, fmt.Errorf("invalid or duplicate hardware %q", h.ID)
+		}
+		seen[h.ID] = true
+		if !h.Svc && (h.VRAM <= 0 || h.BW <= 0 || h.TF <= 0 || len(h.Prec) == 0) {
+			return nil, fmt.Errorf("hardware %q lacks roofline inputs", h.ID)
+		}
+	}
+	return v, nil
 }
 
 func LoadModels(b []byte) ([]Model, error) {
 	var v []Model
-	err := json.Unmarshal(b, &v)
-	return v, err
+	if err := json.Unmarshal(b, &v); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(v))
+	for _, m := range v {
+		if m.ID == "" || m.Name == "" || m.Org == "" || seen[m.ID] {
+			return nil, fmt.Errorf("invalid or duplicate model %q", m.ID)
+		}
+		seen[m.ID] = true
+		if m.Params <= 0 || m.Active <= 0 || m.Active > m.Params || m.Layers <= 0 || m.Hidden <= 0 || m.Ctx <= 0 {
+			return nil, fmt.Errorf("model %q has invalid core dimensions", m.ID)
+		}
+		if (m.KVT == "mla" && m.MLA <= 0) ||
+			((m.KVT == "mha" || m.KVT == "gqa") && (m.KVH <= 0 || m.Dim <= 0)) {
+			return nil, fmt.Errorf("model %q has invalid KV dimensions", m.ID)
+		}
+		if m.KVT != "mha" && m.KVT != "gqa" && m.KVT != "mla" {
+			return nil, fmt.Errorf("model %q has unknown attention type %q", m.ID, m.KVT)
+		}
+		if m.KVLayers > m.Layers || m.LocalLayers > m.kvLayers() || (m.LocalLayers > 0 && m.Window <= 0) {
+			return nil, fmt.Errorf("model %q has invalid attention layers", m.ID)
+		}
+		if m.NativeQuant != "" {
+			if _, ok := LookupQuant(m.NativeQuant); !ok {
+				return nil, fmt.Errorf("model %q has unknown native quant %q", m.ID, m.NativeQuant)
+			}
+		}
+	}
+	return v, nil
 }
 
 // ---------- 基础量 ----------
@@ -679,6 +751,7 @@ type MemDetail struct {
 
 func Memory(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) MemDetail {
 	o = o.norm()
+	q, _ = m.effectiveQuant(q)
 	eng := resolveEngine(o.Engine, h, q)
 	t := o.topologyFor(m, cards)
 	spec := SpecByID(o.Spec)
@@ -694,7 +767,7 @@ func Memory(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) MemDetail {
 		textWeight*(parts.baseTotal/math.Max(textParams, 1e-9)/float64(t.tp*t.pp)+
 			parts.expertTotal/math.Max(textParams, 1e-9)/float64(t.tp*t.ep*t.pp))
 
-	kvRaw := m.KVBatchBytes(ctx, batch, o.HitRate) / 1e9 * o.kvMemF() * o.KVOverhead *
+	kvRaw := m.KVBatchBytes(ctx, batch, o.HitRate) / 1e9 * o.kvMemF(h, eng) * o.KVOverhead *
 		m.kvRankFactor(t.tp) / float64(t.pp*t.cp)
 	offloadedKV := kvRaw * o.KVOffload
 	state := m.StateMB / 1000 * float64(batch) / float64(t.tp*t.pp)
@@ -741,6 +814,10 @@ type Perf struct {
 	ReqMs           float64    `json:"req_ms"` // 单请求时延（TTFT + (outlen-1)×TPOT）
 	MaxBatch        int        `json:"max_batch"`
 	Accel           bool       `json:"accel"`
+	QuantID         string     `json:"quant"`
+	QuantLocked     bool       `json:"quant_locked"`
+	KVSupported     bool       `json:"kv_supported"`
+	SpecApplied     bool       `json:"spec_applied"`
 	EngName         string     `json:"eng_name"`
 	EngOK           bool       `json:"eng_ok"` // 框架是否原生支持该硬件
 	SpecName        string     `json:"spec_name"`
@@ -837,15 +914,18 @@ func activeWeightRead(m Model, batch int) float64 {
 // Throughput 计算 decode/prefill 的一阶 roofline 容量；cards 由 TP×PP×EP×CP 分解。
 func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	o = o.norm()
+	q, quantLocked := m.effectiveQuant(q)
 	eng := resolveEngine(o.Engine, h, q)
 	spec := SpecByID(o.Spec)
 	t := o.topologyFor(m, cards)
-	kvmf, kvrf := o.kvMemF(), o.kvReadF(h, eng)
+	kvmf, kvrf := o.kvMemF(h, eng), o.kvReadF(h, eng)
 	mem := Memory(h, m, q, ctx, batch, cards, o)
 	topologyOK := t.valid
 	p := Perf{
-		Fit: mem.Fit, Mem: mem, Accel: h.Accel(q), EngName: eng.Name, EngOK: eng.EngineOK(h),
-		SpecName: spec.Name, PeakTF: h.PeakTF(q), PeakExact: h.peakExact(q),
+		Fit: mem.Fit, Mem: mem, QuantID: q.ID, QuantLocked: quantLocked,
+		KVSupported: o.kvSupported(h, eng), Accel: h.Accel(q),
+		EngName: eng.Name, EngOK: eng.EngineOK(h), SpecName: spec.Name,
+		PeakTF: h.PeakTF(q), PeakExact: h.peakExact(q),
 		Accuracy: "analytical", Topology: t.String(), TopologyOK: topologyOK,
 	}
 	if o.BWUtil > 0 && o.FlopsUtil > 0 && o.ScheduleMS > 0 && (cards == 1 || o.LinkUtil > 0) {
@@ -931,10 +1011,13 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 		specScenario.Ovh = o.SpecOvh
 	}
 	g := specScenario.gain(batch)
-	specOK := spec.ID != "mtp" || m.MTP || m.MTPHeads > 0
+	modelSpecOK := spec.ID != "mtp" || m.MTP || m.MTPHeads > 0
+	specCalibrated := o.SpecTau > 0 && o.SpecOvh > 0
+	specOK := spec.ID == "none" || (modelSpecOK && specCalibrated)
 	if !specOK {
 		g = 1
 	}
+	p.SpecApplied = spec.ID != "none" && specOK
 	single := 1000 / tStep * g
 	agg := float64(batch) * 1000 / tStep * g
 
@@ -1048,8 +1131,10 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	}
 	if spec.ID != "none" {
 		note := specNote(specScenario, batch)
-		if !specOK {
+		if !modelSpecOK {
 			note = "⚠ 模型没有 MTP 头元数据，本次不应用加速"
+		} else if !specCalibrated {
+			note = "⚠ 未同时填写实测接受 token τ 与 draft/verify 开销，本次不应用加速"
 		}
 		p.Trace = append(p.Trace,
 			tr("推测解码", fmt.Sprintf("%s ×%.2f", spec.Name, g), note),
@@ -1139,7 +1224,7 @@ func kvNote(m Model, ctx, batch int, t topology, o Opts, readF float64) string {
 		base += fmt.Sprintf("；GPU 保留 %.0f%%", (1-o.KVOffload)*100)
 	}
 	if o.KVQuant != "fp16" && readF == 1 {
-		base += "；当前硬件/引擎未计读取加速"
+		base += "；⚠ 当前硬件/引擎不支持该 KV 格式，容量与读取均按 FP16"
 	}
 	return base
 }
@@ -1221,10 +1306,11 @@ func round2(v float64) float64 {
 // ---------- 模式 1：能装什么 ----------
 
 type FitCell struct {
-	Quant string  `json:"quant"`
-	Fit   int     `json:"fit"` // 0=❌ 1=⚠️ 2=✅
-	TPS   float64 `json:"tps"`
-	Accel bool    `json:"accel"`
+	Quant      string  `json:"quant"`
+	Fit        int     `json:"fit"` // 0=❌ 1=⚠️ 2=✅
+	TPS        float64 `json:"tps"`
+	Accel      bool    `json:"accel"`
+	Applicable bool    `json:"applicable"`
 }
 
 type FitRow struct {
@@ -1237,6 +1323,10 @@ func FitMatrix(h HW, models []Model, n, ctx, batch int, o Opts) []FitRow {
 	for _, m := range models {
 		row := FitRow{Model: m}
 		for _, q := range MainQuants() {
+			if fixed := m.FixedQuantID(); fixed != "" && fixed != q.ID {
+				row.Cells = append(row.Cells, FitCell{Quant: q.ID})
+				continue
+			}
 			mem := Memory(h, m, q, ctx, batch, n, o)
 			st := 0
 			if mem.Fit && mem.HeadPct > 0.10 {
@@ -1248,7 +1338,7 @@ func FitMatrix(h HW, models []Model, n, ctx, batch int, o Opts) []FitRow {
 			if st > 0 {
 				tps = Throughput(h, m, q, ctx, batch, n, o).SingleTPS
 			}
-			row.Cells = append(row.Cells, FitCell{Quant: q.ID, Fit: st, TPS: tps, Accel: h.Accel(q)})
+			row.Cells = append(row.Cells, FitCell{Quant: q.ID, Fit: st, TPS: tps, Accel: h.Accel(q), Applicable: true})
 		}
 		rows = append(rows, row)
 	}
@@ -1310,7 +1400,9 @@ func Planner(hws []HW, m Model, po PlanOpts, ctx, conc int, st Opts) []Plan {
 	}
 	st.OutLen = po.OutLen
 	quants := Quants
-	if po.QuantOnly != "" {
+	if fixed := m.FixedQuantID(); fixed != "" {
+		quants = []Quant{QuantByID(fixed)}
+	} else if po.QuantOnly != "" {
 		quants = nil
 		for _, q := range Quants {
 			if q.ID == po.QuantOnly {
@@ -1415,14 +1507,14 @@ func Planner(hws []HW, m Model, po PlanOpts, ctx, conc int, st Opts) []Plan {
 				if m.Ctx > 0 && ctx > m.Ctx {
 					p.Warn = joinWarn(p.Warn, fmt.Sprintf("超模型原生上下文（%dK>%dK），需 YaRN/RoPE 外推", ctx/1024, m.Ctx/1024))
 				}
-				if st.KVQuant == "fp8" && !precHas(h, "fp8") {
-					p.Warn = joinWarn(p.Warn, "该卡无 FP8 硬件路径，KV 量化只按容量收益，未计读取加速")
+				if st.KVQuant != "fp16" && !st.kvSupported(h, eng) {
+					p.Warn = joinWarn(p.Warn, "所选硬件/引擎不支持该 KV 格式，容量与读取均按 FP16")
 				}
-				if st.KVQuant == "fp4" && (eng.ID != "sglang" || !precHas(h, "fp4")) {
-					p.Warn = joinWarn(p.Warn, "FP4 KV 当前仅按 SGLang fused FP4 路径建模；此组合未计读取加速")
-				}
-				if st.Spec == "mtp" && !m.MTP {
+				if st.Spec == "mtp" && !m.MTP && m.MTPHeads == 0 {
 					p.Warn = joinWarn(p.Warn, "模型无 MTP 头元数据，未应用推测加速")
+				}
+				if st.Spec != "" && st.Spec != "none" && (st.SpecTau <= 0 || st.SpecOvh <= 0) {
+					p.Warn = joinWarn(p.Warn, "未提供实测 τ 与 draft/verify 开销，未应用推测加速")
 				}
 				if ctx >= 32768 && n > 1 {
 					p.Warn = joinWarn(p.Warn, "长上下文多卡应评估 context parallel 或 PD 分离；收益取决于 SLO 与 KV 传输")
