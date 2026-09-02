@@ -130,6 +130,9 @@ func enrichModel(dst *calc.Model, src calc.Model) {
 	if dst.UpdatedAt == "" {
 		dst.UpdatedAt = src.UpdatedAt
 	}
+	if src.Official {
+		dst.Official = true
+	}
 }
 
 func findHW(id string) *calc.HW {

@@ -1,9 +1,8 @@
-// 从 Hugging Face 与 ModelScope 采集 text-generation 模型。
+// 从 Hugging Face 与 ModelScope 采集可部署的大语言模型。
 // 用法：go run ./scripts/collect -source hf|modelscope -all -min-year 2023
 //
-// 策略：机构全量分页 + 全站热门/最新补充 → 过滤量化衍生仓库 →
-// 拉取 config.json 与权重文件清单 → 解析结构、参数量、上下文和 checkpoint。
-// 每次写入都与旧库合并，采集失败或筛选变化不会删除已有模型。
+// -all 只采集已核实发布机构的完整 LLM / 多模态 LLM 仓库，避免社区改名、
+// 剪枝和二次量化淹没官方模型。写入前与同范围旧库合并，并原子替换文件。
 package main
 
 import (
@@ -34,7 +33,12 @@ type hfEntry struct {
 	FileSize       int64    `json:"-"`
 	License        string   `json:"-"`
 	Tasks          []string `json:"-"`
-	Safetensors    *struct {
+	Official       bool     `json:"-"`
+	Config         struct {
+		Architectures []string `json:"architectures"`
+		ModelType     string   `json:"model_type"`
+	} `json:"config"`
+	Safetensors *struct {
 		Total      int64            `json:"total"`
 		Parameters map[string]int64 `json:"parameters"`
 	} `json:"safetensors"`
@@ -173,6 +177,7 @@ type outModel struct {
 	MoE             bool     `json:"moe"`
 	Multimodal      bool     `json:"multimodal,omitempty"`
 	Conf            string   `json:"conf"`
+	Official        bool     `json:"official,omitempty"`
 	Src             string   `json:"src"`
 	CheckpointGB    float64  `json:"checkpoint_gb,omitempty"`
 	NativeQuant     string   `json:"native_quant,omitempty"`
@@ -186,6 +191,7 @@ type outModel struct {
 }
 
 var skipRe = regexp.MustCompile(`(?i)(lora|-ft\b|finetune|checkpoint|merge|obliterat|abliterat|uncensored|heretic|derestricted|dspark|speculat|medusa|eagle)`)
+var packagedRe = regexp.MustCompile(`(?i)(?:^|[-_.])(awq|gptq|gguf|fp8|fp4|nvfp4|int4|int8|bnb|quant(?:ized)?|compressed|pruned?)(?:[-_.]|$)`)
 
 // 搬运/微调/草稿模型组织：全量采集时跳过（-only 点名不受限）
 var skipOrg = map[string]bool{
@@ -223,6 +229,7 @@ var officialActive = map[string]float64{
 	"deepseek-ai/deepseek-r1":             37,
 	"deepseek-ai/deepseek-r1-0528":        37,
 	"deepseek-ai/deepseek-r1-zero":        37,
+	"qwen/qwen3.5-35b-a3b":                3,
 	"qwen/qwen3.8-flash-next":             6,
 	"zai-org/glm-5.3":                     40,
 	"zai-org/glm-5.3-flash":               18,
@@ -278,6 +285,26 @@ func getJSONPage(c *http.Client, url string, v any) (string, error) {
 
 const defaultPublishers = "Qwen,deepseek-ai,moonshotai,zai-org,ZhipuAI,mistralai,MiniMaxAI,MiniMax,nvidia,microsoft,google,openai,stepfun-ai,inclusionAI,internlm,Shanghai_AI_Laboratory,ByteDance-Seed,OpenGVLab,baidu,Tencent-Hunyuan,XiaomiMiMo,CohereLabs,ai21labs,openbmb,OpenBMB,THUDM,01-ai,TeleAI,Tele-AI,arcee-ai,swiss-ai,LiquidAI,ibm-granite,allenai,HuggingFaceTB,tiiuae,ornith-ai,meta-llama,stabilityai,Salesforce,databricks,BAAI,ModelBest"
 
+var officialPipelines = []string{
+	"text-generation",
+	"image-text-to-text",
+	"text2text-generation",
+	"visual-question-answering",
+	"image-to-text",
+	"any-to-any",
+	"audio-text-to-text",
+}
+
+func publisherSet(csv string) map[string]bool {
+	out := map[string]bool{}
+	for _, publisher := range strings.Split(csv, ",") {
+		if publisher = strings.TrimSpace(publisher); publisher != "" {
+			out[strings.ToLower(publisher)] = true
+		}
+	}
+	return out
+}
+
 func fetchModelScopeList(c *http.Client, host, owner, sortBy string, maxItems int) ([]hfEntry, error) {
 	if maxItems > 3000 {
 		maxItems = 3000
@@ -320,10 +347,11 @@ func main() {
 	base := flag.String("base", "", "数据源站点；默认使用官方 Hugging Face 或 ModelScope")
 	limit := flag.Int("limit", 150, "非全量模式最多解析的模型数量")
 	minParams := flag.Float64("min-params", 0.1, "最小参数量（B）")
-	orgs := flag.String("orgs", "", "机构（逗号分隔）；-all 未指定时使用内置主流发布者列表")
+	orgs := flag.String("orgs", "", "已核实发布机构（逗号分隔）；-all 未指定时使用内置列表")
 	only := flag.String("only", "", "只采集指定仓库（逗号分隔完整 id），结果合并进 out 而非覆盖")
 	minYear := flag.Int("min-year", 2023, "只采集该年份及之后创建的模型")
-	all := flag.Bool("all", false, "分页采集机构的全部 text-generation 仓库，不设解析数量上限")
+	all := flag.Bool("all", false, "分页采集已核实机构的全部 LLM / 多模态 LLM 仓库")
+	refresh := flag.Bool("refresh", false, "重新解析已入库模型；默认只解析新增仓库")
 	out := flag.String("out", "", "输出文件；默认按数据源写入 data/models_hf.json 或 data/models_modelscope.json")
 	flag.Parse()
 
@@ -354,6 +382,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "-source 只支持 hf 或 modelscope")
 		os.Exit(2)
 	}
+	authors := strings.TrimSpace(*orgs)
+	if *all && authors == "" {
+		authors = defaultPublishers
+	}
+	publishers := publisherSet(authors)
 	c := &http.Client{Timeout: 30 * time.Second}
 
 	// 两个列表：全站热门（downloads）+ 最新发布（createdAt），合并去重。
@@ -384,9 +417,8 @@ func main() {
 		}
 		fmt.Printf("sort=%s 纳入 %d 条\n", sortBy, added)
 	}
-	// 机构定向：author 维度拉最新发布 + 最热，保证新模型（如下载量还低的
-	// 新一代旗舰）不被全站榜漏掉。
-	fetchAuthor := func(author, sortBy string, n int) {
+	// 机构定向：按任务分页拉取，避免全站社区衍生仓库挤掉官方发布。
+	fetchAuthor := func(author, pipeline, sortBy string, n int) {
 		added := 0
 		if provider == "modelscope" {
 			list, err := fetchModelScopeList(c, host, author, sortBy, n)
@@ -398,12 +430,13 @@ func main() {
 				if seenID[e.ID] {
 					continue
 				}
+				e.Official = true
 				seenID[e.ID] = true
 				entries = append(entries, e)
 				added++
 			}
 		} else {
-			next := fmt.Sprintf("%s/api/models?author=%s&pipeline_tag=text-generation&sort=%s&direction=-1&limit=%d", host, author, sortBy, n)
+			next := fmt.Sprintf("%s/api/models?author=%s&pipeline_tag=%s&sort=%s&direction=-1&limit=%d", host, url.QueryEscape(author), url.QueryEscape(pipeline), sortBy, n)
 			for next != "" {
 				var list []hfEntry
 				var err error
@@ -416,6 +449,7 @@ func main() {
 					if seenID[e.ID] {
 						continue
 					}
+					e.Official = true
 					seenID[e.ID] = true
 					entries = append(entries, e)
 					added++
@@ -425,7 +459,7 @@ func main() {
 				}
 			}
 		}
-		fmt.Printf("author=%s sort=%s 纳入 %d 条\n", author, sortBy, added)
+		fmt.Printf("author=%s task=%s sort=%s 纳入 %d 条\n", author, pipeline, sortBy, added)
 	}
 	// -only 模式：不拉榜单，直接按完整 id 逐个点名采集。
 	if *only != "" {
@@ -449,35 +483,34 @@ func main() {
 					continue
 				}
 				e.ID = id
+				e.Official = publishers[strings.ToLower(strings.SplitN(id, "/", 2)[0])]
 			}
 			entries = append(entries, e)
 		}
 		fmt.Printf("only 模式：%d 个指定仓库\n", len(entries))
 	} else {
-		authors := *orgs
-		if *all && authors == "" {
-			authors = defaultPublishers
-		}
 		if authors != "" {
 			for _, o := range strings.Split(authors, ",") {
 				o = strings.TrimSpace(o)
 				if o == "" {
 					continue
 				}
-				if *all {
-					fetchAuthor(o, "createdAt", 3000)
+				if *all && provider == "hf" {
+					for _, pipeline := range officialPipelines {
+						fetchAuthor(o, pipeline, "createdAt", 1000)
+					}
+				} else if *all {
+					fetchAuthor(o, "text-generation", "createdAt", 3000)
 				} else {
-					fetchAuthor(o, "createdAt", 40)
-					fetchAuthor(o, "downloads", 40)
+					fetchAuthor(o, "text-generation", "createdAt", 40)
+					fetchAuthor(o, "text-generation", "downloads", 40)
 				}
 			}
 		}
-		globalLimit := *limit
-		if *all {
-			globalLimit = 1000
+		if !*all {
+			fetchList("downloads", *limit*3, 0)
+			fetchList("createdAt", *limit*3, 0)
 		}
-		fetchList("downloads", globalLimit*3, 0)
-		fetchList("createdAt", globalLimit*3, 0)
 	}
 	if len(entries) < 20 && *only == "" {
 		fmt.Fprintln(os.Stderr, "列表条目过少（疑似限流），保留旧数据退出")
@@ -485,13 +518,25 @@ func main() {
 	}
 	fmt.Printf("合计 %d 条，开始过滤与解析…\n", len(entries))
 
+	var old []outModel
+	if ob, err := os.ReadFile(*out); err == nil {
+		json.Unmarshal(ob, &old)
+	}
+	if *all && len(publishers) > 0 {
+		old = keepPublishers(old, publishers)
+	}
+	oldIDs := make(map[string]bool, len(old))
+	for _, m := range old {
+		oldIDs[m.ID] = true
+	}
+
 	type result struct {
 		m   outModel
 		ok  bool
 		err string
 	}
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 4)
+	sem := make(chan struct{}, 8)
 	resCh := make(chan result, len(entries))
 	seen := 0
 
@@ -507,6 +552,10 @@ func main() {
 			if y, _ := strconv.Atoi(e.CreatedAt[:4]); y > 0 && y < *minYear {
 				continue
 			}
+		}
+		id := strings.ToLower(strings.ReplaceAll(e.ID, "/", "--"))
+		if *all && !*refresh && oldIDs[id] {
+			continue
 		}
 		seen++
 		wg.Add(1)
@@ -529,13 +578,15 @@ func main() {
 			fail[r.err]++
 		}
 	}
-	var old []outModel
-	if ob, err := os.ReadFile(*out); err == nil {
-		json.Unmarshal(ob, &old)
-	}
 	fresh := len(models)
 	models, carried := mergeModels(models, old)
-	sort.Slice(models, func(i, j int) bool { return models[i].Downloads > models[j].Downloads })
+	sort.Slice(models, func(i, j int) bool {
+		pi, pj := packagedRe.MatchString(models[i].Name), packagedRe.MatchString(models[j].Name)
+		if pi != pj {
+			return !pi
+		}
+		return models[i].Downloads > models[j].Downloads
+	})
 	fmt.Printf("新解析 %d 个，沿用旧数据 %d 个，合计 %d 个\n", fresh, carried, len(models))
 
 	if len(models) < 10 && *only == "" {
@@ -578,6 +629,17 @@ func mergeModels(fresh, old []outModel) ([]outModel, int) {
 	return fresh, carried
 }
 
+func keepPublishers(models []outModel, publishers map[string]bool) []outModel {
+	kept := models[:0]
+	for _, m := range models {
+		if publishers[strings.ToLower(m.Org)] {
+			m.Official = true
+			kept = append(kept, m)
+		}
+	}
+	return kept
+}
+
 func modelScopeCheckpointSize(c *http.Client, host, id string) float64 {
 	var response msFilesResponse
 	filesURL := host + "/api/v1/models/" + id + "/repo/files?Revision=master&Recursive=true"
@@ -618,6 +680,7 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 		// HF 详情接口给出与存储 dtype 无关的 safetensors 精确张量数。
 		var info hfEntry
 		if err := getJSON(c, host+"/api/models/"+e.ID, &info); err == nil {
+			info.Official = e.Official
 			e = info
 		}
 	}
@@ -888,6 +951,25 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 	architecture := ""
 	if len(cfg.Architectures) > 0 {
 		architecture = cfg.Architectures[0]
+	} else if len(e.Config.Architectures) > 0 {
+		architecture = e.Config.Architectures[0]
+	}
+	dtype := cfg.TorchDType
+	if dtype == "" && e.Safetensors != nil {
+		var largest int64
+		for stored, count := range e.Safetensors.Parameters {
+			if count <= largest {
+				continue
+			}
+			switch strings.ToUpper(stored) {
+			case "BF16":
+				dtype, largest = "bfloat16", count
+			case "F16", "FP16":
+				dtype, largest = "float16", count
+			case "F32", "FP32":
+				dtype, largest = "float32", count
+			}
+		}
 	}
 	license := e.License
 	if license == "" {
@@ -901,11 +983,11 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 		ID:   strings.ToLower(strings.ReplaceAll(e.ID, "/", "--")),
 		Name: parts[1], Org: parts[0], Year: year,
 		Params: params, Active: active, Layers: cfg.Layers, Hidden: cfg.Hidden,
-		ModelType: cfg.ModelType, Architecture: architecture, DType: cfg.TorchDType, RopeTheta: cfg.RopeTheta,
+		ModelType: cfg.ModelType, Architecture: architecture, DType: dtype, RopeTheta: cfg.RopeTheta,
 		Intermediate: cfg.Intermediate, MoEIntermediate: cfg.MoeIntermediate,
 		KVT: kvt, KVH: kvh, Dim: dim, MLA: mla, KVLayers: kvLayers, LocalLayers: localLayers, Window: window, StateMB: stateMB,
 		Experts: experts, TopK: topk, SharedExperts: sharedExperts, MoELayers: moeLayers,
-		Ctx: ctx, MoE: moe, Multimodal: multimodal, Sparse: officialSparse[strings.ToLower(e.ID)], Conf: "fetched", Src: provider,
+		Ctx: ctx, MoE: moe, Multimodal: multimodal, Sparse: officialSparse[strings.ToLower(e.ID)], Conf: "fetched", Official: e.Official, Src: provider,
 		MTP: cfg.NextN > 0 || cfg.MTP > 0, MTPHeads: max(cfg.NextN, cfg.MTP),
 		CheckpointGB: checkpointGB, NativeQuant: nativeQuant, SourceURL: sourceURL, Downloads: e.Downloads,
 		License: license, Tasks: tasks, CreatedAt: e.CreatedAt, UpdatedAt: e.LastModified,

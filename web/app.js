@@ -6,6 +6,7 @@ const $$ = (s) => [...document.querySelectorAll(s)];
 let HW = [], MODELS = [], QUANTS = [], ENGINES = [], SPECS = [];
 let modelPage = 0;
 const CS = {}; // 自定义下拉注册表
+const packagedModel = m => /(?:^|[-_.])(awq|gptq|gguf|fp8|fp4|nvfp4|int4|int8|bnb|quant(?:ized)?|compressed|pruned?)(?:[-_.]|$)/i.test(m.name);
 
 const VENDOR = {
   nvidia: "NVIDIA", amd: "AMD", intel: "Intel", apple: "Apple",
@@ -197,7 +198,7 @@ async function boot() {
   };
   // 模型下拉（按机构分组，带搜索）
   const modelGroups = () => {
-    const sorted = [...MODELS].sort((a, b) => a.params - b.params);
+    const sorted = [...MODELS].sort((a, b) => packagedModel(a) - packagedModel(b) || a.params - b.params);
     const g = {};
     sorted.forEach(m => (g[m.org] ??= []).push(m));
     return Object.entries(g).map(([org, list]) => ({
@@ -647,8 +648,8 @@ function renderHWTable() {
 
 function renderModelTable() {
   const q = $("#m-q").value.trim().toLowerCase();
-  const list = [...MODELS].sort((a, b) => a.params - b.params)
-    .filter(m => !q || [m.name, m.org, m.model_type, m.architecture, m.license, m.src].some(v => String(v || "").toLowerCase().includes(q)));
+  const list = [...MODELS].sort((a, b) => packagedModel(a) - packagedModel(b) || a.params - b.params)
+    .filter(m => !q || [m.name, m.org, m.model_type, m.architecture, m.license, m.src, m.official && "官方"].some(v => String(v || "").toLowerCase().includes(q)));
   const pageSize = 100;
   const pages = Math.max(1, Math.ceil(list.length / pageSize));
   modelPage = Math.min(modelPage, pages - 1);
@@ -667,7 +668,7 @@ function renderModelTable() {
       const state = m.state_mb ? ` + ${m.state_mb.toFixed(0)}MB/请求状态` : "";
       const swa = m.local_layers && m.window ? `·SWA${(m.window / 1024).toFixed(0)}K` : "";
       const arch = `${m.moe ? `MoE ${m.experts || "?"}×${m.topk || "?"}` : "Dense"} · ${m.kvt.toUpperCase()}${swa}${m.sparse ? "·DSA" : ""}${m.multimodal ? "·MM" : ""}`;
-      const source = { hf: "Hugging Face", modelscope: "ModelScope" }[m.src] || "人工收录";
+      const source = ({ hf: "Hugging Face", modelscope: "ModelScope" }[m.src] || "人工收录") + (m.official ? " · 官方" : "");
       const metadata = [m.architecture || m.model_type, m.dtype, m.license].filter(Boolean).join(" · ");
       return `<tr><td class="mname">${m.source_url ? `<a href="${m.source_url}" target="_blank" rel="noreferrer">${m.name} ↗</a>` : m.name}${repMark(m.conf)}${m.notes ? `<div class="msub">${m.notes}</div>` : ""}</td>
       <td>${m.org}</td>

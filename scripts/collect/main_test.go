@@ -10,7 +10,7 @@ func TestParseOneUsesTensorCountForQuantizedCheckpoint(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/models/acme/Model-120B-A3B", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"id":"acme/Model-120B-A3B","createdAt":"2026-01-01","safetensors":{"total":120000000000}}`))
+		w.Write([]byte(`{"id":"acme/Model-120B-A3B","createdAt":"2026-01-01","config":{"architectures":["AcmeForConditionalGeneration"]},"safetensors":{"total":120000000000,"parameters":{"BF16":120000000000}}}`))
 	})
 	mux.HandleFunc("/acme/Model-120B-A3B/resolve/main/config.json", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -19,7 +19,7 @@ func TestParseOneUsesTensorCountForQuantizedCheckpoint(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	m, ok, why := parseOne(srv.Client(), srv.URL, hfEntry{ID: "acme/Model-120B-A3B"}, 1)
+	m, ok, why := parseOne(srv.Client(), srv.URL, hfEntry{ID: "acme/Model-120B-A3B", Official: true}, 1)
 	if !ok {
 		t.Fatalf("parseOne failed: %s", why)
 	}
@@ -28,6 +28,9 @@ func TestParseOneUsesTensorCountForQuantizedCheckpoint(t *testing.T) {
 	}
 	if !m.MoE || m.Experts != 64 || m.TopK != 4 {
 		t.Fatalf("MoE routing metadata missing: %+v", m)
+	}
+	if !m.Official || m.Architecture != "AcmeForConditionalGeneration" || m.DType != "bfloat16" {
+		t.Fatalf("official provenance or API metadata was lost: %+v", m)
 	}
 }
 
@@ -67,6 +70,36 @@ func TestSkipDerivedInferenceCheckpoints(t *testing.T) {
 	}
 	if skipRe.MatchString("Qwen3.8-2.4T-A95B") || skipRe.MatchString("Qwen2.5-7B-AWQ") {
 		t.Error("不应过滤正式基础或官方量化模型")
+	}
+}
+
+func TestPackagedCheckpointsSortAfterCanonicalModels(t *testing.T) {
+	for _, name := range []string{"Qwen3.8-27B-FP8", "Qwen2.5-7B-AWQ", "Model-GGUF"} {
+		if !packagedRe.MatchString(name) {
+			t.Errorf("应降低封装量化 checkpoint 的优先级 %q", name)
+		}
+	}
+	if packagedRe.MatchString("Qwen3.8-27B") {
+		t.Error("正式基础模型不应被当作封装量化 checkpoint")
+	}
+}
+
+func TestOfficialDiscoveryIncludesMultimodalAndDropsCommunityRepos(t *testing.T) {
+	hasMultimodal := false
+	for _, pipeline := range officialPipelines {
+		hasMultimodal = hasMultimodal || pipeline == "image-text-to-text"
+	}
+	if !hasMultimodal {
+		t.Fatal("official discovery must include multimodal LLMs")
+	}
+
+	models := []outModel{
+		{ID: "qwen--qwen3.5-35b-a3b", Org: "Qwen"},
+		{ID: "community--qwen3.5-35b-a3b-gguf", Org: "community"},
+	}
+	got := keepPublishers(models, publisherSet("Qwen"))
+	if len(got) != 1 || got[0].Org != "Qwen" || !got[0].Official {
+		t.Fatalf("official cleanup kept the wrong repositories: %+v", got)
 	}
 }
 

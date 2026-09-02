@@ -81,6 +81,7 @@ type Model struct {
 	EncoderParams float64  `json:"encoder_params,omitempty"` // 非自回归视觉/音频 encoder 参数 B
 	Multimodal    bool     `json:"multimodal,omitempty"`
 	Conf          string   `json:"conf"` // official | reported | fetched
+	Official      bool     `json:"official,omitempty"`
 	Src           string   `json:"src,omitempty"`
 	CheckpointGB  float64  `json:"checkpoint_gb,omitempty"` // 原仓库 safetensors payload GB
 	NativeQuant   string   `json:"native_quant,omitempty"`  // 原仓库权重格式

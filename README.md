@@ -2,7 +2,7 @@
 
 面向大语言模型推理部署的本地计算器。输入模型、硬件、量化、上下文和并发参数，即可完成显存可行性检查、吞吐/时延估算及部署方案枚举。
 
-一个面向本地大模型部署的容量与吞吐计算器。内置 **121 款硬件**、**2,288 个模型**，覆盖显存可行性、吞吐估算、硬件方案搜索、硬件库、模型库和速查表。
+一个面向本地大模型部署的容量与吞吐计算器。内置 **121 款硬件**、**2,258 个模型**，覆盖显存可行性、吞吐估算、硬件方案搜索、硬件库、模型库和速查表。
 
 > 这是容量规划和方案初筛工具，不是基准测试。未填写实测校准参数时，性能结果为无统计置信区间的 analytical roofline，不能直接作为采购承诺或生产 SLA。
 
@@ -154,18 +154,18 @@ curl -sS http://localhost:8317/api/perf \
 
 ## 全量同步模型库
 
-采集器同步 Hugging Face 和 ModelScope 的模型详情、架构配置、MoE 路由、上下文、dtype、许可证、发布时间及 safetensors payload。默认覆盖内置主流发布机构，并用全站热门/最新列表补充其他模型：
+采集器同步 Hugging Face 和 ModelScope 的模型详情、架构配置、MoE 路由、上下文、dtype、许可证、发布时间及 safetensors payload。`-all` 只分页扫描内置的已核实发布机构，并覆盖文本、图文、多模态问答和音频文本等 LLM 任务，避免全站社区衍生仓库挤掉官方模型：
 
 ```bash
 go run ./scripts/collect -source hf -all -min-year 2023
 go run ./scripts/collect -source modelscope -all -min-year 2023
 ```
 
-结果分别写入 `data/models_hf.json` 和 `data/models_modelscope.json`。同步采用 **只增不删**：同 ID 使用新元数据更新，本次未返回、被限流或解析失败的旧条目原样保留。可用 `-orgs Qwen,deepseek-ai,...` 指定发布机构。
+结果分别写入 `data/models_hf.json` 和 `data/models_modelscope.json`。同一官方范围内采用 **只增不删**：同 ID 使用新元数据更新，本次解析失败的旧条目原样保留；执行 `-all` 时会清除不在已核实发布机构列表中的自动采集条目。可用 `-orgs Qwen,deepseek-ai,...` 指定发布机构，`-refresh` 强制重拉已有条目。
 
-模型平台包含大量 LoRA、训练中间 checkpoint 和恶意改名衍生仓库；这些不代表独立推理架构，默认过滤。官方量化 checkpoint 会保留并记录原生权重格式。
+模型平台包含大量社区改名、剪枝、LoRA、训练中间 checkpoint 和二次量化仓库；这些不代表官方独立推理架构，不进入默认模型库。发布机构自己提供的量化 checkpoint 会保留并标为官方来源。
 
-ModelScope OpenAPI 对单个全站查询设有 3,000 条上限。因此 `-all` 会完整分页内置发布机构，并叠加全站下载量排序和默认最新排序各 3,000 条；不会把数万条社区改名镜像伪装成独立推理模型。
+ModelScope OpenAPI 对单个发布机构查询设有 3,000 条上限；超过该上限需要按更细的发布机构范围分批同步。
 
 ## 验证
 
