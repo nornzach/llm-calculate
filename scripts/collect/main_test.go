@@ -65,8 +65,8 @@ func TestSkipDerivedInferenceCheckpoints(t *testing.T) {
 			t.Errorf("应过滤辅助/衍生 checkpoint %q", name)
 		}
 	}
-	if skipRe.MatchString("Qwen3.8-2.4T-A95B") {
-		t.Error("不应过滤正式基础模型")
+	if skipRe.MatchString("Qwen3.8-2.4T-A95B") || skipRe.MatchString("Qwen2.5-7B-AWQ") {
+		t.Error("不应过滤正式基础或官方量化模型")
 	}
 }
 
@@ -141,5 +141,51 @@ func TestParseOneCollectsSingleShardPayload(t *testing.T) {
 	}
 	if m.CheckpointGB != 16 || m.NativeQuant != "fp16" {
 		t.Fatalf("单文件 safetensors payload 未采集: %+v", m)
+	}
+}
+
+func TestMergeModelsNeverDeletesOldEntries(t *testing.T) {
+	fresh := []outModel{{ID: "qwen/new", Params: 8}, {ID: "qwen/shared", Params: 14}}
+	old := []outModel{{ID: "qwen/old", Params: 7}, {ID: "qwen/shared", Params: 9}}
+
+	got, carried := mergeModels(fresh, old)
+	if carried != 1 || len(got) != 3 {
+		t.Fatalf("merge must preserve old unique entries: carried=%d models=%+v", carried, got)
+	}
+	for _, m := range got {
+		if m.ID == "qwen/shared" && m.Params != 14 {
+			t.Fatalf("fresh metadata must replace the matching old entry: %+v", m)
+		}
+	}
+}
+
+func TestParseOneCollectsModelScopeMetadata(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/models/acme/MS-7B/resolve/master/config.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"architectures":["AcmeForCausalLM"],"torch_dtype":"bfloat16","model_type":"acme","num_hidden_layers":32,"hidden_size":4096,"intermediate_size":11008,"num_attention_heads":32,"num_key_value_heads":8,"head_dim":128,"max_position_embeddings":32768,"sliding_window":32768,"use_sliding_window":false}`))
+	})
+	mux.HandleFunc("/api/v1/models/acme/MS-7B/repo/files", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"Data":{"Files":[{"Path":"model-1.safetensors","Size":8000000000},{"Path":"model-2.safetensors","Size":6000000000},{"Path":"tokenizer.json","Size":1000}]}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	e := hfEntry{
+		ID: "acme/MS-7B", Provider: "modelscope", ParameterCount: 494_032_768,
+		CreatedAt: "2024-01-02T00:00:00Z", LastModified: "2025-03-04T00:00:00Z",
+		License: "apache-2.0", Tasks: []string{"text-generation"},
+	}
+	m, ok, why := parseOne(srv.Client(), srv.URL, e, 0.1)
+	if !ok {
+		t.Fatalf("parseOne failed: %s", why)
+	}
+	if m.Src != "modelscope" || m.Params != 0.5 || m.CheckpointGB != 14 {
+		t.Fatalf("ModelScope source, rounded params, or payload metadata missing: %+v", m)
+	}
+	if m.Architecture != "AcmeForCausalLM" || m.DType != "bfloat16" || m.License != "apache-2.0" {
+		t.Fatalf("ModelScope inference metadata missing: %+v", m)
+	}
+	if m.LocalLayers != 0 || m.Window != 0 {
+		t.Fatalf("disabled sliding window must not change KV layout: %+v", m)
 	}
 }

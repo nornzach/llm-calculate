@@ -4,6 +4,7 @@ const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
 let HW = [], MODELS = [], QUANTS = [], ENGINES = [], SPECS = [];
+let modelPage = 0;
 const CS = {}; // 自定义下拉注册表
 
 const VENDOR = {
@@ -34,7 +35,7 @@ const fmt = {
 
 function repMark(conf) {
   if (conf === "reported") return ' <sup class="rep" title="公开报道或推算口径">R</sup>';
-  if (conf === "fetched") return ' <sup class="rep" title="HF 自动解析；请查看备注，激活参数可能为启发式估算">F</sup>';
+  if (conf === "fetched") return ' <sup class="rep" title="模型平台自动解析；请查看备注，激活参数可能为结构推导或启发式估算">F</sup>';
   return "";
 }
 
@@ -268,8 +269,8 @@ function wire() {
   bind("#p-n", runPerf); bind("#p-b", runPerf);
   bind("#pl-tpm", runPlan); bind("#pl-c", runPlan);
   $("#hw-q").oninput = renderHWTable;
-  $("#f-q").oninput = renderFitRows;
-  $("#m-q").oninput = renderModelTable;
+  $("#f-q").oninput = () => { fitPage = 0; renderFitRows(); };
+  $("#m-q").oninput = () => { modelPage = 0; renderModelTable(); };
   $("#p-hit").oninput = () => { $("#p-hit-v").textContent = $("#p-hit").value + "%"; runPerf(); };
   $("#pl-hit").oninput = () => { $("#pl-hit-v").textContent = $("#pl-hit").value + "%"; runPlan(); };
   $("#p-outlen").oninput = runPerf;
@@ -304,17 +305,22 @@ async function runFit() {
     `<span class="mono">互联 <b>${LINK[h.link.t] ?? h.link.t}${h.link.b ? " " + h.link.b + " GB/s" : ""}</b></span>` +
     (h.notes ? `<span style="color:var(--faint)">${h.notes}</span>` : "");
 
+  fitPage = 0;
   renderFitRows();
 }
 
-let lastFitRows = [], lastFitCtx = 0;
+let lastFitRows = [], lastFitCtx = 0, fitPage = 0;
 function renderFitRows() {
   const fq = ($("#f-q")?.value || "").trim().toLowerCase();
   const rows = fq ? lastFitRows.filter(r =>
     r.model.name.toLowerCase().includes(fq) || r.model.org.toLowerCase().includes(fq)) : lastFitRows;
+  const pageSize = 100;
+  const pages = Math.max(1, Math.ceil(rows.length / pageSize));
+  fitPage = Math.min(fitPage, pages - 1);
+  const page = rows.slice(fitPage * pageSize, (fitPage + 1) * pageSize);
   const quants = QUANTS.filter(q => q.main).map(q => `<th class="n">${q.name}</th>`).join("");
   let html = `<thead><tr><th>模型</th><th class="n">参数</th><th>架构</th>${quants}</tr></thead><tbody>`;
-  for (const r of rows) {
+  for (const r of page) {
     const m = r.model;
     const cells = r.cells.map(c => {
       if (c.fit === 0) return `<td class="n"><span class="cell no">—</span></td>`;
@@ -330,6 +336,12 @@ function renderFitRows() {
       ${cells}</tr>`;
   }
   $("#fitTable").innerHTML = html + "</tbody>";
+  $("#f-pager").innerHTML =
+    `<button class="minibtn" id="f-pg-prev" ${fitPage === 0 ? "disabled" : ""}>‹ 上一页</button>
+     <span class="mono">第 ${fitPage + 1} / ${pages} 页 · 共 ${rows.length} 条</span>
+     <button class="minibtn" id="f-pg-next" ${fitPage >= pages - 1 ? "disabled" : ""}>下一页 ›</button>`;
+  $("#f-pg-prev").onclick = () => { fitPage--; renderFitRows(); };
+  $("#f-pg-next").onclick = () => { fitPage++; renderFitRows(); };
 }
 
 /* ---------- 模式二：能跑多快 ---------- */
@@ -636,12 +648,16 @@ function renderHWTable() {
 function renderModelTable() {
   const q = $("#m-q").value.trim().toLowerCase();
   const list = [...MODELS].sort((a, b) => a.params - b.params)
-    .filter(m => !q || m.name.toLowerCase().includes(q) || m.org.toLowerCase().includes(q));
+    .filter(m => !q || [m.name, m.org, m.model_type, m.architecture, m.license, m.src].some(v => String(v || "").toLowerCase().includes(q)));
+  const pageSize = 100;
+  const pages = Math.max(1, Math.ceil(list.length / pageSize));
+  modelPage = Math.min(modelPage, pages - 1);
+  const page = list.slice(modelPage * pageSize, (modelPage + 1) * pageSize);
   $("#modelTable").innerHTML =
     `<thead><tr><th>模型</th><th>机构</th><th class="n">发布</th>
      <th class="n">总参数 B</th><th class="n">激活 B</th><th>结构</th>
      <th class="n">层数</th><th class="n">KV 平均 KB/tok</th><th class="n">上下文</th><th>来源 / 检查点</th></tr></thead><tbody>` +
-    list.map(m => {
+    page.map(m => {
       const layers = m.kvlayers || m.layers;
       const layerBytes = m.kvt === "mla" ? m.mla * 2 : 2 * m.kvh * m.dim * 2;
       const retained = m.local_layers && m.window
@@ -651,6 +667,8 @@ function renderModelTable() {
       const state = m.state_mb ? ` + ${m.state_mb.toFixed(0)}MB/请求状态` : "";
       const swa = m.local_layers && m.window ? `·SWA${(m.window / 1024).toFixed(0)}K` : "";
       const arch = `${m.moe ? `MoE ${m.experts || "?"}×${m.topk || "?"}` : "Dense"} · ${m.kvt.toUpperCase()}${swa}${m.sparse ? "·DSA" : ""}${m.multimodal ? "·MM" : ""}`;
+      const source = { hf: "Hugging Face", modelscope: "ModelScope" }[m.src] || "人工收录";
+      const metadata = [m.architecture || m.model_type, m.dtype, m.license].filter(Boolean).join(" · ");
       return `<tr><td class="mname">${m.source_url ? `<a href="${m.source_url}" target="_blank" rel="noreferrer">${m.name} ↗</a>` : m.name}${repMark(m.conf)}${m.notes ? `<div class="msub">${m.notes}</div>` : ""}</td>
       <td>${m.org}</td>
       <td class="n">${m.year}</td>
@@ -660,8 +678,14 @@ function renderModelTable() {
       <td class="n">${m.layers}</td>
       <td class="n">${kv.toFixed(0)}${state ? `<span class="msub">${state}</span>` : ""}</td>
       <td class="n">${(m.ctx / 1024).toFixed(0)}K</td>
-      <td class="dim">${m.src === "hf" ? "HF 采集" : "人工收录"}${m.checkpoint_gb ? `<span class="msub">${m.checkpoint_gb.toFixed(1)} GB · ${(m.native_quant || "?").toUpperCase()}</span>` : `<span class="msub">payload 未获取</span>`}</td>
+      <td class="dim">${source}${m.checkpoint_gb ? `<span class="msub">${m.checkpoint_gb.toFixed(1)} GB · ${(m.native_quant || "?").toUpperCase()}</span>` : `<span class="msub">payload 未获取</span>`}${metadata ? `<span class="msub">${metadata}</span>` : ""}</td>
     </tr>`; }).join("") + "</tbody>";
+  $("#m-pager").innerHTML =
+    `<button class="minibtn" id="m-pg-prev" ${modelPage === 0 ? "disabled" : ""}>‹ 上一页</button>
+     <span class="mono">第 ${modelPage + 1} / ${pages} 页 · 共 ${list.length} 条</span>
+     <button class="minibtn" id="m-pg-next" ${modelPage >= pages - 1 ? "disabled" : ""}>下一页 ›</button>`;
+  $("#m-pg-prev").onclick = () => { modelPage--; renderModelTable(); };
+  $("#m-pg-next").onclick = () => { modelPage++; renderModelTable(); };
 }
 
 function renderQuickTable() {

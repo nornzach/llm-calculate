@@ -51,6 +51,9 @@ type Model struct {
 	Layers          int     `json:"layers"`
 	Hidden          float64 `json:"hidden"`
 	ModelType       string  `json:"model_type,omitempty"`
+	Architecture    string  `json:"architecture,omitempty"`
+	DType           string  `json:"dtype,omitempty"`
+	RopeTheta       float64 `json:"rope_theta,omitempty"`
 	Intermediate    float64 `json:"intermediate,omitempty"`
 	MoEIntermediate float64 `json:"moe_intermediate,omitempty"`
 	KVT             string  `json:"kvt"` // mha | gqa | mla
@@ -72,18 +75,22 @@ type Model struct {
 	MTP           bool `json:"mtp,omitempty"`
 	MTPHeads      int  `json:"mtp_heads,omitempty"`
 	// Sparse：稀疏注意力每个 query 选择的 token 数；0 表示稠密注意力。
-	Sparse        float64 `json:"sparse,omitempty"`
-	Ctx           int     `json:"ctx"`
-	MoE           bool    `json:"moe"`
-	EncoderParams float64 `json:"encoder_params,omitempty"` // 非自回归视觉/音频 encoder 参数 B
-	Multimodal    bool    `json:"multimodal,omitempty"`
-	Conf          string  `json:"conf"` // official | reported | fetched
-	Src           string  `json:"src,omitempty"`
-	CheckpointGB  float64 `json:"checkpoint_gb,omitempty"` // 原仓库 safetensors payload GB
-	NativeQuant   string  `json:"native_quant,omitempty"`  // 原仓库权重格式
-	SourceURL     string  `json:"source_url,omitempty"`
-	Downloads     int64   `json:"downloads,omitempty"`
-	Notes         string  `json:"notes,omitempty"`
+	Sparse        float64  `json:"sparse,omitempty"`
+	Ctx           int      `json:"ctx"`
+	MoE           bool     `json:"moe"`
+	EncoderParams float64  `json:"encoder_params,omitempty"` // 非自回归视觉/音频 encoder 参数 B
+	Multimodal    bool     `json:"multimodal,omitempty"`
+	Conf          string   `json:"conf"` // official | reported | fetched
+	Src           string   `json:"src,omitempty"`
+	CheckpointGB  float64  `json:"checkpoint_gb,omitempty"` // 原仓库 safetensors payload GB
+	NativeQuant   string   `json:"native_quant,omitempty"`  // 原仓库权重格式
+	SourceURL     string   `json:"source_url,omitempty"`
+	Downloads     int64    `json:"downloads,omitempty"`
+	License       string   `json:"license,omitempty"`
+	Tasks         []string `json:"tasks,omitempty"`
+	CreatedAt     string   `json:"created_at,omitempty"`
+	UpdatedAt     string   `json:"updated_at,omitempty"`
+	Notes         string   `json:"notes,omitempty"`
 }
 
 // Quant 权重量化档位。权重精度（W）与计算/激活精度（A）分开标注。

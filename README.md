@@ -2,7 +2,7 @@
 
 面向大语言模型推理部署的本地计算器。输入模型、硬件、量化、上下文和并发参数，即可完成显存可行性检查、吞吐/时延估算及部署方案枚举。
 
-项目使用 Go 标准库实现，前端和基础数据编译进单个二进制，无数据库、Node.js 或运行时第三方依赖。当前数据包含 **121 款硬件**、**507 个去重模型**，覆盖 Dense、MoE、MHA/GQA/MLA、滑动窗口、稀疏注意力和混合线性注意力等结构。
+一个面向本地大模型部署的容量与吞吐计算器。内置 **121 款硬件**、**2,288 个模型**，覆盖显存可行性、吞吐估算、硬件方案搜索、硬件库、模型库和速查表。
 
 > 这是容量规划和方案初筛工具，不是基准测试。未填写实测校准参数时，性能结果为无统计置信区间的 analytical roofline，不能直接作为采购承诺或生产 SLA。
 
@@ -14,7 +14,7 @@
 - **并行与通信**：支持 TP、PP、EP、CP；计入 TP collective、MoE TopK All-to-All、CP 和 PP 通信。
 - **缓存与显存**：支持共享前缀、FP8/FP4 KV、allocator 开销、KV offload、adapter/draft、MTP 和媒体 encoder。
 - **高级校准**：可填写实际权重、运行时显存、workspace、HBM/FLOPs/link 利用率及调度开销。
-- **数据可追踪**：模型展示 Hugging Face 来源和 checkpoint payload，关键硬件记录逐精度 dense 峰值及厂商来源。
+- **数据可追踪**：模型展示 Hugging Face / ModelScope 来源、架构、dtype、许可证、发布时间和 checkpoint payload；硬件记录逐精度 dense 峰值及厂商来源。
 
 ## 截图
 
@@ -62,7 +62,7 @@ go build -trimpath -o llmcalc .
 ./llmcalc -addr :8317
 ```
 
-`web/`、`data/hardware.json`、`data/models.json` 和 `data/models_hf.json` 均内嵌到二进制。若运行目录存在 `data/models_hf.json`，程序会优先读取该文件，便于不重新编译就刷新自动模型库；文件不存在时使用内嵌版本。
+`web/`、`data/hardware.json`、`data/models.json`、`data/models_hf.json` 和 `data/models_modelscope.json` 均内嵌到二进制。若运行目录存在同名数据文件，程序会优先读取磁盘版本，便于不重新编译就刷新模型库；文件不存在时使用内嵌版本。
 
 Linux 后台运行示例：
 
@@ -152,15 +152,20 @@ curl -sS http://localhost:8317/api/perf \
   }'
 ```
 
-## 更新模型库
+## 全量同步模型库
 
-采集器从 Hugging Face 拉取模型详情、配置、路由结构和 safetensors payload：
+采集器同步 Hugging Face 和 ModelScope 的模型详情、架构配置、MoE 路由、上下文、dtype、许可证、发布时间及 safetensors payload。默认覆盖内置主流发布机构，并用全站热门/最新列表补充其他模型：
 
 ```bash
-go run ./scripts/collect -limit 700 -min-year 2023
+go run ./scripts/collect -source hf -all -min-year 2023
+go run ./scripts/collect -source modelscope -all -min-year 2023
 ```
 
-采集结果写入 `data/models_hf.json`。提交数据或重新构建二进制后可固化新版本；直接放在程序运行目录的 `data/models_hf.json` 会覆盖内嵌自动模型库。
+结果分别写入 `data/models_hf.json` 和 `data/models_modelscope.json`。同步采用 **只增不删**：同 ID 使用新元数据更新，本次未返回、被限流或解析失败的旧条目原样保留。可用 `-orgs Qwen,deepseek-ai,...` 指定发布机构。
+
+模型平台包含大量 LoRA、训练中间 checkpoint 和恶意改名衍生仓库；这些不代表独立推理架构，默认过滤。官方量化 checkpoint 会保留并记录原生权重格式。
+
+ModelScope OpenAPI 对单个全站查询设有 3,000 条上限。因此 `-all` 会完整分页内置发布机构，并叠加全站下载量排序和默认最新排序各 3,000 条；不会把数万条社区改名镜像伪装成独立推理模型。
 
 ## 验证
 
@@ -176,9 +181,9 @@ node --check web/app.js
 ```text
 .
 ├── calc/                 # 显存、性能和规划算法
-├── data/                 # 硬件、精选模型、HF 自动模型库
+├── data/                 # 硬件、精选模型、HF / ModelScope 自动模型库
 ├── docs/screenshots/     # README 界面截图
-├── scripts/collect/      # Hugging Face 模型采集器
+├── scripts/collect/      # 双模型平台采集器
 ├── web/                  # 无框架前端
 ├── main.go               # HTTP 服务与嵌入资源
 └── AUDIT_REPORT.md       # 公式、数据来源和精度边界审计

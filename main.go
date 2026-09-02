@@ -61,26 +61,74 @@ func mustLoad() {
 	}
 	patchSparse(models)
 	// 开发时优先读取磁盘，便于刷新模型库；独立二进制回退内嵌数据。
-	fb, err := os.ReadFile("data/models_hf.json")
-	if err != nil {
-		fb, err = embedded.ReadFile("data/models_hf.json")
+	index := make(map[string]int, len(models))
+	for i := range models {
+		index[models[i].ID] = i
 	}
-	if err == nil {
-		if fetched, err := calc.LoadModels(fb); err == nil {
-			have := map[string]bool{}
-			for _, m := range models {
-				have[m.ID] = true
-			}
-			added := 0
-			for _, m := range fetched {
-				if !have[m.ID] {
-					models = append(models, m)
-					added++
-				}
-			}
-			patchSparse(models)
-			log.Printf("HF 采集库合并 %d 个模型（总计 %d）", added, len(models))
+	for _, path := range []string{"data/models_hf.json", "data/models_modelscope.json"} {
+		fb, err := os.ReadFile(path)
+		if err != nil {
+			fb, err = embedded.ReadFile(path)
 		}
+		if err != nil {
+			continue
+		}
+		fetched, err := calc.LoadModels(fb)
+		if err != nil {
+			log.Printf("%s 加载失败: %v", path, err)
+			continue
+		}
+		added := 0
+		for _, m := range fetched {
+			if i, ok := index[m.ID]; ok {
+				enrichModel(&models[i], m)
+				continue
+			}
+			models = append(models, m)
+			index[m.ID] = len(models) - 1
+			added++
+		}
+		log.Printf("%s 合并 %d 个模型（总计 %d）", path, added, len(models))
+	}
+	patchSparse(models)
+}
+
+func enrichModel(dst *calc.Model, src calc.Model) {
+	if dst.ModelType == "" {
+		dst.ModelType = src.ModelType
+	}
+	if dst.Architecture == "" {
+		dst.Architecture = src.Architecture
+	}
+	if dst.DType == "" {
+		dst.DType = src.DType
+	}
+	if dst.RopeTheta == 0 {
+		dst.RopeTheta = src.RopeTheta
+	}
+	if dst.CheckpointGB == 0 {
+		dst.CheckpointGB = src.CheckpointGB
+	}
+	if dst.NativeQuant == "" {
+		dst.NativeQuant = src.NativeQuant
+	}
+	if dst.SourceURL == "" {
+		dst.SourceURL = src.SourceURL
+	}
+	if dst.Downloads == 0 {
+		dst.Downloads = src.Downloads
+	}
+	if dst.License == "" {
+		dst.License = src.License
+	}
+	if len(dst.Tasks) == 0 {
+		dst.Tasks = src.Tasks
+	}
+	if dst.CreatedAt == "" {
+		dst.CreatedAt = src.CreatedAt
+	}
+	if dst.UpdatedAt == "" {
+		dst.UpdatedAt = src.UpdatedAt
 	}
 }
 

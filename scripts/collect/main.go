@@ -1,9 +1,9 @@
-// 从 HuggingFace 采集热门 text-generation 模型，生成 data/models_hf.json。
-// 用法：go run ./scripts/collect [-limit 150] [-out data/models_hf.json]
+// 从 Hugging Face 与 ModelScope 采集 text-generation 模型。
+// 用法：go run ./scripts/collect -source hf|modelscope -all -min-year 2023
 //
-// 策略：按下载量与机构取样 → 过滤量化/衍生仓库 → 拉 config.json 解析结构 →
-// 以 HF safetensors.total 读取与存储精度无关的实际张量参数量。
-// 产物 conf=fetched、src=hf；服务器加载时人工收录（models.json）优先。
+// 策略：机构全量分页 + 全站热门/最新补充 → 过滤量化衍生仓库 →
+// 拉取 config.json 与权重文件清单 → 解析结构、参数量、上下文和 checkpoint。
+// 每次写入都与旧库合并，采集失败或筛选变化不会删除已有模型。
 package main
 
 import (
@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -22,12 +23,18 @@ import (
 )
 
 type hfEntry struct {
-	ID           string   `json:"id"`
-	Downloads    int64    `json:"downloads"`
-	LastModified string   `json:"lastModified"`
-	CreatedAt    string   `json:"createdAt"`
-	Tags         []string `json:"tags"`
-	Safetensors  *struct {
+	ID             string   `json:"id"`
+	Downloads      int64    `json:"downloads"`
+	LastModified   string   `json:"lastModified"`
+	CreatedAt      string   `json:"createdAt"`
+	Tags           []string `json:"tags"`
+	PipelineTag    string   `json:"pipeline_tag"`
+	Provider       string   `json:"-"`
+	ParameterCount int64    `json:"-"`
+	FileSize       int64    `json:"-"`
+	License        string   `json:"-"`
+	Tasks          []string `json:"-"`
+	Safetensors    *struct {
 		Total      int64            `json:"total"`
 		Parameters map[string]int64 `json:"parameters"`
 	} `json:"safetensors"`
@@ -37,8 +44,53 @@ type hfEntry struct {
 	} `json:"siblings"`
 }
 
+type msEntry struct {
+	ID           string   `json:"id"`
+	Downloads    int64    `json:"downloads"`
+	CreatedAt    string   `json:"created_at"`
+	LastModified string   `json:"last_modified"`
+	FileSize     int64    `json:"file_size"`
+	Params       int64    `json:"params"`
+	License      string   `json:"license"`
+	Tasks        []string `json:"tasks"`
+	Tags         []string `json:"tags"`
+}
+
+func (e msEntry) catalogEntry() hfEntry {
+	return hfEntry{
+		ID: e.ID, Downloads: e.Downloads, CreatedAt: e.CreatedAt, LastModified: e.LastModified,
+		Tags: e.Tags, Provider: "modelscope", ParameterCount: e.Params, FileSize: e.FileSize,
+		License: e.License, Tasks: e.Tasks,
+	}
+}
+
+type msListResponse struct {
+	Success bool `json:"success"`
+	Data    struct {
+		Models     []msEntry `json:"models"`
+		TotalCount int       `json:"total_count"`
+	} `json:"data"`
+}
+
+type msDetailResponse struct {
+	Success bool    `json:"success"`
+	Data    msEntry `json:"data"`
+}
+
+type msFilesResponse struct {
+	Data struct {
+		Files []struct {
+			Path string `json:"Path"`
+			Size int64  `json:"Size"`
+		} `json:"Files"`
+	} `json:"Data"`
+}
+
 type hfConfig struct {
 	ModelType            string    `json:"model_type"`
+	Architectures        []string  `json:"architectures"`
+	TorchDType           string    `json:"torch_dtype"`
+	RopeTheta            float64   `json:"rope_theta"`
 	Layers               int       `json:"num_hidden_layers"`
 	Hidden               float64   `json:"hidden_size"`
 	Intermediate         float64   `json:"intermediate_size"`
@@ -75,6 +127,7 @@ type hfConfig struct {
 	LayerTypes           []string  `json:"layer_types"`
 	FullAttnEvery        int       `json:"full_attention_interval"`
 	SlidingWindow        int       `json:"sliding_window"`
+	UseSlidingWindow     *bool     `json:"use_sliding_window"`
 	SlidingWindowPattern int       `json:"sliding_window_pattern"`
 	LinearAttn           *struct {
 		FullAttnLayers []int `json:"full_attn_layers"`
@@ -87,45 +140,52 @@ type hfConfig struct {
 }
 
 type outModel struct {
-	ID              string  `json:"id"`
-	Name            string  `json:"name"`
-	Org             string  `json:"org"`
-	Year            int     `json:"year"`
-	Params          float64 `json:"params"`
-	Active          float64 `json:"active"`
-	Layers          int     `json:"layers"`
-	Hidden          float64 `json:"hidden"`
-	ModelType       string  `json:"model_type,omitempty"`
-	Intermediate    float64 `json:"intermediate,omitempty"`
-	MoEIntermediate float64 `json:"moe_intermediate,omitempty"`
-	KVT             string  `json:"kvt"`
-	KVH             int     `json:"kvh"`
-	Dim             int     `json:"dim"`
-	MLA             float64 `json:"mla,omitempty"`
-	KVLayers        int     `json:"kvlayers,omitempty"`
-	LocalLayers     int     `json:"local_layers,omitempty"`
-	Window          int     `json:"window,omitempty"`
-	StateMB         float64 `json:"state_mb,omitempty"`
-	Experts         int     `json:"experts,omitempty"`
-	TopK            int     `json:"topk,omitempty"`
-	SharedExperts   int     `json:"shared_experts,omitempty"`
-	MoELayers       int     `json:"moe_layers,omitempty"`
-	MTP             bool    `json:"mtp,omitempty"`
-	MTPHeads        int     `json:"mtp_heads,omitempty"`
-	Sparse          float64 `json:"sparse,omitempty"`
-	Ctx             int     `json:"ctx"`
-	MoE             bool    `json:"moe"`
-	Multimodal      bool    `json:"multimodal,omitempty"`
-	Conf            string  `json:"conf"`
-	Src             string  `json:"src"`
-	CheckpointGB    float64 `json:"checkpoint_gb,omitempty"`
-	NativeQuant     string  `json:"native_quant,omitempty"`
-	SourceURL       string  `json:"source_url,omitempty"`
-	Downloads       int64   `json:"downloads"`
-	Notes           string  `json:"notes,omitempty"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	Org             string   `json:"org"`
+	Year            int      `json:"year"`
+	Params          float64  `json:"params"`
+	Active          float64  `json:"active"`
+	Layers          int      `json:"layers"`
+	Hidden          float64  `json:"hidden"`
+	ModelType       string   `json:"model_type,omitempty"`
+	Architecture    string   `json:"architecture,omitempty"`
+	DType           string   `json:"dtype,omitempty"`
+	RopeTheta       float64  `json:"rope_theta,omitempty"`
+	Intermediate    float64  `json:"intermediate,omitempty"`
+	MoEIntermediate float64  `json:"moe_intermediate,omitempty"`
+	KVT             string   `json:"kvt"`
+	KVH             int      `json:"kvh"`
+	Dim             int      `json:"dim"`
+	MLA             float64  `json:"mla,omitempty"`
+	KVLayers        int      `json:"kvlayers,omitempty"`
+	LocalLayers     int      `json:"local_layers,omitempty"`
+	Window          int      `json:"window,omitempty"`
+	StateMB         float64  `json:"state_mb,omitempty"`
+	Experts         int      `json:"experts,omitempty"`
+	TopK            int      `json:"topk,omitempty"`
+	SharedExperts   int      `json:"shared_experts,omitempty"`
+	MoELayers       int      `json:"moe_layers,omitempty"`
+	MTP             bool     `json:"mtp,omitempty"`
+	MTPHeads        int      `json:"mtp_heads,omitempty"`
+	Sparse          float64  `json:"sparse,omitempty"`
+	Ctx             int      `json:"ctx"`
+	MoE             bool     `json:"moe"`
+	Multimodal      bool     `json:"multimodal,omitempty"`
+	Conf            string   `json:"conf"`
+	Src             string   `json:"src"`
+	CheckpointGB    float64  `json:"checkpoint_gb,omitempty"`
+	NativeQuant     string   `json:"native_quant,omitempty"`
+	SourceURL       string   `json:"source_url,omitempty"`
+	Downloads       int64    `json:"downloads"`
+	License         string   `json:"license,omitempty"`
+	Tasks           []string `json:"tasks,omitempty"`
+	CreatedAt       string   `json:"created_at,omitempty"`
+	UpdatedAt       string   `json:"updated_at,omitempty"`
+	Notes           string   `json:"notes,omitempty"`
 }
 
-var skipRe = regexp.MustCompile(`(?i)(gguf|awq|gptq|exl2|exl3|bnb|int4|int8|fp8|fp4|nvfp4|w4a16|w8a8|mlx|onnx|ggml|lora|-ft\b|finetune|quant|distill|checkpoint|merge|obliterat|abliterat|uncensored|heretic|derestricted|dspark|speculat|medusa|eagle)`)
+var skipRe = regexp.MustCompile(`(?i)(lora|-ft\b|finetune|checkpoint|merge|obliterat|abliterat|uncensored|heretic|derestricted|dspark|speculat|medusa|eagle)`)
 
 // 搬运/微调/草稿模型组织：全量采集时跳过（-only 点名不受限）
 var skipOrg = map[string]bool{
@@ -179,8 +239,15 @@ var officialSparse = map[string]float64{
 }
 
 func getJSON(c *http.Client, url string, v any) error {
+	_, err := getJSONPage(c, url, v)
+	return err
+}
+
+var nextLinkRe = regexp.MustCompile(`<([^>]+)>;\s*rel="next"`)
+
+func getJSONPage(c *http.Client, url string, v any) (string, error) {
 	var lastErr error
-	for attempt := 0; attempt < 4; attempt++ {
+	for attempt := range 4 {
 		if attempt > 0 {
 			time.Sleep(time.Duration(attempt*attempt) * 700 * time.Millisecond)
 		}
@@ -189,47 +256,120 @@ func getJSON(c *http.Client, url string, v any) error {
 			lastErr = err
 			continue
 		}
-		if resp.StatusCode == 200 {
+		if resp.StatusCode == http.StatusOK {
 			err = json.NewDecoder(resp.Body).Decode(v)
 			resp.Body.Close()
-			return err
+			if err != nil {
+				return "", err
+			}
+			if match := nextLinkRe.FindStringSubmatch(resp.Header.Get("Link")); len(match) == 2 {
+				return match[1], nil
+			}
+			return "", nil
 		}
 		resp.Body.Close()
 		lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
-		if resp.StatusCode != 429 && resp.StatusCode < 500 {
-			return lastErr // 4xx（非限流）直接放弃
+		if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
+			return "", lastErr
 		}
 	}
-	return lastErr
+	return "", lastErr
+}
+
+const defaultPublishers = "Qwen,deepseek-ai,moonshotai,zai-org,ZhipuAI,mistralai,MiniMaxAI,MiniMax,nvidia,microsoft,google,openai,stepfun-ai,inclusionAI,internlm,Shanghai_AI_Laboratory,ByteDance-Seed,OpenGVLab,baidu,Tencent-Hunyuan,XiaomiMiMo,CohereLabs,ai21labs,openbmb,OpenBMB,THUDM,01-ai,TeleAI,Tele-AI,arcee-ai,swiss-ai,LiquidAI,ibm-granite,allenai,HuggingFaceTB,tiiuae,ornith-ai,meta-llama,stabilityai,Salesforce,databricks,BAAI,ModelBest"
+
+func fetchModelScopeList(c *http.Client, host, owner, sortBy string, maxItems int) ([]hfEntry, error) {
+	if maxItems > 3000 {
+		maxItems = 3000
+	}
+	pageSize := min(50, maxItems)
+	pages := (maxItems + pageSize - 1) / pageSize
+	out := make([]hfEntry, 0, maxItems)
+	for page := range pages {
+		q := url.Values{
+			"page_number": {"1"},
+			"page_size":   {strconv.Itoa(pageSize)},
+			"filter.task": {"text-generation"},
+		}
+		q.Set("page_number", strconv.Itoa(page+1))
+		if owner != "" {
+			q.Set("owner", owner)
+		}
+		if sortBy == "downloads" {
+			q.Set("sort", "downloads")
+		}
+		var response msListResponse
+		if err := getJSON(c, host+"/openapi/v1/models?"+q.Encode(), &response); err != nil {
+			return out, err
+		}
+		if !response.Success {
+			return out, fmt.Errorf("ModelScope 返回失败")
+		}
+		for _, e := range response.Data.Models {
+			out = append(out, e.catalogEntry())
+		}
+		if len(response.Data.Models) < pageSize || len(out) >= response.Data.TotalCount {
+			break
+		}
+	}
+	return out, nil
 }
 
 func main() {
-	base := flag.String("base", "", "HF 站点（默认 https://huggingface.co，可用 HF_ENDPOINT 环境变量覆盖）")
-	limit := flag.Int("limit", 150, "拉取的热门模型数量")
-	minParams := flag.Float64("min-params", 1.0, "最小参数量（B）")
-	orgs := flag.String("orgs", "", "重点机构（逗号分隔）：额外按 author 拉最新+最热，如 Qwen,deepseek-ai")
+	source := flag.String("source", "hf", "数据源：hf 或 modelscope")
+	base := flag.String("base", "", "数据源站点；默认使用官方 Hugging Face 或 ModelScope")
+	limit := flag.Int("limit", 150, "非全量模式最多解析的模型数量")
+	minParams := flag.Float64("min-params", 0.1, "最小参数量（B）")
+	orgs := flag.String("orgs", "", "机构（逗号分隔）；-all 未指定时使用内置主流发布者列表")
 	only := flag.String("only", "", "只采集指定仓库（逗号分隔完整 id），结果合并进 out 而非覆盖")
-	minYear := flag.Int("min-year", 0, "只保留该年份之后创建的模型（如 2024）")
-	out := flag.String("out", "data/models_hf.json", "输出文件")
+	minYear := flag.Int("min-year", 2023, "只采集该年份及之后创建的模型")
+	all := flag.Bool("all", false, "分页采集机构的全部 text-generation 仓库，不设解析数量上限")
+	out := flag.String("out", "", "输出文件；默认按数据源写入 data/models_hf.json 或 data/models_modelscope.json")
 	flag.Parse()
 
-	host := *base
-	if host == "" {
-		host = os.Getenv("HF_ENDPOINT")
+	provider := strings.ToLower(*source)
+	host := strings.TrimRight(*base, "/")
+	switch provider {
+	case "hf":
+		if host == "" {
+			host = os.Getenv("HF_ENDPOINT")
+		}
+		if host == "" {
+			host = "https://huggingface.co"
+		}
+		if *out == "" {
+			*out = "data/models_hf.json"
+		}
+	case "modelscope":
+		if host == "" {
+			host = os.Getenv("MODELSCOPE_ENDPOINT")
+		}
+		if host == "" {
+			host = "https://modelscope.cn"
+		}
+		if *out == "" {
+			*out = "data/models_modelscope.json"
+		}
+	default:
+		fmt.Fprintln(os.Stderr, "-source 只支持 hf 或 modelscope")
+		os.Exit(2)
 	}
-	if host == "" {
-		host = "https://huggingface.co"
-	}
-	c := &http.Client{Timeout: 20 * time.Second}
+	c := &http.Client{Timeout: 30 * time.Second}
 
 	// 两个列表：全站热门（downloads）+ 最新发布（createdAt），合并去重。
 	// 新模型下载量低，单靠热门榜永远收不进来。
 	var entries []hfEntry
 	seenID := map[string]bool{}
-	fetchList := func(sort string, n int, minDl int64) {
+	fetchList := func(sortBy string, n int, minDl int64) {
 		var list []hfEntry
-		url := fmt.Sprintf("%s/api/models?pipeline_tag=text-generation&sort=%s&direction=-1&limit=%d", host, sort, n)
-		if err := getJSON(c, url, &list); err != nil {
+		var err error
+		if provider == "modelscope" {
+			list, err = fetchModelScopeList(c, host, "", sortBy, n)
+		} else {
+			listURL := fmt.Sprintf("%s/api/models?pipeline_tag=text-generation&sort=%s&direction=-1&limit=%d", host, sortBy, n)
+			err = getJSON(c, listURL, &list)
+		}
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "拉取列表失败:", err)
 			return
 		}
@@ -242,27 +382,50 @@ func main() {
 			entries = append(entries, e)
 			added++
 		}
-		fmt.Printf("sort=%s 纳入 %d 条\n", sort, added)
+		fmt.Printf("sort=%s 纳入 %d 条\n", sortBy, added)
 	}
 	// 机构定向：author 维度拉最新发布 + 最热，保证新模型（如下载量还低的
 	// 新一代旗舰）不被全站榜漏掉。
-	fetchAuthor := func(author, sort string, n int) {
-		var list []hfEntry
-		url := fmt.Sprintf("%s/api/models?author=%s&pipeline_tag=text-generation&sort=%s&direction=-1&limit=%d", host, author, sort, n)
-		if err := getJSON(c, url, &list); err != nil {
-			fmt.Fprintf(os.Stderr, "author=%s sort=%s 拉取失败: %v\n", author, sort, err)
-			return
-		}
+	fetchAuthor := func(author, sortBy string, n int) {
 		added := 0
-		for _, e := range list {
-			if seenID[e.ID] {
-				continue
+		if provider == "modelscope" {
+			list, err := fetchModelScopeList(c, host, author, sortBy, n)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "owner=%s sort=%s 拉取失败: %v\n", author, sortBy, err)
+				return
 			}
-			seenID[e.ID] = true
-			entries = append(entries, e)
-			added++
+			for _, e := range list {
+				if seenID[e.ID] {
+					continue
+				}
+				seenID[e.ID] = true
+				entries = append(entries, e)
+				added++
+			}
+		} else {
+			next := fmt.Sprintf("%s/api/models?author=%s&pipeline_tag=text-generation&sort=%s&direction=-1&limit=%d", host, author, sortBy, n)
+			for next != "" {
+				var list []hfEntry
+				var err error
+				next, err = getJSONPage(c, next, &list)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "author=%s sort=%s 拉取失败: %v\n", author, sortBy, err)
+					break
+				}
+				for _, e := range list {
+					if seenID[e.ID] {
+						continue
+					}
+					seenID[e.ID] = true
+					entries = append(entries, e)
+					added++
+				}
+				if !*all {
+					break
+				}
+			}
 		}
-		fmt.Printf("author=%s sort=%s 纳入 %d 条\n", author, sort, added)
+		fmt.Printf("author=%s sort=%s 纳入 %d 条\n", author, sortBy, added)
 	}
 	// -only 模式：不拉榜单，直接按完整 id 逐个点名采集。
 	if *only != "" {
@@ -273,27 +436,48 @@ func main() {
 				continue
 			}
 			var e hfEntry
-			if err := getJSON(c, host+"/api/models/"+id, &e); err != nil {
-				fmt.Fprintf(os.Stderr, "%s 信息拉取失败: %v\n", id, err)
-				continue
+			if provider == "modelscope" {
+				var response msDetailResponse
+				if err := getJSON(c, host+"/openapi/v1/models/"+id, &response); err != nil {
+					fmt.Fprintf(os.Stderr, "%s 信息拉取失败: %v\n", id, err)
+					continue
+				}
+				e = response.Data.catalogEntry()
+			} else {
+				if err := getJSON(c, host+"/api/models/"+id, &e); err != nil {
+					fmt.Fprintf(os.Stderr, "%s 信息拉取失败: %v\n", id, err)
+					continue
+				}
+				e.ID = id
 			}
-			e.ID = id
 			entries = append(entries, e)
 		}
 		fmt.Printf("only 模式：%d 个指定仓库\n", len(entries))
 	} else {
-		if *orgs != "" {
-			for _, o := range strings.Split(*orgs, ",") {
+		authors := *orgs
+		if *all && authors == "" {
+			authors = defaultPublishers
+		}
+		if authors != "" {
+			for _, o := range strings.Split(authors, ",") {
 				o = strings.TrimSpace(o)
 				if o == "" {
 					continue
 				}
-				fetchAuthor(o, "createdAt", 40)
-				fetchAuthor(o, "downloads", 40)
+				if *all {
+					fetchAuthor(o, "createdAt", 3000)
+				} else {
+					fetchAuthor(o, "createdAt", 40)
+					fetchAuthor(o, "downloads", 40)
+				}
 			}
 		}
-		fetchList("downloads", *limit*3, 0)
-		fetchList("createdAt", *limit*4, 2000)
+		globalLimit := *limit
+		if *all {
+			globalLimit = 1000
+		}
+		fetchList("downloads", globalLimit*3, 0)
+		fetchList("createdAt", globalLimit*3, 0)
 	}
 	if len(entries) < 20 && *only == "" {
 		fmt.Fprintln(os.Stderr, "列表条目过少（疑似限流），保留旧数据退出")
@@ -312,7 +496,7 @@ func main() {
 	seen := 0
 
 	for _, e := range entries {
-		if seen >= *limit && *only == "" {
+		if !*all && seen >= *limit && *only == "" {
 			break
 		}
 		name := e.ID[strings.IndexByte(e.ID, '/')+1:]
@@ -345,37 +529,29 @@ func main() {
 			fail[r.err]++
 		}
 	}
-	sort.Slice(models, func(i, j int) bool { return models[i].Downloads > models[j].Downloads })
-
-	// 点名更新与旧库合并；全量更新直接重建，避免已被过滤的陈旧/衍生仓库永久残留。
-	carried := 0
-	if *only != "" {
-		var old []outModel
-		if ob, err := os.ReadFile(*out); err == nil {
-			json.Unmarshal(ob, &old)
-		}
-		pos := map[string]int{}
-		for i, m := range models {
-			pos[m.ID] = i
-		}
-		for _, o := range old {
-			org := strings.ToLower(o.Org)
-			if _, dup := pos[o.ID]; dup || skipRe.MatchString(o.Name) || skipOrg[org] {
-				continue
-			}
-			models = append(models, o)
-			carried++
-		}
+	var old []outModel
+	if ob, err := os.ReadFile(*out); err == nil {
+		json.Unmarshal(ob, &old)
 	}
-	fmt.Printf("新解析 %d 个，沿用旧数据 %d 个，合计 %d 个\n", len(models)-carried, carried, len(models))
+	fresh := len(models)
+	models, carried := mergeModels(models, old)
+	sort.Slice(models, func(i, j int) bool { return models[i].Downloads > models[j].Downloads })
+	fmt.Printf("新解析 %d 个，沿用旧数据 %d 个，合计 %d 个\n", fresh, carried, len(models))
 
 	if len(models) < 10 && *only == "" {
 		fmt.Fprintf(os.Stderr, "仅解析出 %d 个（疑似限流），保留旧数据退出\n", len(models))
 		os.Exit(2)
 	}
 	b, _ := json.MarshalIndent(models, "", "  ")
-	if err := os.WriteFile(*out, b, 0644); err != nil {
-		fmt.Fprintln(os.Stderr, "写入失败:", err)
+	b = append(b, '\n')
+	tmp := *out + ".tmp"
+	if err := os.WriteFile(tmp, b, 0644); err != nil {
+		fmt.Fprintln(os.Stderr, "写入临时文件失败:", err)
+		os.Exit(1)
+	}
+	if err := os.Rename(tmp, *out); err != nil {
+		os.Remove(tmp)
+		fmt.Fprintln(os.Stderr, "原子替换失败:", err)
 		os.Exit(1)
 	}
 	fmt.Printf("入库 %d 个模型 → %s\n", len(models), *out)
@@ -384,18 +560,69 @@ func main() {
 	}
 }
 
+// mergeModels 只用新数据更新同 ID 条目，永远不因本次限流、筛选或解析失败删除旧数据。
+func mergeModels(fresh, old []outModel) ([]outModel, int) {
+	seen := make(map[string]bool, len(fresh)+len(old))
+	for _, m := range fresh {
+		seen[m.ID] = true
+	}
+	carried := 0
+	for _, m := range old {
+		if seen[m.ID] {
+			continue
+		}
+		fresh = append(fresh, m)
+		seen[m.ID] = true
+		carried++
+	}
+	return fresh, carried
+}
+
+func modelScopeCheckpointSize(c *http.Client, host, id string) float64 {
+	var response msFilesResponse
+	filesURL := host + "/api/v1/models/" + id + "/repo/files?Revision=master&Recursive=true"
+	if err := getJSON(c, filesURL, &response); err != nil {
+		return 0
+	}
+	var total int64
+	for _, file := range response.Data.Files {
+		if strings.HasSuffix(strings.ToLower(file.Path), ".safetensors") {
+			total += file.Size
+		}
+	}
+	return float64(total) / 1e9
+}
+
+func tagValue(tags []string, prefix string) string {
+	for _, tag := range tags {
+		if strings.HasPrefix(tag, prefix) {
+			return strings.TrimPrefix(tag, prefix)
+		}
+	}
+	return ""
+}
+
 func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outModel, bool, string) {
 	var m outModel
 	var notePre string
-	// 模型详情接口给出与存储 dtype 无关的 safetensors 精确张量数；列表接口不返回该字段。
-	if e.Safetensors == nil || e.Safetensors.Total == 0 {
+	provider := e.Provider
+	if provider == "" {
+		provider = "hf"
+	}
+	rawBase, sourceURL, sourceLabel := host+"/"+e.ID+"/resolve/main/", "https://huggingface.co/"+e.ID, "HF"
+	if provider == "modelscope" {
+		rawBase = host + "/models/" + e.ID + "/resolve/master/"
+		sourceURL = host + "/models/" + e.ID
+		sourceLabel = "ModelScope"
+	} else if e.Safetensors == nil || e.Safetensors.Total == 0 {
+		// HF 详情接口给出与存储 dtype 无关的 safetensors 精确张量数。
 		var info hfEntry
 		if err := getJSON(c, host+"/api/models/"+e.ID, &info); err == nil {
 			e = info
 		}
 	}
 	var cfg hfConfig
-	if err := getJSON(c, host+"/"+e.ID+"/resolve/main/config.json", &cfg); err != nil {
+	if err := getJSON(c, rawBase+"config.json", &cfg); err != nil {
 		return m, false, "无 config.json"
 	}
 	// 多模态包装配置：下潜到文本塔，同时保留包装层量化信息。
@@ -429,12 +656,17 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 	} else if cfg.FullAttnEvery > 0 {
 		kvLayers = cfg.Layers / cfg.FullAttnEvery
 	}
-	if cfg.SlidingWindow > 0 && localLayers == 0 && (kvLayers == 0 || kvLayers == cfg.Layers) {
+	slidingEnabled := cfg.UseSlidingWindow == nil || *cfg.UseSlidingWindow
+	if slidingEnabled && cfg.SlidingWindow > 0 && localLayers == 0 && (kvLayers == 0 || kvLayers == cfg.Layers) {
 		kvLayers = cfg.Layers
 		localLayers = cfg.Layers
 		if cfg.SlidingWindowPattern > 1 {
 			localLayers -= cfg.Layers / cfg.SlidingWindowPattern
 		}
+	}
+	window := cfg.SlidingWindow
+	if localLayers == 0 {
+		window = 0
 	}
 	stateMB := 0.0
 	linearLayers := cfg.Layers - kvLayers
@@ -456,25 +688,28 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 		}
 	}
 
-	// 参数量优先使用 HF 的 safetensors.total；checkpoint_gb 记录实际
-	// safetensors payload，只有选择原生量化格式时才可直接用于显存。
+	// checkpoint_gb 只统计 safetensors payload，不把 tokenizer、文档或重复格式计入显存。
 	var idx struct {
 		Metadata struct {
 			TotalSize float64 `json:"total_size"`
 		} `json:"metadata"`
 	}
-	getJSON(c, host+"/"+e.ID+"/resolve/main/model.safetensors.index.json", &idx)
+	getJSON(c, rawBase+"model.safetensors.index.json", &idx)
 	checkpointGB := idx.Metadata.TotalSize / 1e9
 	if checkpointGB == 0 {
-		var info hfEntry
-		if err := getJSON(c, host+"/api/models/"+e.ID+"?blobs=true", &info); err == nil {
-			var total int64
-			for _, f := range info.Siblings {
-				if strings.HasSuffix(strings.ToLower(f.RFilename), ".safetensors") {
-					total += f.Size
+		if provider == "modelscope" {
+			checkpointGB = modelScopeCheckpointSize(c, host, e.ID)
+		} else {
+			var info hfEntry
+			if err := getJSON(c, host+"/api/models/"+e.ID+"?blobs=true", &info); err == nil {
+				var total int64
+				for _, f := range info.Siblings {
+					if strings.HasSuffix(strings.ToLower(f.RFilename), ".safetensors") {
+						total += f.Size
+					}
 				}
+				checkpointGB = float64(total) / 1e9
 			}
-			checkpointGB = float64(total) / 1e9
 		}
 	}
 	nativeQuant, bytesPer := "fp16", 2.0
@@ -493,7 +728,9 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 		}
 	}
 	var params float64
-	if e.Safetensors != nil && e.Safetensors.Total > 0 {
+	if e.ParameterCount > 0 {
+		params = float64(e.ParameterCount) / 1e9
+	} else if e.Safetensors != nil && e.Safetensors.Total > 0 {
 		params = float64(e.Safetensors.Total) / 1e9
 	} else if idx.Metadata.TotalSize > 0 {
 		params = idx.Metadata.TotalSize / bytesPer / 1e9
@@ -508,7 +745,7 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 	if params < minParams || params > 3000 {
 		return m, false, "参数量越界或未知"
 	}
-	params = float64(int(params*10)) / 10
+	params = math.Round(params*10) / 10
 	// 配置里的 quantization_config 可能只描述运行时能力而非仓库存储格式。
 	// safetensors payload / 参数量可直接判定实际位宽族，避免把 BF16 权重当 FP8。
 	if checkpointGB > 0 {
@@ -629,6 +866,9 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 			active = math.Round(active*10) / 10
 		}
 	}
+	if !moe {
+		moeLayers = 0
+	}
 
 	ctx := cfg.MaxPos
 	if ctx <= 0 {
@@ -645,17 +885,31 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 	}
 
 	parts := strings.SplitN(e.ID, "/", 2)
+	architecture := ""
+	if len(cfg.Architectures) > 0 {
+		architecture = cfg.Architectures[0]
+	}
+	license := e.License
+	if license == "" {
+		license = tagValue(e.Tags, "license:")
+	}
+	tasks := e.Tasks
+	if len(tasks) == 0 && e.PipelineTag != "" {
+		tasks = []string{e.PipelineTag}
+	}
 	m = outModel{
 		ID:   strings.ToLower(strings.ReplaceAll(e.ID, "/", "--")),
 		Name: parts[1], Org: parts[0], Year: year,
 		Params: params, Active: active, Layers: cfg.Layers, Hidden: cfg.Hidden,
-		ModelType: cfg.ModelType, Intermediate: cfg.Intermediate, MoEIntermediate: cfg.MoeIntermediate,
-		KVT: kvt, KVH: kvh, Dim: dim, MLA: mla, KVLayers: kvLayers, LocalLayers: localLayers, Window: cfg.SlidingWindow, StateMB: stateMB,
+		ModelType: cfg.ModelType, Architecture: architecture, DType: cfg.TorchDType, RopeTheta: cfg.RopeTheta,
+		Intermediate: cfg.Intermediate, MoEIntermediate: cfg.MoeIntermediate,
+		KVT: kvt, KVH: kvh, Dim: dim, MLA: mla, KVLayers: kvLayers, LocalLayers: localLayers, Window: window, StateMB: stateMB,
 		Experts: experts, TopK: topk, SharedExperts: sharedExperts, MoELayers: moeLayers,
-		Ctx: ctx, MoE: moe, Multimodal: multimodal, Sparse: officialSparse[strings.ToLower(e.ID)], Conf: "fetched", Src: "hf",
+		Ctx: ctx, MoE: moe, Multimodal: multimodal, Sparse: officialSparse[strings.ToLower(e.ID)], Conf: "fetched", Src: provider,
 		MTP: cfg.NextN > 0 || cfg.MTP > 0, MTPHeads: max(cfg.NextN, cfg.MTP),
-		CheckpointGB: checkpointGB, NativeQuant: nativeQuant, SourceURL: host + "/" + e.ID, Downloads: e.Downloads,
-		Notes: notePre + activeNote + fmt.Sprintf("HF 采集 · %s · 下载 %.1fM", e.ID, float64(e.Downloads)/1e6),
+		CheckpointGB: checkpointGB, NativeQuant: nativeQuant, SourceURL: sourceURL, Downloads: e.Downloads,
+		License: license, Tasks: tasks, CreatedAt: e.CreatedAt, UpdatedAt: e.LastModified,
+		Notes: notePre + activeNote + fmt.Sprintf("%s 采集 · %s · 下载 %.1fM", sourceLabel, e.ID, float64(e.Downloads)/1e6),
 	}
 	return m, true, ""
 }
