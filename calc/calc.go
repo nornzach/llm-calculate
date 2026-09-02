@@ -1,0 +1,1627 @@
+// Package calc 实现 LLM 推理计算器的显存可行性、decode/prefill
+// 一阶 roofline 估算和反向部署规划。输出是容量筛选值，不是实测基准。
+package calc
+
+import (
+	"encoding/json"
+	"fmt"
+	"math"
+	"sort"
+	"strings"
+)
+
+// ---------- 数据模型 ----------
+
+type Link struct {
+	T   string  `json:"t"`   // none | bridge | nvlink | xgmi | ethernet | hccs | unified | pcie
+	B   float64 `json:"b"`   // 卡间互联总带宽 GB/s
+	Dom int     `json:"dom"` // 全互联域最大卡数
+}
+
+type HW struct {
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	Vendor    string   `json:"vendor"`
+	Cls       string   `json:"cls"` // consumer | workstation | datacenter | supernode | unified_soc | edge | sram_asic
+	Arch      string   `json:"arch"`
+	VRAM      float64  `json:"vram"` // GB；unified_soc 为物理内存
+	BW        float64  `json:"bw"`   // 显存带宽 GB/s
+	Link      Link     `json:"link"`
+	Prec      []string `json:"prec"`
+	TF        float64  `json:"tf"`                // dense FP16/BF16 tensor TFLOPS
+	TF8       float64  `json:"tf8,omitempty"`     // dense FP8 tensor TFLOPS；0=按量化倍率估算
+	TF4       float64  `json:"tf4,omitempty"`     // dense FP4 tensor TFLOPS；0=按量化倍率估算
+	TFInt8    float64  `json:"tf_int8,omitempty"` // dense INT8 tensor TFLOPS；0=按 FP16 倍率估算
+	TDP       float64  `json:"tdp"`
+	CNY       float64  `json:"cny"` // 参考价（二手/整机），0=未知/仅云
+	Conf      string   `json:"conf"`
+	Unified   bool     `json:"unified,omitempty"`
+	Svc       bool     `json:"svc,omitempty"`
+	Notes     string   `json:"notes,omitempty"`
+	SourceURL string   `json:"source_url,omitempty"`
+}
+
+type Model struct {
+	ID              string  `json:"id"`
+	Name            string  `json:"name"`
+	Org             string  `json:"org"`
+	Year            int     `json:"year"`
+	Params          float64 `json:"params"` // 总参数 B
+	Active          float64 `json:"active"` // 每 token 激活参数 B（dense = params）
+	Layers          int     `json:"layers"`
+	Hidden          float64 `json:"hidden"`
+	ModelType       string  `json:"model_type,omitempty"`
+	Intermediate    float64 `json:"intermediate,omitempty"`
+	MoEIntermediate float64 `json:"moe_intermediate,omitempty"`
+	KVT             string  `json:"kvt"` // mha | gqa | mla
+	KVH             int     `json:"kvh"`
+	Dim             int     `json:"dim"`
+	MLA             float64 `json:"mla"` // MLA latent 维度（如 512+64）
+	// KVLayers：混合注意力中持有逐 token KV 的层数；0 表示全部层。
+	KVLayers int `json:"kvlayers,omitempty"`
+	// LocalLayers/Window：持有滑动窗口 KV 的局部注意力层数及窗口 token 数。
+	LocalLayers int `json:"local_layers,omitempty"`
+	Window      int `json:"window,omitempty"`
+	// StateMB：所有线性注意力层每请求的 FP16 recurrent state（MB），与上下文长度无关。
+	StateMB float64 `json:"state_mb,omitempty"`
+	// Experts/TopK 用于估算一个 decode batch 实际触达的不同专家数。
+	Experts       int  `json:"experts,omitempty"`
+	TopK          int  `json:"topk,omitempty"`
+	SharedExperts int  `json:"shared_experts,omitempty"`
+	MoELayers     int  `json:"moe_layers,omitempty"`
+	MTP           bool `json:"mtp,omitempty"`
+	MTPHeads      int  `json:"mtp_heads,omitempty"`
+	// Sparse：稀疏注意力每个 query 选择的 token 数；0 表示稠密注意力。
+	Sparse        float64 `json:"sparse,omitempty"`
+	Ctx           int     `json:"ctx"`
+	MoE           bool    `json:"moe"`
+	EncoderParams float64 `json:"encoder_params,omitempty"` // 非自回归视觉/音频 encoder 参数 B
+	Multimodal    bool    `json:"multimodal,omitempty"`
+	Conf          string  `json:"conf"` // official | reported | fetched
+	Src           string  `json:"src,omitempty"`
+	CheckpointGB  float64 `json:"checkpoint_gb,omitempty"` // 原仓库 safetensors payload GB
+	NativeQuant   string  `json:"native_quant,omitempty"`  // 原仓库权重格式
+	SourceURL     string  `json:"source_url,omitempty"`
+	Downloads     int64   `json:"downloads,omitempty"`
+	Notes         string  `json:"notes,omitempty"`
+}
+
+// Quant 权重量化档位。权重精度（W）与计算/激活精度（A）分开标注。
+// W4A16 主要减少容量和带宽；只有 W8A8/W4A4 才能直接套对应低精度峰值。
+// KV cache 量化是独立维度（Opts.KVQuant）。
+type Quant struct {
+	ID    string  `json:"id"`
+	Name  string  `json:"name"`
+	Bytes float64 `json:"bytes"`
+	Eta   float64 `json:"eta"`  // decode 带宽利用率
+	W     string  `json:"w"`    // 权重精度标签
+	A     string  `json:"a"`    // 激活/计算精度标签
+	Mul   float64 `json:"mul"`  // prefill 算力倍率（需 Need 硬件路径）
+	Need  string  `json:"need"` // 硬件 prec 要求（"" = 无原生路径）
+	Fam   string  `json:"fam"`  // std | gguf | mlx | exl
+	Main  bool    `json:"main"` // 是否进入 fit 矩阵列
+	Note  string  `json:"note"`
+}
+
+var Quants = []Quant{
+	// ---- 数据中心/通用 ----
+	{ID: "fp16", Name: "FP16/BF16", Bytes: 2.0, Eta: 0.50, W: "16bit", A: "FP16", Mul: 1, Need: "fp16", Fam: "std", Main: true, Note: "基准精度"},
+	{ID: "fp8", Name: "FP8·W8A8", Bytes: 1.0, Eta: 0.62, W: "8bit", A: "FP8", Mul: 2, Need: "fp8", Fam: "std", Main: true, Note: "Ada/Hopper+ 权重激活双 FP8，prefill 2×"},
+	{ID: "int8", Name: "INT8·W8A8", Bytes: 1.05, Eta: 0.60, W: "8bit", A: "INT8", Mul: 2, Need: "int8", Fam: "std", Note: "SmoothQuant 系，Ampere+ INT8 tensor 2×"},
+	{ID: "int4", Name: "INT4·AWQ", Bytes: 0.55, Eta: 0.60, W: "4bit", A: "FP16", Mul: 1, Need: "int4", Fam: "std", Main: true, Note: "W4A16：省显存带宽，Marlin 内核加速"},
+	{ID: "fp4", Name: "FP4·NVFP4", Bytes: 0.55, Eta: 0.62, W: "4bit", A: "FP4", Mul: 4, Need: "fp4", Fam: "std", Main: true, Note: "Blackwell 全 FP4 管线，prefill 4×；其余卡仅省显存"},
+	{ID: "mxfp4", Name: "FP4·MXFP4", Bytes: 0.55, Eta: 0.58, W: "4bit", A: "FP16/MXFP8", Mul: 1, Need: "fp4", Fam: "std", Note: "仅表示 MXFP4 权重；激活精度和未量化张量由检查点决定，不套 W4A4 峰值"},
+	// ---- GGUF（llama.cpp 生态）----
+	{ID: "q8", Name: "GGUF·Q8_0", Bytes: 1.06, Eta: 0.52, W: "8bit", A: "FP16", Mul: 1, Fam: "gguf", Note: "近无损，CPU/Metal/CUDA 通吃"},
+	{ID: "q6", Name: "GGUF·Q6_K", Bytes: 0.83, Eta: 0.53, W: "6bit", A: "FP16", Mul: 1, Fam: "gguf", Note: "质量/体积甜点"},
+	{ID: "q4km", Name: "GGUF·Q4_K_M", Bytes: 0.60, Eta: 0.55, W: "4bit", A: "FP16", Mul: 1, Fam: "gguf", Main: true, Note: "最常见的 GGUF 档位（~4.85bpw）"},
+	{ID: "iq2", Name: "GGUF·IQ2_XXS", Bytes: 0.31, Eta: 0.42, W: "2bit", A: "FP16", Mul: 1, Fam: "gguf", Note: "极限 2bit：能跑 R1 的最小体积，精度损失明显"},
+	// ---- MLX（Apple 专用）----
+	{ID: "mlx8", Name: "MLX·8bit", Bytes: 1.06, Eta: 0.58, W: "8bit", A: "FP16", Mul: 1, Fam: "mlx", Note: "Apple Silicon 原生，统一内存零拷贝"},
+	{ID: "mlx4", Name: "MLX·4bit", Bytes: 0.55, Eta: 0.55, W: "4bit", A: "FP16", Mul: 1, Fam: "mlx", Note: "Apple Silicon 原生主力档"},
+	// ---- ExLlama（消费卡低并发）----
+	{ID: "exl3", Name: "EXL3·4.25bpw", Bytes: 0.56, Eta: 0.60, W: "4bit", A: "FP16", Mul: 1, Fam: "exl", Note: "ExLlamaV3，1~4 并发速度王"},
+}
+
+// MainQuants fit 矩阵展示的列（其余档位仅在下拉框中可选）。
+func MainQuants() []Quant {
+	var out []Quant
+	for _, q := range Quants {
+		if q.Main {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+func QuantByID(id string) Quant {
+	for _, q := range Quants {
+		if q.ID == id {
+			return q
+		}
+	}
+	return Quants[0]
+}
+
+// ---------- 推理栈：框架 / 推测解码 / KV 量化 / 缓存 ----------
+
+// Engine 保留框架兼容性和显存底座。EtaMul/Flops/StepMs/SchedK 是场景参数；
+// 缺少同机同模型同 workload 的校准数据前保持相同，避免虚构框架排名。
+type Engine struct {
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	EtaMul  float64  `json:"eta_mul"`
+	Flops   float64  `json:"flops"`
+	StepMs  float64  `json:"step_ms"`
+	SchedK  float64  `json:"sched_k"`
+	FwMem   float64  `json:"fw_mem"`            // 估算的框架常驻显存 GB
+	Vendors []string `json:"vendors,omitempty"` // 空 = 全平台
+	Note    string   `json:"note"`
+}
+
+var Engines = []Engine{
+	{ID: "auto", Name: "自动选型", EtaMul: 1, Flops: 0.45, StepMs: 1, SchedK: 512, FwMem: 1.5,
+		Note: "按量化格式和硬件厂商选择运行时"},
+	{ID: "vllm", Name: "vLLM", EtaMul: 1, Flops: 0.45, StepMs: 1, SchedK: 512, FwMem: 1.5,
+		Vendors: []string{"nvidia", "amd", "intel", "huawei", "hygon", "metax", "mthreads", "enflame", "biren", "iluvatar", "kunlunxin", "cambricon"},
+		Note:    "PagedAttention、continuous batching；非主线硬件通常依赖厂商插件或分支"},
+	{ID: "sglang", Name: "SGLang", EtaMul: 1, Flops: 0.45, StepMs: 1, SchedK: 512, FwMem: 1.6,
+		Vendors: []string{"nvidia", "amd", "huawei", "hygon"},
+		Note:    "RadixAttention、PD/EP/DP 等服务能力；可用组合须按版本核对"},
+	{ID: "trtllm", Name: "TensorRT-LLM", EtaMul: 1, Flops: 0.45, StepMs: 1, SchedK: 512, FwMem: 1.8,
+		Vendors: []string{"nvidia"},
+		Note:    "NVIDIA CUDA 推理栈；内核和功能须按 GPU 代际及版本核对"},
+	{ID: "llamacpp", Name: "llama.cpp", EtaMul: 1, Flops: 0.45, StepMs: 1, SchedK: 512, FwMem: 1.2,
+		Note: "GGUF 跨 CPU、Metal、CUDA、HIP 等后端"},
+	{ID: "mlx", Name: "MLX", EtaMul: 1, Flops: 0.45, StepMs: 1, SchedK: 512, FwMem: 1.0,
+		Vendors: []string{"apple"},
+		Note:    "Apple Silicon 统一内存运行时"},
+	{ID: "exllama", Name: "ExLlamaV3", EtaMul: 1, Flops: 0.45, StepMs: 1, SchedK: 512, FwMem: 1.2,
+		Vendors: []string{"nvidia"},
+		Note:    "NVIDIA GPU 的 EXL3 量化运行时"},
+	{ID: "lmdeploy", Name: "LMDeploy", EtaMul: 1, Flops: 0.45, StepMs: 1, SchedK: 512, FwMem: 1.5,
+		Vendors: []string{"nvidia"},
+		Note:    "TurboMind/vLLM 后端；此处仅列已核对的 NVIDIA 路径"},
+	{ID: "mindie", Name: "MindIE", EtaMul: 1, Flops: 0.45, StepMs: 1, SchedK: 512, FwMem: 2.0,
+		Vendors: []string{"huawei"},
+		Note:    "昇腾官方推理引擎"},
+}
+
+// EngineOK 该框架是否原生支持此硬件。厂商未知（空）时视为兼容。
+func (e Engine) EngineOK(h HW) bool {
+	if len(e.Vendors) == 0 || h.Vendor == "" {
+		return true
+	}
+	for _, v := range e.Vendors {
+		if v == h.Vendor {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveEngine 处理 auto：量化家族优先（GGUF→llama.cpp，MLX→MLX，EXL→ExLlama），
+// 否则按硬件厂商选默认框架。
+func resolveEngine(id string, h HW, q Quant) Engine {
+	if id == "" || id == "auto" {
+		switch q.Fam {
+		case "gguf":
+			id = "llamacpp"
+		case "mlx":
+			id = "mlx"
+		case "exl":
+			id = "exllama"
+		default:
+			switch h.Vendor {
+			case "apple":
+				id = "mlx"
+			case "huawei":
+				id = "mindie"
+			default:
+				id = "vllm"
+			}
+		}
+	}
+	for _, e := range Engines {
+		if e.ID == id && e.ID != "auto" {
+			return e
+		}
+	}
+	return Engines[1] // vllm
+}
+
+// SpecMethod 推测/并行解码方法。
+// Tau = 平均接受长度（每步产出 token 数）；Ovh = 草稿+验证的每步时间开销；
+// 单流净加速 gain(1) = Tau/(1+Ovh)；并发衰减 gain(b) = 1+(gain1-1)×max(Floor, 1-(b-1)/Bsat)，
+// Floor 可为负（高并发反噬，如 EAGLE-3 b=32 实测 0.5×）。
+type SpecMethod struct {
+	ID    string  `json:"id"`
+	Name  string  `json:"name"`
+	Tau   float64 `json:"tau"`
+	Ovh   float64 `json:"ovh"`
+	Bsat  float64 `json:"bsat"`
+	Floor float64 `json:"floor"`
+	MemGB float64 `json:"mem_gb"`
+	Note  string  `json:"note"`
+}
+
+// 这些是可编辑的场景系数，不是跨模型、跨 workload 的保证值。除 lookahead 外，
+// 用户选择某方法表示已有与目标模型匹配的草稿模型或预测头。
+var SpecMethods = []SpecMethod{
+	{ID: "none", Name: "关闭", Tau: 1, Bsat: 1, Note: "逐 token 自回归解码"},
+	{ID: "mtp", Name: "MTP 原生多头", Tau: 1.9, Ovh: 0.06, Bsat: 80, Floor: 0.4,
+		Note: "仅模型元数据明确含 MTP 头时生效；接受率和收益必须按 workload 校准"},
+	{ID: "eagle3", Name: "EAGLE-3", Tau: 2.8, Ovh: 0.15, Bsat: 22, Floor: -0.35, MemGB: 1.0,
+		Note: "需与目标模型匹配并训练的草稿头；系数仅为场景估算"},
+	{ID: "medusa", Name: "Medusa", Tau: 2.5, Ovh: 0.10, Bsat: 20, Floor: -0.2, MemGB: 0.5,
+		Note: "需目标模型的 Medusa 头；系数仅为场景估算"},
+	{ID: "draft", Name: "草稿模型", Tau: 2.24, Ovh: 0.30, Bsat: 16, Floor: -0.2, MemGB: 0,
+		Note: "假设有兼容小模型；暂按目标权重 5% 计草稿显存，收益须实测"},
+	{ID: "lookahead", Name: "Lookahead", Tau: 1.9, Ovh: 0.08, Bsat: 24, Floor: 0, MemGB: 0,
+		Note: "n-gram 零草稿成本；收益高度依赖代码/编辑类重复模式"},
+	{ID: "dflash", Name: "DFlash", Tau: 6.5, Ovh: 0.30, Bsat: 64, Floor: 0.3, MemGB: 0.8,
+		Note: "需匹配的块扩散草稿；论文均值不能直接当生产吞吐"},
+	{ID: "dflash2", Name: "DFlash2", Tau: 4.5, Ovh: 0.30, Bsat: 36, Floor: 0.1, MemGB: 1.2,
+		Note: "需匹配草稿检查点；模型卡数据不能直接当生产吞吐"},
+}
+
+func SpecByID(id string) SpecMethod {
+	for _, s := range SpecMethods {
+		if s.ID == id {
+			return s
+		}
+	}
+	return SpecMethods[0]
+}
+
+// gain 当前并发下的净加速比（含草稿开销与并发衰减）。
+func (s SpecMethod) gain(batch int) float64 {
+	if s.ID == "none" || s.Tau <= 1 {
+		return 1
+	}
+	g1 := s.Tau / (1 + s.Ovh)
+	d := 1 - float64(batch-1)/s.Bsat
+	if d < s.Floor {
+		d = s.Floor
+	}
+	g := 1 + (g1-1)*d
+	if g < 0.3 {
+		g = 0.3 // 反噬下限
+	}
+	return g
+}
+
+// Opts 同时承载部署、缓存、媒体和实测校准。零值保持原有简单模式。
+type Opts struct {
+	Engine  string  `json:"engine"`
+	Spec    string  `json:"spec"`
+	KVQuant string  `json:"kvq"`    // fp16 | fp8 | fp4
+	HitRate float64 `json:"hit"`    // 命中的前缀 token 比例
+	OutLen  int     `json:"outlen"` // 平均输出 token
+
+	TP int `json:"tp,omitempty"` // tensor parallel；0=使用全部 cards
+	PP int `json:"pp,omitempty"` // pipeline parallel
+	EP int `json:"ep,omitempty"` // expert parallel
+	CP int `json:"cp,omitempty"` // context/KV parallel
+
+	WeightGB     float64 `json:"weight_gb,omitempty"`     // 实际加载权重 GB（整个副本）
+	RuntimeGB    float64 `json:"runtime_gb,omitempty"`    // 每卡实测框架常驻 GB
+	ActivationGB float64 `json:"activation_gb,omitempty"` // 每卡实测峰值 workspace GB
+	AdapterGB    float64 `json:"adapter_gb,omitempty"`    // 整个副本加载的 adapter 权重 GB
+	DraftGB      float64 `json:"draft_gb,omitempty"`      // 整个副本额外 draft/head 权重 GB
+	MemUtil      float64 `json:"mem_util,omitempty"`      // 可用显存比例
+	BWUtil       float64 `json:"bw_util,omitempty"`       // 实测 HBM 带宽利用率
+	FlopsUtil    float64 `json:"flops_util,omitempty"`    // 实测 dense 峰值利用率
+	LinkUtil     float64 `json:"link_util,omitempty"`     // 实测互联带宽利用率
+	ScheduleMS   float64 `json:"schedule_ms,omitempty"`   // 每 decode step 实测调度开销
+
+	KVOverhead   float64 `json:"kv_overhead,omitempty"` // block/allocator 容量系数
+	KVOffload    float64 `json:"kv_offload,omitempty"`  // 卸载到 CPU/远端的 KV 比例
+	OffloadBW    float64 `json:"offload_bw,omitempty"`  // 单卡有效回读 GB/s
+	PrefillChunk int     `json:"prefill_chunk,omitempty"`
+	MediaTokens  int     `json:"media_tokens,omitempty"` // 视觉/音频 encoder 输入 token
+	RouterSkew   float64 `json:"router_skew,omitempty"`  // EP 最忙 rank / 平均负载
+	SpecTau      float64 `json:"spec_tau,omitempty"`     // 实测每步接受 token
+	SpecOvh      float64 `json:"spec_ovh,omitempty"`     // 实测 draft/verify 相对开销
+}
+
+func (o Opts) norm() Opts {
+	if o.KVQuant == "" {
+		o.KVQuant = "fp16"
+	}
+	o.HitRate = clamp(o.HitRate, 0, 0.9)
+	if o.OutLen <= 0 {
+		o.OutLen = 512
+	}
+	if o.PrefillChunk <= 0 {
+		o.PrefillChunk = 8192
+	}
+	o.PrefillChunk = min(o.PrefillChunk, 1<<20)
+	if o.KVOverhead <= 0 {
+		o.KVOverhead = 1
+	}
+	o.KVOverhead = clamp(o.KVOverhead, 1, 2)
+	o.KVOffload = clamp(o.KVOffload, 0, 1)
+	if o.KVOffload > 0 && o.OffloadBW <= 0 {
+		o.KVOffload = 0
+	}
+	o.MemUtil = clamp(o.MemUtil, 0, 1)
+	o.BWUtil = clamp(o.BWUtil, 0, 1)
+	o.FlopsUtil = clamp(o.FlopsUtil, 0, 1)
+	o.LinkUtil = clamp(o.LinkUtil, 0, 1)
+	o.WeightGB = math.Max(0, o.WeightGB)
+	o.RuntimeGB = math.Max(0, o.RuntimeGB)
+	o.ActivationGB = math.Max(0, o.ActivationGB)
+	o.AdapterGB = math.Max(0, o.AdapterGB)
+	o.DraftGB = math.Max(0, o.DraftGB)
+	o.ScheduleMS = clamp(o.ScheduleMS, 0, 10_000)
+	o.OffloadBW = clamp(o.OffloadBW, 0, 1_000_000)
+	o.RouterSkew = clamp(o.RouterSkew, 1, 16)
+	o.SpecTau = clamp(o.SpecTau, 0, 32)
+	o.SpecOvh = clamp(o.SpecOvh, 0, 10)
+	o.MediaTokens = max(0, o.MediaTokens)
+	return o
+}
+
+// kvMemF KV cache 量化对逐 token KV 容量的压缩比。FP4 block16 按
+// SGLang 文档的 3.56× BF16 token 容量折算；线性注意力 state 不随之量化。
+func (o Opts) kvMemF() float64 {
+	switch o.KVQuant {
+	case "fp8":
+		return 0.5
+	case "fp4":
+		return 1 / 3.56
+	default:
+		return 1.0
+	}
+}
+
+func (o Opts) kvReadF(h HW, eng Engine) float64 {
+	switch o.KVQuant {
+	case "fp8":
+		if precHas(h, "fp8") {
+			return 0.5
+		}
+	case "fp4":
+		// 当前一手文档明确的 fused FP4 KV 路径是 SGLang + FP4 GPU。
+		if eng.ID == "sglang" && precHas(h, "fp4") {
+			return 1 / 3.56
+		}
+	}
+	return 1
+}
+
+// LoadHW / LoadModels 解析嵌入的 JSON 数据。
+func LoadHW(b []byte) ([]HW, error) {
+	var v []HW
+	err := json.Unmarshal(b, &v)
+	return v, err
+}
+
+func LoadModels(b []byte) ([]Model, error) {
+	var v []Model
+	err := json.Unmarshal(b, &v)
+	return v, err
+}
+
+// ---------- 基础量 ----------
+
+// Accel 返回该硬件上此量化档位是否有硬件快路径（否则仅省显存/带宽打折）。
+func (h HW) Accel(q Quant) bool {
+	switch q.Fam {
+	case "mlx":
+		return h.Vendor == "apple"
+	case "exl":
+		return h.Vendor == "nvidia"
+	case "gguf":
+		return false // 反量化路径，无原生加速
+	}
+	if q.ID == "fp4" {
+		return h.Vendor == "nvidia" && precHas(h, "fp4")
+	}
+	if q.ID == "mxfp4" {
+		return (h.Vendor == "nvidia" || h.Vendor == "amd") && precHas(h, "fp4")
+	}
+	if q.ID == "fp16" {
+		return precHas(h, "fp16") || precHas(h, "bf16")
+	}
+	if q.Need != "" {
+		return precHas(h, q.Need)
+	}
+	return false
+}
+
+// PeakTF 返回该量化路径可用的 dense 峰值；缺逐精度规格时使用架构倍率并标记为估算。
+func (h HW) PeakTF(q Quant) float64 {
+	if q.ID == "fp8" && h.TF8 > 0 {
+		return h.TF8
+	}
+	if q.ID == "int8" && h.TFInt8 > 0 {
+		return h.TFInt8
+	}
+	if q.ID == "fp4" && h.Accel(q) && h.TF4 > 0 {
+		return h.TF4
+	}
+	if h.Accel(q) {
+		return h.TF * q.Mul
+	}
+	return h.TF
+}
+
+func (h HW) peakExact(q Quant) bool {
+	switch q.ID {
+	case "fp8":
+		return h.TF8 > 0
+	case "int8":
+		return h.TFInt8 > 0
+	case "fp4":
+		return h.Accel(q) && h.TF4 > 0
+	}
+	return q.Fam == "std" && h.TF > 0
+}
+
+type topology struct {
+	tp, pp, ep, cp int
+	valid          bool
+}
+
+func (o Opts) topology(cards int) topology {
+	if cards < 1 {
+		cards = 1
+	}
+	if o.TP == 0 && o.PP == 0 && o.EP == 0 && o.CP == 0 {
+		return topology{tp: cards, pp: 1, ep: 1, cp: 1, valid: true}
+	}
+	t := topology{tp: max(1, o.TP), pp: max(1, o.PP), ep: max(1, o.EP), cp: max(1, o.CP)}
+	t.valid = t.tp*t.pp*t.ep*t.cp == cards
+	if !t.valid {
+		t.tp, t.pp, t.ep, t.cp = cards, 1, 1, 1
+	}
+	return t
+}
+
+func (o Opts) topologyFor(m Model, cards int) topology {
+	t := o.topology(cards)
+	if t.ep > 1 && !m.MoE {
+		return topology{tp: max(1, cards), pp: 1, ep: 1, cp: 1, valid: false}
+	}
+	return t
+}
+
+func (t topology) String() string {
+	return fmt.Sprintf("TP%d · PP%d · EP%d · CP%d", t.tp, t.pp, t.ep, t.cp)
+}
+
+type weightParts struct {
+	baseTotal, expertTotal   float64
+	expertActive, expertRead float64
+}
+
+func (m Model) weights(batch int) weightParts {
+	textParams := math.Max(0, m.Params-m.EncoderParams)
+	textActive := math.Min(textParams, m.Active)
+	p := weightParts{baseTotal: textParams}
+	if !m.MoE || m.Experts <= m.TopK || m.TopK <= 0 {
+		return p
+	}
+	perExpert := (textParams - textActive) / float64(m.Experts-m.TopK)
+	if perExpert <= 0 {
+		return p
+	}
+	p.expertTotal = float64(m.Experts) * perExpert
+	p.baseTotal = math.Max(0, textParams-p.expertTotal)
+	p.expertActive = float64(m.TopK) * perExpert
+	unique := float64(m.Experts) * (1 - math.Pow(1-float64(m.TopK)/float64(m.Experts), float64(batch)))
+	p.expertRead = math.Min(p.expertTotal, unique*perExpert)
+	return p
+}
+
+func (o Opts) weightGB(m Model, q Quant) float64 {
+	if o.WeightGB > 0 {
+		return o.WeightGB
+	}
+	if m.CheckpointGB > 0 && m.NativeQuant == q.ID {
+		return m.CheckpointGB
+	}
+	return m.Params * q.Bytes
+}
+
+func (o Opts) bwUtil(q Quant, eng Engine, h HW) float64 {
+	if o.BWUtil > 0 {
+		return o.BWUtil
+	}
+	v := q.Eta * eng.EtaMul
+	if h.Unified {
+		v *= 0.85
+	}
+	return v
+}
+
+func (o Opts) flopsUtil(eng Engine) float64 {
+	if o.FlopsUtil > 0 {
+		return o.FlopsUtil
+	}
+	return eng.Flops
+}
+
+func (o Opts) linkBW(h HW) float64 {
+	bw := h.Link.B
+	if bw <= 0 {
+		bw = pcieBW
+	}
+	if o.LinkUtil > 0 {
+		bw *= o.LinkUtil
+	}
+	return bw
+}
+
+func (o Opts) capGB(h HW, eng Engine) float64 {
+	if o.MemUtil > 0 {
+		return h.VRAM * o.MemUtil
+	}
+	return h.CapGB(eng)
+}
+
+func (o Opts) activationGB(m Model, ctx, batch int, t topology) float64 {
+	if o.ActivationGB > 0 {
+		return o.ActivationGB
+	}
+	tokens := float64(batch * min(ctx, o.PrefillChunk))
+	// FlashAttention 不保存 O(n²) attention matrix；保留 residual、QKV/MLP workspace 的一阶上界。
+	return tokens * m.Hidden * 2 * 4 / 1e9 / float64(t.tp*t.cp)
+}
+
+// kvLayers 返回持有逐 token KV 的 attention 层数。
+func (m Model) kvLayers() int {
+	if m.KVLayers > 0 {
+		return m.KVLayers
+	}
+	return m.Layers
+}
+
+func (m Model) localLayers() int {
+	if m.LocalLayers < 0 || m.LocalLayers > m.kvLayers() || m.Window <= 0 {
+		return 0
+	}
+	return m.LocalLayers
+}
+
+func (m Model) kvLayerBytes() float64 {
+	if m.KVT == "mla" {
+		return m.MLA * 2
+	}
+	return 2 * float64(m.KVH) * float64(m.Dim) * 2
+}
+
+// KVTokBytes 返回所有 KV attention 层追加一个 token 的 FP16 K+V 字节数。
+func (m Model) KVTokBytes() float64 {
+	return float64(m.kvLayers()) * m.kvLayerBytes()
+}
+
+// KVBytes 返回一个请求在指定上下文下实际保留的 FP16 KV 字节数。
+// full attention 保留全部上下文；sliding/local attention 只保留 Window。
+func (m Model) KVBytes(ctx int) float64 {
+	layers := m.kvLayers()
+	local := m.localLayers()
+	full := layers - local
+	localCtx := ctx
+	if local > 0 && localCtx > m.Window {
+		localCtx = m.Window
+	}
+	return (float64(full*ctx) + float64(local*localCtx)) * m.kvLayerBytes()
+}
+
+// KVBatchBytes 返回 batch 个请求在共享前缀命中时实际驻留的 FP16 KV 字节。
+// full-attention 前缀 block 只存一份；local-attention 仅共享仍落在滑窗内的尾部。
+func (m Model) KVBatchBytes(ctx, batch int, hit float64) float64 {
+	if ctx <= 0 || batch <= 0 {
+		return 0
+	}
+	shared := min(ctx, int(float64(ctx)*clamp(hit, 0, 1)))
+	local := m.localLayers()
+	full := m.kvLayers() - local
+	fullTokens := shared + (ctx-shared)*batch
+	localCtx := ctx
+	if local > 0 {
+		localCtx = min(ctx, m.Window)
+	}
+	sharedLocal := min(shared, max(0, localCtx-(ctx-shared)))
+	localTokens := sharedLocal + (localCtx-sharedLocal)*batch
+	return (float64(full*fullTokens) + float64(local*localTokens)) * m.kvLayerBytes()
+}
+
+// kvRankFactor 是每个 TP rank 持有的逐 token KV 比例。KV head 少于 TP
+// 时会复制，不能把 KV 无条件除以 TP；MLA latent cache 默认在 TP ranks 间复制。
+func (m Model) kvRankFactor(tp int) float64 {
+	if tp <= 1 || m.KVT == "mla" || m.KVH <= 0 {
+		return 1
+	}
+	return math.Ceil(float64(m.KVH)/float64(tp)) / float64(m.KVH)
+}
+
+// CapGB 返回当前引擎的单卡可用显存预算。vLLM/SGLang/TRT 类服务引擎
+// 按常用 0.90 配置；本地轻量运行时按 0.95；统一内存为系统保留更多空间。
+func (h HW) CapGB(eng Engine) float64 {
+	if h.Unified {
+		return h.VRAM * 0.70
+	}
+	switch eng.ID {
+	case "llamacpp", "mlx", "exllama":
+		return h.VRAM * 0.95
+	default:
+		return h.VRAM * 0.90
+	}
+}
+
+// MemDetail 五段式显存明细（每卡，TP 分片后）。
+type MemDetail struct {
+	Weights     float64 `json:"weights"`
+	KV          float64 `json:"kv"`
+	Fw          float64 `json:"fw"`
+	Act         float64 `json:"act"`
+	Adapter     float64 `json:"adapter"`
+	OffloadedKV float64 `json:"offloaded_kv"`
+	Sys         float64 `json:"sys"`
+	Total       float64 `json:"total"`
+	Cap         float64 `json:"cap"`
+	Budget      float64 `json:"budget"`   // 引擎可分配预算；Cap 为物理显存
+	HeadPct     float64 `json:"head_pct"` // (Budget-已分配)/物理显存
+	Fit         bool    `json:"fit"`
+}
+
+func Memory(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) MemDetail {
+	o = o.norm()
+	eng := resolveEngine(o.Engine, h, q)
+	t := o.topologyFor(m, cards)
+	spec := SpecByID(o.Spec)
+	parts := m.weights(batch)
+	weightTotal := o.weightGB(m, q)
+	textParams := math.Max(0, m.Params-m.EncoderParams)
+	encoderWeight := 0.0
+	if m.Params > 0 {
+		encoderWeight = weightTotal * m.EncoderParams / m.Params
+	}
+	textWeight := math.Max(0, weightTotal-encoderWeight)
+	weights := encoderWeight/float64(t.tp) +
+		textWeight*(parts.baseTotal/math.Max(textParams, 1e-9)/float64(t.tp*t.pp)+
+			parts.expertTotal/math.Max(textParams, 1e-9)/float64(t.tp*t.ep*t.pp))
+
+	kvRaw := m.KVBatchBytes(ctx, batch, o.HitRate) / 1e9 * o.kvMemF() * o.KVOverhead *
+		m.kvRankFactor(t.tp) / float64(t.pp*t.cp)
+	offloadedKV := kvRaw * o.KVOffload
+	state := m.StateMB / 1000 * float64(batch) / float64(t.tp*t.pp)
+	kv := kvRaw - offloadedKV + state
+
+	runtime := eng.FwMem
+	if o.RuntimeGB > 0 {
+		runtime = o.RuntimeGB
+	}
+	draft := o.DraftGB
+	if draft <= 0 && (spec.ID != "mtp" || m.MTP || m.MTPHeads > 0) {
+		draft = spec.MemGB
+		if o.Spec == "draft" {
+			draft = weightTotal * 0.05
+		}
+	}
+	adapter := (o.AdapterGB + draft) / float64(t.tp*t.pp)
+	act := o.activationGB(m, ctx, batch, t)
+	allocated := weights + kv + runtime + act + adapter
+	budget := o.capGB(h, eng)
+	sys := math.Max(0, h.VRAM-budget)
+	d := MemDetail{
+		Weights: weights, KV: kv, Fw: runtime, Act: act, Adapter: adapter, OffloadedKV: offloadedKV,
+		Sys: sys, Total: allocated + sys, Cap: h.VRAM, Budget: budget,
+	}
+	d.HeadPct = (budget - allocated) / h.VRAM
+	d.Fit = allocated <= budget
+	return d
+}
+
+// ---------- 吞吐 ----------
+
+type Perf struct {
+	Fit             bool       `json:"fit"`
+	Mem             MemDetail  `json:"mem"`
+	SingleTPS       float64    `json:"single_tps"`
+	AggTPS          float64    `json:"agg_tps"`
+	PreTPS          float64    `json:"pre_tps"`   // 有效 prefill 速度 tok/s（当前上下文口径）
+	ReqS            float64    `json:"req_s"`     // 稳态请求速率 req/s（当前并发）
+	TPM             float64    `json:"tpm"`       // decode 输出 tok/min
+	TPMMixed        float64    `json:"tpm_mixed"` // 混合 TPM：一分钟处理的输入+输出总 token
+	TTFTms          float64    `json:"ttft_ms"`
+	TPOTms          float64    `json:"tpot_ms"`
+	ReqMs           float64    `json:"req_ms"` // 单请求时延（TTFT + (outlen-1)×TPOT）
+	MaxBatch        int        `json:"max_batch"`
+	Accel           bool       `json:"accel"`
+	EngName         string     `json:"eng_name"`
+	EngOK           bool       `json:"eng_ok"` // 框架是否原生支持该硬件
+	SpecName        string     `json:"spec_name"`
+	Bottleneck      string     `json:"bottleneck"`        // memory | compute
+	DecodeMemMs     float64    `json:"decode_mem_ms"`     // 每 decode step 的显存 roof
+	DecodeComputeMs float64    `json:"decode_compute_ms"` // 每 decode step 的算力 roof
+	CommMs          float64    `json:"comm_ms"`           // 每 decode step 的 TP collective
+	ScheduleMs      float64    `json:"schedule_ms"`       // 每 decode step 的调度场景值
+	OffloadMs       float64    `json:"offload_ms"`
+	EncoderMs       float64    `json:"encoder_ms"`
+	PeakTF          float64    `json:"peak_tf"`
+	PeakExact       bool       `json:"peak_exact"`
+	Accuracy        string     `json:"accuracy"` // analytical | calibrated
+	Topology        string     `json:"topology"`
+	TopologyOK      bool       `json:"topology_ok"`
+	Trace           []TraceRow `json:"trace"`
+	tPre            float64    // 纯 prefill 耗时 ms（内部复用，不序列化）
+}
+
+type TraceRow struct {
+	K string `json:"k"`
+	V string `json:"v"`
+	N string `json:"n,omitempty"` // 注释
+}
+
+func tr(k, v, n string) TraceRow { return TraceRow{K: k, V: v, N: n} }
+
+const pcieBW = 25.0 // 无互联时 PCIe4 x16 有效带宽 GB/s
+
+func tpCommMs(h HW, m Model, tokens float64, t topology, o Opts) float64 {
+	if t.tp <= 1 {
+		return 0
+	}
+	// 每层 attention/MLP 各一次 AllReduce；ring 每次传 2*(TP-1)/TP 份 payload。
+	ring := 2 * float64(t.tp-1) / float64(t.tp)
+	return 2 * ring * float64(m.Layers) * tokens * m.Hidden * 2 / 1e9 / o.linkBW(h) * 1000
+}
+
+func routerSkew(m Model, tokens float64, ep int, o Opts) float64 {
+	skew := o.RouterSkew
+	if m.TopK > 0 {
+		assignments := math.Max(1, tokens*float64(m.TopK))
+		skew = math.Max(skew, float64(ep)/math.Min(float64(ep), assignments))
+	}
+	return skew
+}
+
+func epCommMs(h HW, m Model, tokens float64, t topology, o Opts) float64 {
+	if t.ep <= 1 || !m.MoE {
+		return 0
+	}
+	layers := m.MoELayers
+	if layers <= 0 {
+		layers = m.Layers
+	}
+	// 每个 MoE 层按 TopK 路由做 dispatch + combine All-to-All。
+	routes := float64(max(1, m.TopK))
+	traffic := 2 * float64(t.ep-1) / float64(t.ep) * float64(layers) * tokens * routes * m.Hidden * 2 / 1e9
+	return traffic * routerSkew(m, tokens, t.ep, o) / o.linkBW(h) * 1000
+}
+
+func cpCommMs(h HW, m Model, tokens float64, t topology, o Opts) float64 {
+	if t.cp <= 1 {
+		return 0
+	}
+	traffic := 2 * float64(t.cp-1) / float64(t.cp) * float64(m.kvLayers()) * tokens * m.Hidden * 2 / 1e9
+	return traffic / o.linkBW(h) * 1000
+}
+
+func ppCommMs(h HW, m Model, tokens float64, t topology, o Opts) float64 {
+	if t.pp <= 1 {
+		return 0
+	}
+	traffic := float64(t.pp-1) * tokens * m.Hidden * 2 / 1e9
+	return traffic / o.linkBW(h) * 1000
+}
+
+func commMs(h HW, m Model, tokens float64, t topology, o Opts) float64 {
+	return tpCommMs(h, m, tokens, t, o) + epCommMs(h, m, tokens, t, o) +
+		cpCommMs(h, m, tokens, t, o) + ppCommMs(h, m, tokens, t, o)
+}
+
+func activeWeightRead(m Model, batch int) float64 {
+	p := m.weights(batch)
+	if p.expertTotal > 0 {
+		return p.baseTotal + p.expertRead
+	}
+	if m.MoE {
+		return math.Min(math.Max(0, m.Params-m.EncoderParams), m.Active*float64(batch))
+	}
+	return math.Max(0, m.Params-m.EncoderParams)
+}
+
+// Throughput 计算 decode/prefill 的一阶 roofline 容量；cards 由 TP×PP×EP×CP 分解。
+func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
+	o = o.norm()
+	eng := resolveEngine(o.Engine, h, q)
+	spec := SpecByID(o.Spec)
+	t := o.topologyFor(m, cards)
+	kvmf, kvrf := o.kvMemF(), o.kvReadF(h, eng)
+	mem := Memory(h, m, q, ctx, batch, cards, o)
+	topologyOK := t.valid
+	p := Perf{
+		Fit: mem.Fit, Mem: mem, Accel: h.Accel(q), EngName: eng.Name, EngOK: eng.EngineOK(h),
+		SpecName: spec.Name, PeakTF: h.PeakTF(q), PeakExact: h.peakExact(q),
+		Accuracy: "analytical", Topology: t.String(), TopologyOK: topologyOK,
+	}
+	if o.BWUtil > 0 && o.FlopsUtil > 0 && o.ScheduleMS > 0 && (cards == 1 || o.LinkUtil > 0) {
+		p.Accuracy = "calibrated"
+	}
+
+	parts := m.weights(batch)
+	weightTotal := o.weightGB(m, q)
+	bytesPerParam := weightTotal / math.Max(m.Params, 1e-9)
+	skew := routerSkew(m, float64(batch), t.ep, o)
+	activeW := activeWeightRead(m, batch)
+	wGB := activeW * bytesPerParam / float64(t.tp)
+	linearActive := math.Max(0, m.Active-m.EncoderParams)
+	if parts.expertTotal > 0 {
+		wGB = (parts.baseTotal + parts.expertRead*skew/float64(t.ep)) * bytesPerParam / float64(t.tp)
+		linearActive = parts.baseTotal + parts.expertActive*skew/float64(t.ep)
+	}
+	wGB += o.AdapterGB / float64(t.tp)
+
+	kvReadCtx := ctx
+	if m.Sparse > 0 && float64(kvReadCtx) > m.Sparse {
+		kvReadCtx = int(m.Sparse)
+	}
+	kvTotalGB := m.KVBytes(kvReadCtx) * float64(batch) / 1e9 * m.kvRankFactor(t.tp) /
+		float64(t.cp) * kvrf * o.KVOverhead
+	kvGPU := kvTotalGB * (1 - o.KVOffload)
+	kvOffload := kvTotalGB * o.KVOffload
+	stateGB := 2 * m.StateMB / 1000 * float64(batch) / float64(t.tp)
+	eta := o.bwUtil(q, eng, h)
+	tHBM := (wGB + kvGPU + stateGB) / (h.BW * eta) * 1000
+	tOffload := 0.0
+	if kvOffload > 0 {
+		tOffload = kvOffload / o.OffloadBW * 1000
+	}
+	tMem := tHBM + tOffload
+
+	peakTF := h.PeakTF(q)
+	flopsUtil := o.flopsUtil(eng)
+	attnL := m.kvLayers()
+	localL := m.localLayers()
+	fullL := attnL - localL
+	fullKeys := float64(ctx)
+	if m.Sparse > 0 {
+		fullKeys = math.Min(fullKeys, m.Sparse)
+	}
+	localKeys := float64(ctx)
+	if localL > 0 {
+		localKeys = math.Min(localKeys, float64(m.Window))
+	}
+	if m.Sparse > 0 {
+		localKeys = math.Min(localKeys, m.Sparse)
+	}
+	decodeF := 2*linearActive*1e9*float64(batch) +
+		4*float64(batch)*m.Hidden*(float64(fullL)*fullKeys+float64(localL)*localKeys)/float64(t.cp)
+	tCompute := decodeF / (peakTF * 1e12 * float64(t.tp) * flopsUtil) * 1000
+	tpComm := tpCommMs(h, m, float64(batch), t, o)
+	epComm := epCommMs(h, m, float64(batch), t, o)
+	cpComm := cpCommMs(h, m, float64(batch), t, o)
+	ppComm := ppCommMs(h, m, float64(batch), t, o)
+	tComm := tpComm + epComm + cpComm + ppComm
+	tFixed := eng.StepMs * (1 + float64(batch)/eng.SchedK)
+	if o.ScheduleMS > 0 {
+		tFixed = o.ScheduleMS
+	}
+	tStep := math.Max(tMem, tCompute) + tComm + tFixed
+	p.Bottleneck = "memory"
+	if tCompute > tMem {
+		p.Bottleneck = "compute"
+	} else if tOffload > tHBM && tOffload > tCompute {
+		p.Bottleneck = "offload"
+	}
+	p.DecodeMemMs = round2(tMem)
+	p.DecodeComputeMs = round2(tCompute)
+	p.CommMs = round2(tComm)
+	p.ScheduleMs = round2(tFixed)
+	p.OffloadMs = round2(tOffload)
+
+	specScenario := spec
+	if o.SpecTau > 0 {
+		specScenario.Tau = o.SpecTau
+	}
+	if o.SpecOvh > 0 {
+		specScenario.Ovh = o.SpecOvh
+	}
+	g := specScenario.gain(batch)
+	specOK := spec.ID != "mtp" || m.MTP || m.MTPHeads > 0
+	if !specOK {
+		g = 1
+	}
+	single := 1000 / tStep * g
+	agg := float64(batch) * 1000 / tStep * g
+
+	// Prefix 命中 P、待算 token N 时，dense causal QK+AV =
+	// 2*L*D*N*(2*(P+N)-N)。CP 在 token 维度分摊 prefill。
+	inEff := float64(ctx) * (1 - o.HitRate)
+	preTokens := inEff / float64(t.cp)
+	preSkew := routerSkew(m, math.Max(1, preTokens), t.ep, o)
+	preActive := math.Max(0, m.Active-m.EncoderParams)
+	preParts := m.weights(max(1, int(math.Min(inEff, 1e6))))
+	preRead := activeWeightRead(m, max(1, int(math.Min(inEff, 1e6))))
+	if preParts.expertTotal > 0 {
+		preActive = preParts.baseTotal + preParts.expertActive*preSkew/float64(t.ep)
+		preRead = preParts.baseTotal + preParts.expertRead*preSkew/float64(t.ep)
+	}
+	tLinCompute := 2 * preActive * preTokens / (peakTF * float64(t.tp) * flopsUtil)
+	preWeightGB := preRead*bytesPerParam/float64(t.tp) + o.AdapterGB/float64(t.tp)
+	tWeight := preWeightGB / (h.BW * eta) * 1000
+	chunks := math.Max(1, math.Ceil(inEff/float64(o.PrefillChunk)))
+	tLin := math.Max(tLinCompute, tWeight*chunks)
+
+	var attnF float64
+	if fullL > 0 {
+		if m.Sparse > 0 {
+			attnF += 4 * float64(fullL) * inEff * math.Min(float64(ctx), m.Sparse) * m.Hidden
+		} else {
+			attnF += 2 * float64(fullL) * inEff * (2*float64(ctx) - inEff) * m.Hidden
+		}
+	}
+	if localL > 0 {
+		window := math.Min(float64(ctx), float64(m.Window))
+		if m.Sparse > 0 {
+			window = math.Min(window, m.Sparse)
+		}
+		prefix := float64(ctx) - inEff
+		ramp := math.Min(inEff, math.Max(0, window-prefix))
+		keyPairs := ramp*(2*prefix+ramp)/2 + (inEff-ramp)*window
+		attnF += 4 * float64(localL) * keyPairs * m.Hidden
+	}
+	tAttn := attnF / float64(t.cp) / (peakTF * 1e12 * float64(t.tp) * flopsUtil) * 1000
+	tPreComm := commMs(h, m, preTokens, t, o)
+	kvWriteGB := m.KVTokBytes() * inEff / 1e9 * m.kvRankFactor(t.tp) / float64(t.cp) * kvmf * o.KVOverhead
+	tKVWrite := kvWriteGB * (1 - o.KVOffload) / (h.BW * eta) * 1000
+	if o.KVOffload > 0 {
+		tKVWrite += kvWriteGB * o.KVOffload / o.OffloadBW * 1000
+	}
+	tEncoder := 0.0
+	if m.EncoderParams > 0 && o.MediaTokens > 0 {
+		encoderGB := weightTotal * m.EncoderParams / math.Max(m.Params, 1e-9) / float64(t.tp)
+		encoderCompute := 2 * m.EncoderParams * float64(o.MediaTokens) / (peakTF * float64(t.tp) * flopsUtil)
+		encoderRead := encoderGB / (h.BW * eta) * 1000
+		tEncoder = math.Max(encoderCompute, encoderRead)
+	}
+	p.EncoderMs = round2(tEncoder)
+	preSchedule := chunks * eng.StepMs
+	tPre := tLin + tAttn + tPreComm + tKVWrite + tEncoder + preSchedule
+
+	p.SingleTPS = round1(single)
+	p.AggTPS = round1(agg)
+	p.TPM = round1(agg * 60)
+	if tPre > 0 {
+		p.PreTPS = round1(inEff / tPre * 1000)
+	}
+	decodeTokens := math.Max(0, float64(o.OutLen-1))
+	if agg > 0 {
+		reqS := 1 / (decodeTokens/agg + tPre/1000)
+		p.ReqS = round2(reqS)
+		p.TPMMixed = round1(reqS * (float64(ctx) + float64(o.OutLen)) * 60)
+	}
+	p.TPOTms = round1(tStep / g)
+	p.TTFTms = round1(tPre)
+	p.ReqMs = round1(tPre + decodeTokens*tStep/g)
+	p.tPre = tPre
+	kvScale := m.kvRankFactor(t.tp) / float64(t.pp*t.cp) * kvmf * o.KVOverhead * (1 - o.KVOffload) / 1e9
+	kvOne := m.KVBatchBytes(ctx, 1, o.HitRate) * kvScale
+	kvPerReq := (m.KVBatchBytes(ctx, 2, o.HitRate)-m.KVBatchBytes(ctx, 1, o.HitRate))*kvScale +
+		m.StateMB/1000/float64(t.tp*t.pp)
+	actPerReq := mem.Act / float64(max(1, batch))
+	fixed := mem.Weights + mem.Fw + mem.Adapter + math.Max(0, kvOne-kvPerReq)
+	if perRequest := kvPerReq + actPerReq; perRequest > 0 {
+		p.MaxBatch = max(0, int((mem.Budget-fixed)/perRequest))
+	}
+
+	peakLabel := "厂商逐精度峰值"
+	if !p.PeakExact {
+		peakLabel = "由 FP16 峰值和架构倍率估算"
+	}
+	weightNote := fmt.Sprintf("%gB 参数 × %.2f B/param（%s）", m.Params, q.Bytes, q.Name)
+	if o.WeightGB > 0 {
+		weightNote = "使用用户输入的实际加载权重"
+	} else if m.CheckpointGB > 0 && m.NativeQuant == q.ID {
+		weightNote = "使用 HF safetensors payload（匹配原生量化）"
+	}
+	p.Trace = []TraceRow{
+		tr("估算级别", p.Accuracy, "analytical 为未校准 roofline；calibrated 表示已提供关键实测利用率"),
+		tr("并行拓扑", p.Topology, fmt.Sprintf("%d cards；乘积必须相等", cards)),
+		tr("推理框架", eng.Name, engNote(eng, h, p.EngOK, p.Accuracy == "calibrated")),
+		tr("量化路径", fmt.Sprintf("W%s · A%s · KV %s", q.W, q.A, strings.ToUpper(o.KVQuant)), quantNote(h, q, eng, peakTF/h.TF)),
+		tr("权重显存", gb(mem.Weights), weightNote),
+		tr("KV / 状态", gb(mem.KV), kvNote(m, ctx, batch, t, o, kvrf)),
+		tr("单卡预算", fmt.Sprintf("%.1f / %.1f GB", mem.Budget, mem.Cap), capNote(h, eng, o)),
+		tr("decode 单步访存", fmt.Sprintf("%.2f GB", wGB+kvGPU+stateGB), moeNote(m, activeW)+sparseReadNote(m, ctx)),
+		tr("decode roofline", fmt.Sprintf("%.2f ms", math.Max(tMem, tCompute)), fmt.Sprintf("max(访存 %.2fms, 计算 %.2fms)；峰值 %.0f TF（%s）", tMem, tCompute, peakTF, peakLabel)),
+		tr("有效带宽", fmt.Sprintf("%.0f GB/s", h.BW*eta), fmt.Sprintf("标称 %.0f × η%.2f", h.BW, eta)),
+		tr("通信耗时", fmt.Sprintf("%.2f ms", tComm), fmt.Sprintf("%s；TP %.2f + EP %.2f + CP %.2f + PP %.2f ms", commNote(h, t, o), tpComm, epComm, cpComm, ppComm)),
+		tr("单步耗时", fmt.Sprintf("%.2f ms", tStep), fmt.Sprintf("roofline + 通信 + 调度 %.2fms（%s）", tFixed, eng.Name)),
+	}
+	if o.KVOffload > 0 {
+		p.Trace = append(p.Trace, tr("KV offload", fmt.Sprintf("%.2f ms/step", tOffload),
+			fmt.Sprintf("%.0f%% KV 经 %.0f GB/s 层级回读；外部容量 %.1f GB", o.KVOffload*100, o.OffloadBW, mem.OffloadedKV)))
+	}
+	if spec.ID != "none" {
+		note := specNote(specScenario, batch)
+		if !specOK {
+			note = "⚠ 模型没有 MTP 头元数据，本次不应用加速"
+		}
+		p.Trace = append(p.Trace,
+			tr("推测解码", fmt.Sprintf("%s ×%.2f", spec.Name, g), note),
+			tr("有效 TPOT", fmt.Sprintf("%.2f ms", tStep/g), fmt.Sprintf("单步 %.2fms ÷ 场景增益 ×%.2f", tStep, g)),
+		)
+	}
+	p.Trace = append(p.Trace,
+		tr("prefill 耗时", fmt.Sprintf("%.0f ms", tPre), prefillNote(m, ctx, o, tLin, tAttn, tPreComm)),
+		tr("prefill 分块", fmt.Sprintf("%.0f × %d", float64(o.PrefillChunk), int(chunks)), fmt.Sprintf("KV 写入 %.0fms；encoder %.0fms", tKVWrite, tEncoder)),
+		tr("prefill 速度", fmt.Sprintf("%.0f tok/s", p.PreTPS), fmt.Sprintf("未命中输入 %d tok ÷ %.0f ms", int(inEff), tPre)),
+		tr("请求时延", fmt.Sprintf("%.0f ms", p.ReqMs), fmt.Sprintf("TTFT + %d 个后续 token × TPOT", int(decodeTokens))),
+		tr("稳态速率", fmt.Sprintf("%.2f req/s", p.ReqS), fmt.Sprintf("后续 decode 预算 %.0f/%.0f + prefill 预算 %.2fs", decodeTokens, agg, tPre/1000)),
+		tr("混合 TPM", fmt.Sprintf("%.0f tok/min", p.TPMMixed), fmt.Sprintf("%.2f req/s ×（%d 原始输入 + %d 输出）× 60", p.ReqS, ctx, o.OutLen)),
+	)
+	if !topologyOK {
+		p.Trace = append(p.Trace, tr("⚠ 拓扑无效", p.Topology, "TP×PP×EP×CP 必须等于 cards，且 EP 仅适用于 MoE；已回退全 TP"))
+	}
+	if m.Multimodal && m.EncoderParams == 0 {
+		p.Trace = append(p.Trace, tr("⚠ 多模态 encoder", "参数量未知", "文本塔可计算；媒体 encoder TTFT 未计入"))
+	}
+	if m.Ctx > 0 && ctx > m.Ctx {
+		p.Trace = append(p.Trace, tr("⚠ 上下文外推",
+			fmt.Sprintf("%dK > 原生 %dK", ctx/1024, m.Ctx/1024),
+			"需 YaRN / RoPE 外推，长文精度与稳定性可能下降"))
+	}
+	return p
+}
+
+func engNote(eng Engine, h HW, ok, calibrated bool) string {
+	if !ok {
+		return fmt.Sprintf("⚠ %s 未列出 %s 原生支持；性能数字仅为通用基线", eng.Name, h.Vendor)
+	}
+	if calibrated {
+		return eng.Note + "；使用当前部署实测校准参数"
+	}
+	return eng.Note + "；性能系数未做同条件基准校准"
+}
+
+// quantNote 量化路径说明：框架错配与 prefill 算力倍率。
+func quantNote(h HW, q Quant, eng Engine, fmul float64) string {
+	s := q.Note
+	switch q.Fam {
+	case "gguf":
+		if eng.ID != "llamacpp" {
+			s = "⚠ GGUF 在 " + eng.Name + " 下支持有限，建议 llama.cpp；" + s
+		}
+	case "mlx":
+		if eng.ID != "mlx" {
+			s = "⚠ MLX 量化需 MLX 框架（Apple Silicon）；" + s
+		}
+	case "exl":
+		if eng.ID != "exllama" {
+			s = "⚠ EXL3 需 ExLlamaV3 框架；" + s
+		}
+	}
+	if fmul > 1 {
+		s += fmt.Sprintf("；prefill 算力 ×%.0f", fmul)
+	} else if q.Mul > 1 {
+		s += "；该卡无 " + strings.ToUpper(q.Need) + " 路径，prefill 不加速"
+	}
+	return s
+}
+
+func kvNote(m Model, ctx, batch int, t topology, o Opts, readF float64) string {
+	rank := m.kvRankFactor(t.tp) / float64(t.pp*t.cp)
+	base := fmt.Sprintf("%.1f MB/请求原始 KV × %d 并发 × rank比例 %.3f",
+		m.KVBytes(ctx)/1e6, batch, rank)
+	if o.HitRate > 0 {
+		base += fmt.Sprintf("；共享前缀 %.0f%% 的 block 仅驻留一份", o.HitRate*100)
+	}
+	if local := m.localLayers(); local > 0 {
+		base += fmt.Sprintf("（%d full + %d local@%d）", m.kvLayers()-local, local, m.Window)
+	}
+	if m.StateMB > 0 {
+		base += fmt.Sprintf(" + %.1f MB/请求 recurrent state", m.StateMB)
+	}
+	switch o.KVQuant {
+	case "fp8":
+		base += "；逐 token KV 容量 ×0.50"
+	case "fp4":
+		base += "；逐 token KV 容量 ×0.281（SGLang block16 实验格式）"
+	}
+	if o.KVOverhead != 1 {
+		base += fmt.Sprintf("；allocator ×%.2f", o.KVOverhead)
+	}
+	if o.KVOffload > 0 {
+		base += fmt.Sprintf("；GPU 保留 %.0f%%", (1-o.KVOffload)*100)
+	}
+	if o.KVQuant != "fp16" && readF == 1 {
+		base += "；当前硬件/引擎未计读取加速"
+	}
+	return base
+}
+
+func specNote(spec SpecMethod, batch int) string {
+	s := spec.Note
+	if batch > 1 {
+		g1 := spec.Tau / (1 + spec.Ovh)
+		s += fmt.Sprintf("；b=%d 时增益 %.2f×（单流峰值 %.2f×）", batch, spec.gain(batch), g1)
+	}
+	return s
+}
+
+func prefillNote(m Model, ctx int, o Opts, tLin, tAttn, tComm float64) string {
+	s := ""
+	if o.HitRate > 0 {
+		s = fmt.Sprintf("前缀 token 命中 %.0f%% → 重算 %d tok；", o.HitRate*100, int(float64(ctx)*(1-o.HitRate)))
+	}
+	s += fmt.Sprintf("linear roof %.0fms + attention %.0fms + 通信 %.0fms", tLin, tAttn, tComm)
+	if m.Sparse > 0 {
+		s += "；稀疏 attention 已按选择预算折减"
+	}
+	if m.LocalLayers > 0 && m.Window > 0 {
+		s += fmt.Sprintf("；%d 个 local attention 层按 %d-token window", m.LocalLayers, m.Window)
+	}
+	return s
+}
+
+func moeNote(m Model, activeW float64) string {
+	if !m.MoE {
+		return "dense：每步读全部权重"
+	}
+	if m.Experts > m.TopK && m.TopK > 0 {
+		return fmt.Sprintf("MoE：按 %d/%d 路由的期望去重专家估算，读取 %.1fB", m.TopK, m.Experts, activeW)
+	}
+	return fmt.Sprintf("MoE：缺专家元数据，按 min(total, active×batch) 保守上界，读取 %.1fB", activeW)
+}
+
+func sparseReadNote(m Model, ctx int) string {
+	if m.Sparse <= 0 || m.Sparse >= float64(ctx) {
+		return ""
+	}
+	return fmt.Sprintf("；DSA 稀疏读取 %dK/%dK", int(m.Sparse/1024), ctx/1024)
+}
+
+func capNote(h HW, eng Engine, o Opts) string {
+	if o.MemUtil > 0 {
+		return fmt.Sprintf("%.0fG × %.2f（用户配置的执行器预算）", h.VRAM, o.MemUtil)
+	}
+	if h.Unified {
+		return fmt.Sprintf("统一内存 %.0fG × 0.70", h.VRAM)
+	}
+	if eng.ID == "llamacpp" || eng.ID == "mlx" || eng.ID == "exllama" {
+		return fmt.Sprintf("%.0fG × 0.95（本地轻量运行时预算）", h.VRAM)
+	}
+	return fmt.Sprintf("%.0fG × 0.90（%s 服务预算）", h.VRAM, eng.Name)
+}
+
+func commNote(h HW, t topology, o Opts) string {
+	if t.tp*t.pp*t.ep*t.cp <= 1 {
+		return "单卡无通信"
+	}
+	path := fmt.Sprintf("%s %.0f GB/s", h.Link.T, o.linkBW(h))
+	if h.Link.B <= 0 {
+		path = fmt.Sprintf("PCIe ~%.0f GB/s", o.linkBW(h))
+	}
+	return t.String() + " 走 " + path
+}
+
+func gb(v float64) string             { return fmt.Sprintf("%.1f GB", v) }
+func clamp(v, lo, hi float64) float64 { return math.Min(hi, math.Max(lo, v)) }
+func round1(v float64) float64 {
+	return math.Round(v*10) / 10
+}
+func round2(v float64) float64 {
+	return math.Round(v*100) / 100
+}
+
+// ---------- 模式 1：能装什么 ----------
+
+type FitCell struct {
+	Quant string  `json:"quant"`
+	Fit   int     `json:"fit"` // 0=❌ 1=⚠️ 2=✅
+	TPS   float64 `json:"tps"`
+	Accel bool    `json:"accel"`
+}
+
+type FitRow struct {
+	Model Model     `json:"model"`
+	Cells []FitCell `json:"cells"`
+}
+
+func FitMatrix(h HW, models []Model, n, ctx, batch int, o Opts) []FitRow {
+	rows := make([]FitRow, 0, len(models))
+	for _, m := range models {
+		row := FitRow{Model: m}
+		for _, q := range MainQuants() {
+			mem := Memory(h, m, q, ctx, batch, n, o)
+			st := 0
+			if mem.Fit && mem.HeadPct > 0.10 {
+				st = 2
+			} else if mem.Fit {
+				st = 1
+			}
+			tps := 0.0
+			if st > 0 {
+				tps = Throughput(h, m, q, ctx, batch, n, o).SingleTPS
+			}
+			row.Cells = append(row.Cells, FitCell{Quant: q.ID, Fit: st, TPS: tps, Accel: h.Accel(q)})
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// ---------- 模式 3：反向规划 ----------
+
+// PlanOpts 规划需求：目标吞吐/时延/优化目标/排队策略。
+type PlanOpts struct {
+	TargetTPM float64 `json:"tpm"`        // 目标混合 tok/min（输入+输出合计）
+	MinTOS    float64 `json:"tos"`        // 单流 tok/s 下限，0=不限
+	Objective string  `json:"objective"`  // cost | latency | avail
+	Queue     bool    `json:"queue"`      // 允许请求排队
+	MaxQ      int     `json:"maxq"`       // 排队后单副本最大并发上限
+	OutLen    int     `json:"outlen"`     // 平均输出 token 数（QPS 换算）
+	QuantOnly string  `json:"quant_only"` // 限定量化档位，空=全部
+}
+
+type Plan struct {
+	HW          HW      `json:"hw"`
+	N           int     `json:"n"`        // 单副本卡数
+	Replicas    int     `json:"replicas"` // 副本（节点）数
+	Quant       string  `json:"quant"`
+	QName       string  `json:"qname"`
+	EngName     string  `json:"eng_name"`
+	SpecName    string  `json:"spec_name"`
+	Strategy    string  `json:"strategy"`
+	Single      float64 `json:"single_tps"`
+	Agg         float64 `json:"agg_tps"`      // 单副本聚合 tok/s（容量场景并发口径）
+	TPM         float64 `json:"tpm"`          // 集群混合 tok/min 容量
+	CapacityQPS float64 `json:"capacity_qps"` // 集群最大稳定请求/s
+	ArrivalQPS  float64 `json:"arrival_qps"`  // 目标 TPM 换算的到达请求/s
+	MaxConc     int     `json:"max_conc"`     // 容量场景的单副本并发
+	UtilPct     float64 `json:"util_pct"`     // 目标负载 / 集群服务能力
+	WaitAvgMs   float64 `json:"wait_avg_ms"`  // M/M/c 平均排队等待
+	WaitP95Ms   float64 `json:"wait_p95_ms"`  // M/M/c 无条件 p95 排队等待
+	QueueModel  string  `json:"queue_model"`  // none | M/M/c
+	TTFTms      float64 `json:"ttft_ms"`
+	TPOTms      float64 `json:"tpot_ms"`
+	CostCNY     float64 `json:"cost_cny"`
+	Monthly     float64 `json:"monthly"`
+	PerMtok     float64 `json:"per_mtok"` // 每百万 token 成本（按集群实际容量满负载）
+	Warn        string  `json:"warn,omitempty"`
+}
+
+const maxReplicas = 64 // 防止离谱目标生成几百副本的方案
+
+func Planner(hws []HW, m Model, po PlanOpts, ctx, conc int, st Opts) []Plan {
+	st = st.norm()
+	if po.TargetTPM <= 0 {
+		po.TargetTPM = 6000
+	}
+	if po.MaxQ <= 0 {
+		po.MaxQ = 256
+	}
+	if po.OutLen <= 0 {
+		po.OutLen = 512
+	}
+	st.OutLen = po.OutLen
+	quants := Quants
+	if po.QuantOnly != "" {
+		quants = nil
+		for _, q := range Quants {
+			if q.ID == po.QuantOnly {
+				quants = append(quants, q)
+			}
+		}
+		if len(quants) == 0 {
+			quants = Quants
+		}
+	}
+	var plans []Plan
+	for _, h := range hws {
+		if h.Svc {
+			continue
+		}
+		maxN := 8
+		if h.Unified || h.Cls == "supernode" || h.Link.Dom == 1 {
+			maxN = 1
+		}
+		if h.Cls == "supernode" {
+			maxN = 1
+		}
+		for _, q := range quants {
+			eng := resolveEngine(st.Engine, h, q)
+			if !eng.EngineOK(h) {
+				continue // 框架不支持该硬件（如 TRT-LLM × Apple），不出方案
+			}
+			for n := 1; n <= maxN; n *= 2 {
+				pf := Throughput(h, m, q, ctx, conc, n, st)
+				if !pf.Fit {
+					continue
+				}
+				if po.MinTOS > 0 && pf.SingleTPS < po.MinTOS {
+					continue
+				}
+				// 单副本服务能力：关闭排队时用请求并发；开启后将容量场景并发
+				// 提升到 KV/显存允许上限，再受 MaxQ 限制。
+				servicePerf := pf
+				maxConc := conc
+				if po.Queue {
+					maxConc = min(pf.MaxBatch, po.MaxQ)
+					maxConc = max(maxConc, conc)
+					if maxConc > conc {
+						pc := Throughput(h, m, q, ctx, maxConc, n, st)
+						if pc.Fit {
+							servicePerf = pc
+						} else {
+							maxConc = conc
+						}
+					}
+				}
+				capTPS := servicePerf.AggTPS
+				// 串行资源预算：未命中 prefill + 后续 decode；TPM 仍统计原始输入 token。
+				decodeTokens := math.Max(0, float64(po.OutLen-1))
+				capReqS := capTPS / math.Max(1, decodeTokens)
+				if servicePerf.tPre > 0 {
+					capReqS = 1 / (decodeTokens/capTPS + servicePerf.tPre/1000)
+				}
+				capTPM := capReqS * (float64(ctx) + float64(po.OutLen)) * 60
+				if capTPM <= 0 {
+					continue
+				}
+				replicas := int(math.Ceil(po.TargetTPM / capTPM))
+				if po.Queue && float64(replicas)*capTPM <= po.TargetTPM*(1+1e-12) {
+					replicas++ // ρ=1 的 M/M/c 无稳态，至少留一个副本的服务余量
+				}
+				if po.Objective == "avail" {
+					replicas++ // 最高可用性：N+1 冗余
+				}
+				if replicas > maxReplicas {
+					continue
+				}
+				totalCards := float64(n * replicas)
+				clusterTPM := capTPM * float64(replicas)
+				capacityQPS := capReqS * float64(replicas)
+				arrivalQPS := po.TargetTPM / (float64(ctx+po.OutLen) * 60)
+				util, waitAvg, waitP95 := erlangC(arrivalQPS, capReqS, replicas)
+				queueModel := "none"
+				if po.Queue {
+					queueModel = "M/M/c"
+				} else {
+					waitAvg, waitP95 = 0, 0
+				}
+				spec := SpecByID(st.Spec)
+				p := Plan{
+					HW: h, N: n, Replicas: replicas, Quant: q.ID, QName: q.Name,
+					EngName: eng.Name, SpecName: spec.Name,
+					Single: servicePerf.SingleTPS, Agg: servicePerf.AggTPS, TPM: round1(clusterTPM),
+					CapacityQPS: round2(capacityQPS), ArrivalQPS: round2(arrivalQPS),
+					MaxConc: maxConc, UtilPct: round1(util * 100),
+					WaitAvgMs: round1(waitAvg), WaitP95Ms: round1(waitP95), QueueModel: queueModel,
+					TTFTms: servicePerf.TTFTms, TPOTms: servicePerf.TPOTms,
+					CostCNY: h.CNY * totalCards,
+				}
+				p.Strategy = strategy(h, n)
+				elec := h.TDP * totalCards * 0.6 * 24 * 30 / 1000 * 0.8 // 60% 负载，0.8 元/kWh
+				if p.CostCNY > 0 {
+					p.Monthly = p.CostCNY/36 + elec
+					p.PerMtok = p.Monthly / (clusterTPM * 60 * 24 * 30 / 1e6)
+				}
+				p.Warn = warnOf(h, m, q, pf)
+				if m.Ctx > 0 && ctx > m.Ctx {
+					p.Warn = joinWarn(p.Warn, fmt.Sprintf("超模型原生上下文（%dK>%dK），需 YaRN/RoPE 外推", ctx/1024, m.Ctx/1024))
+				}
+				if st.KVQuant == "fp8" && !precHas(h, "fp8") {
+					p.Warn = joinWarn(p.Warn, "该卡无 FP8 硬件路径，KV 量化只按容量收益，未计读取加速")
+				}
+				if st.KVQuant == "fp4" && (eng.ID != "sglang" || !precHas(h, "fp4")) {
+					p.Warn = joinWarn(p.Warn, "FP4 KV 当前仅按 SGLang fused FP4 路径建模；此组合未计读取加速")
+				}
+				if st.Spec == "mtp" && !m.MTP {
+					p.Warn = joinWarn(p.Warn, "模型无 MTP 头元数据，未应用推测加速")
+				}
+				if ctx >= 32768 && n > 1 {
+					p.Warn = joinWarn(p.Warn, "长上下文多卡应评估 context parallel 或 PD 分离；收益取决于 SLO 与 KV 传输")
+				}
+				if po.Queue {
+					p.Warn = joinWarn(p.Warn, fmt.Sprintf("排队模型 M/M/%d：目标利用率 %.1f%%，平均/p95 等待 %.0f/%.0fms", replicas, p.UtilPct, p.WaitAvgMs, p.WaitP95Ms))
+				}
+				if replicas > 1 && po.Objective != "avail" {
+					p.Warn = joinWarn(p.Warn, fmt.Sprintf("需 %d 副本集群，注意负载均衡与会话亲和", replicas))
+				}
+				plans = append(plans, p)
+			}
+		}
+	}
+	plans = dedupPlans(plans, po.Objective) // 每硬件×卡数组合只留最优量化档
+	sortPlans(plans, po.Objective)
+	if len(plans) > 200 { // 基本等于不限（去重后组合数上限约数百），前端再过滤/翻页
+		plans = plans[:200]
+	}
+	return plans
+}
+
+// erlangC 按独立指数到达/服务的 M/M/c 模型计算利用率和无条件排队等待。
+// P(Wq>t)=P(wait)·exp(-(cμ-λ)t)，因此 p95 在 P(wait)≤5% 时为 0。
+func erlangC(lambda, mu float64, servers int) (util, avgMs, p95Ms float64) {
+	if lambda <= 0 || mu <= 0 || servers < 1 {
+		return 0, 0, 0
+	}
+	a := lambda / mu
+	util = a / float64(servers)
+	if util >= 1 {
+		return util, math.Inf(1), math.Inf(1)
+	}
+	term, sum := 1.0, 1.0
+	for n := 1; n < servers; n++ {
+		term *= a / float64(n)
+		sum += term
+	}
+	term *= a / float64(servers)
+	tail := term / (1 - util)
+	pWait := tail / (sum + tail)
+	rate := float64(servers)*mu - lambda
+	avgMs = pWait / rate * 1000
+	if pWait > 0.05 {
+		p95Ms = math.Log(pWait/0.05) / rate * 1000
+	}
+	return util, avgMs, p95Ms
+}
+
+// dedupPlans 按（硬件 × 单副本卡数）去重：同一组合的不同量化档只保留
+// 当前优化目标下最优的一档，避免备选列表被同卡变体挤满。
+func dedupPlans(plans []Plan, objective string) []Plan {
+	better := planBetter(objective)
+	at := map[string]int{}
+	out := plans[:0]
+	for _, p := range plans {
+		key := fmt.Sprintf("%s|%d", p.HW.ID, p.N)
+		if i, ok := at[key]; ok {
+			if better(p, out[i]) {
+				out[i] = p
+			}
+			continue
+		}
+		at[key] = len(out)
+		out = append(out, p)
+	}
+	return out
+}
+
+func planCost(p Plan) float64 {
+	if p.Monthly <= 0 {
+		return 1e12
+	}
+	return p.Monthly
+}
+
+func availScoreOf(p Plan) float64 {
+	s := math.Min(float64(p.Replicas), 4) * 2 // 副本冗余
+	switch p.HW.Cls {
+	case "datacenter", "supernode":
+		s += 4 // 企业级可靠性（ECC/RAS）
+	case "workstation":
+		s += 2
+	}
+	switch p.HW.Link.T {
+	case "nvlink", "xgmi", "hccs", "xelink", "ici", "blink", "mlulink", "neuronlink":
+		s += 2 // 高速互联，TP 故障面小
+	}
+	if p.N == 1 {
+		s += 1 // 单卡节点故障点最少
+	}
+	return s
+}
+
+// planBetter 返回「a 是否优于 b」比较器（优化目标口径）。
+func planBetter(objective string) func(a, b Plan) bool {
+	switch objective {
+	case "latency":
+		return func(a, b Plan) bool {
+			la, lb := a.TTFTms+a.TPOTms, b.TTFTms+b.TPOTms
+			if la != lb {
+				return la < lb
+			}
+			return planCost(a) < planCost(b)
+		}
+	case "avail":
+		return func(a, b Plan) bool {
+			sa, sb := availScoreOf(a), availScoreOf(b)
+			if sa != sb {
+				return sa > sb
+			}
+			return planCost(a) < planCost(b)
+		}
+	default: // cost
+		return func(a, b Plan) bool {
+			ca, cb := planCost(a), planCost(b)
+			if ca != cb {
+				return ca < cb
+			}
+			return a.TTFTms+a.TPOTms < b.TTFTms+b.TPOTms
+		}
+	}
+}
+
+func sortPlans(plans []Plan, objective string) {
+	better := planBetter(objective)
+	sort.SliceStable(plans, func(i, j int) bool { return better(plans[i], plans[j]) })
+}
+
+func joinWarn(a, b string) string {
+	if a == "" {
+		return b
+	}
+	return a + "；" + b
+}
+
+func precHas(h HW, p string) bool {
+	for _, x := range h.Prec {
+		if x == p {
+			return true
+		}
+	}
+	return false
+}
+
+func strategy(h HW, n int) string {
+	if n == 1 {
+		return "单卡 / 单机"
+	}
+	switch h.Link.T {
+	case "nvlink":
+		return fmt.Sprintf("TP%d · NVLink %.0fGB/s", n, h.Link.B)
+	case "bridge":
+		return fmt.Sprintf("TP%d · NVLink 桥", n)
+	case "xgmi", "hccs", "xelink", "ici", "blink", "mlulink", "neuronlink":
+		return fmt.Sprintf("TP%d · %s %.0fGB/s", n, strings.ToUpper(h.Link.T), h.Link.B)
+	case "ethernet":
+		return fmt.Sprintf("TP%d · 以太网 RDMA（Gaudi 架构）", n)
+	default:
+		return fmt.Sprintf("TP%d · PCIe（无 NVLink，大并发慎用）", n)
+	}
+}
+
+func warnOf(h HW, m Model, q Quant, pf Perf) string {
+	var w []string
+	if m.MoE {
+		w = append(w, "MoE：显存按总参数、速度按激活参数估算")
+	}
+	if !pf.Accel {
+		w = append(w, q.Name+" 在该卡仅省显存、不硬件加速")
+	}
+	if pf.SingleTPS < 10 {
+		w = append(w, "单流偏慢；仅在有匹配草稿/预测头时考虑推测解码")
+	}
+	if pf.Mem.HeadPct < 0.15 {
+		w = append(w, "显存贴边，长上下文需降并发或开 KV 量化")
+	}
+	if h.Conf == "reported" {
+		w = append(w, "硬件参数为公开报道口径")
+	}
+	if len(w) == 0 {
+		return ""
+	}
+	s := w[0]
+	for _, x := range w[1:] {
+		s += "；" + x
+	}
+	return s
+}
+
+// ---------- 速查表 ----------
+
+type QuickRow struct {
+	HW      HW      `json:"hw"`
+	MaxFP16 float64 `json:"max_fp16"`
+	MaxINT4 float64 `json:"max_int4"`
+}
+
+// QuickTable 每张卡能扛的最大模型参数（扣除底座/预留/8K 上下文 KV）。
+func QuickTable(hws []HW) []QuickRow {
+	var rows []QuickRow
+	for _, h := range hws {
+		if h.Svc {
+			continue
+		}
+		budget := h.CapGB(Engines[1]) - 3.5 // 按 vLLM 0.90 服务预算
+		rows = append(rows, QuickRow{HW: h, MaxFP16: budget / 2.0, MaxINT4: budget / 0.6})
+	}
+	return rows
+}

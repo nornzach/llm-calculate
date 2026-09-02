@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>推理计算器 · LLM Inference Calculator</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <svg class="mark" width="22" height="22" viewBox="0 0 22 22" aria-hidden="true">
+      <rect x="1" y="1" width="4" height="4" fill="#3a3d32"/><rect x="9" y="1" width="4" height="4" fill="#3a3d32"/><rect x="17" y="1" width="4" height="4" fill="#3a3d32"/>
+      <rect x="1" y="9" width="4" height="4" fill="#3a3d32"/><rect x="9" y="9" width="4" height="4" fill="#ff5a1f"/><rect x="17" y="9" width="4" height="4" fill="#3a3d32"/>
+      <rect x="1" y="17" width="4" height="4" fill="#3a3d32"/><rect x="9" y="17" width="4" height="4" fill="#3a3d32"/><rect x="17" y="17" width="4" height="4" fill="#3a3d32"/>
+    </svg>
+    <div class="brand-t">
+      <h1>推理计算器</h1>
+      <span>LLM INFERENCE CALCULATOR</span>
+    </div>
+  </div>
+  <div class="meta mono" id="dbMeta"></div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button data-v="fit" class="on">能装什么<small>FEASIBILITY</small></button>
+  <button data-v="perf">能跑多快<small>THROUGHPUT</small></button>
+  <button data-v="plan">怎么配<small>PLANNER</small></button>
+  <span class="tsep"></span>
+  <button data-v="hw">硬件库<small>HARDWARE</small></button>
+  <button data-v="models">模型库<small>MODELS</small></button>
+  <button data-v="quick">速查<small>CHEAT SHEET</small></button>
+</nav>
+
+<main>
+
+<!-- ============ 模式 1 ============ -->
+<section class="view on" id="v-fit">
+  <aside>
+    <div class="grp">
+      <label class="lab">硬件 · HARDWARE</label>
+      <div class="cs" id="f-hw"></div>
+    </div>
+    <div class="grp">
+      <label class="lab">数量 · CARDS <span class="mono val" id="f-n-v">1</span></label>
+      <input type="range" id="f-n" min="1" max="8" step="1" value="1">
+    </div>
+    <div class="grp">
+      <label class="lab">上下文 · CONTEXT</label>
+      <div class="cs" id="f-ctx"></div>
+    </div>
+    <div class="grp">
+      <label class="lab">并发 · BATCH <span class="mono val" id="f-b-v">8</span></label>
+      <input type="range" id="f-b" min="1" max="128" step="1" value="8">
+    </div>
+    <div class="grp">
+      <label class="lab">推理框架 · ENGINE</label>
+      <div class="cs" id="f-eng"></div>
+    </div>
+    <div class="grp">
+      <label class="lab">推测解码 · SPECULATIVE</label>
+      <div class="cs" id="f-spec"></div>
+    </div>
+    <div class="grp">
+      <label class="lab">KV 量化 · KV CACHE</label>
+      <div class="seg seg3" id="f-kvq">
+        <button data-v="fp16" class="on">FP16</button><button data-v="fp8">FP8</button><button data-v="int4">INT4</button>
+      </div>
+    </div>
+    <div class="grp">
+      <label class="lab">筛选模型 · FILTER</label>
+      <input type="text" id="f-q" placeholder="名字 / 机构…">
+    </div>
+    <p class="hint">对该硬件枚举全部模型 × 量化档位。<br>
+    <i class="sq ok"></i>可部署　<i class="sq warn"></i>显存贴边　<i class="sq no"></i>装不下<br>
+    单元格数字为一阶容量估算，不是基准测试。<sup class="rep">R</sup> = 报道/推算；<sup class="rep">F</sup> = HF 自动解析。</p>
+  </aside>
+  <div class="result">
+    <div class="devline" id="f-devline"></div>
+    <div class="tblwrap"><table class="tbl matrix" id="fitTable"></table></div>
+  </div>
+</section>
+
+<!-- ============ 模式 2 ============ -->
+<section class="view" id="v-perf">
+  <aside>
+    <div class="grp">
+      <label class="lab">硬件 · HARDWARE</label>
+      <div class="cs" id="p-hw"></div>
+    </div>
+    <div class="grp">
+      <label class="lab">数量 · CARDS <span class="mono val" id="p-n-v">4</span></label>
+      <input type="range" id="p-n" min="1" max="8" step="1" value="4">
+    </div>
+    <div class="grp">
+      <label class="lab">模型 · MODEL</label>
+      <div class="cs" id="p-model"></div>
+    </div>
+    <div class="grp">
+      <label class="lab">量化 · QUANT</label>
+      <div class="cs" id="p-quant"></div>
+    </div>
+    <div class="grp">
+      <label class="lab">上下文 · CONTEXT</label>
+      <div class="cs" id="p-ctx"></div>
+    </div>
+    <div class="grp">
+      <label class="lab">并发 · BATCH <span class="mono val" id="p-b-v">4</span></label>
+      <input type="range" id="p-b" min="1" max="128" step="1" value="4">
+    </div>
+    <div class="grp">
+      <label class="lab">推理框架 · ENGINE</label>
+      <div class="cs" id="p-eng"></div>
+    </div>
+    <div class="grp">
+      <label class="lab">推测解码 · SPECULATIVE</label>
+      <div class="cs" id="p-spec"></div>
+    </div>
+    <div class="grp">
+      <label class="lab">KV 量化 · KV CACHE</label>
+      <div class="seg seg3" id="p-kvq">
+        <button data-v="fp16" class="on">FP16</button><button data-v="fp8">FP8</button><button data-v="fp4">FP4*</button>
+      </div>
+    </div>
+    <div class="grp">
+      <label class="lab">前缀缓存命中 · PREFIX HIT <span class="mono val" id="p-hit-v">0%</span></label>
+      <input type="range" id="p-hit" min="0" max="90" step="10" value="0">
+    </div>
+    <div class="grp">
+      <label class="lab" for="p-outlen">平均输出 · OUT LEN <span class="dim2">token · 请求时延口径</span></label>
+      <input type="number" id="p-outlen" value="512" min="16" step="16">
+    </div>
+    <details class="grp advanced">
+      <summary>高级参数 · CALIBRATION <span>0 = 自动/解析值</span></summary>
+      <div class="cgrid advgrid" id="p-advanced"></div>
+      <p class="hint">带宽、算力、调度（多卡另含互联）均填写同口径实测值后标记 calibrated；否则是无统计置信区间的 analytical roofline。</p>
+    </details>
+  </aside>
+  <div class="result">
+    <div class="hero" id="perfHero"></div>
+    <div class="cols2">
+      <div>
+        <div class="seclab">显存分解 · MEMORY BREAKDOWN<span id="perfFitState"></span></div>
+        <div id="vramBar"></div>
+        <div class="seclab">聚合吞吐 — 并发曲线 · TPS vs BATCH</div>
+        <div id="curveBox"></div>
+      </div>
+      <div>
+        <div class="seclab">计算过程 · FORMULA TRACE</div>
+        <div class="trace" id="perfTrace"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 模式 3 ============ -->
+<section class="view" id="v-plan">
+  <aside>
+    <div class="grp">
+      <label class="lab">模型 · MODEL</label>
+      <div id="pl-model-wrap">
+        <div class="cs" id="pl-model"></div>
+        <button class="minibtn" id="pl-custom-btn">✎ 自定义假想模型…</button>
+      </div>
+      <div id="pl-custom" style="display:none">
+        <div class="cgrid">
+          <label>总参数 B<input type="number" id="cm-params" value="70" min="0.1" step="0.1"></label>
+          <label>激活 B<input type="number" id="cm-active" value="3.5" min="0.05" step="0.1" disabled></label>
+          <label>层数<input type="number" id="cm-layers" value="80" min="1" max="256"></label>
+          <label>隐藏维度<input type="number" id="cm-hidden" value="8192" min="256" step="256"></label>
+          <label>KV 头数<input type="number" id="cm-kvh" value="8" min="1" max="256"></label>
+          <label>头维度<input type="number" id="cm-dim" value="128" min="16" step="32"></label>
+          <label title="0 = 全部层持有 KV（混合线性注意力架构用）">KV 层数<input type="number" id="cm-kvlayers" value="0" min="0"></label>
+          <label id="cm-mla-wrap" style="display:none">MLA latent<input type="number" id="cm-mla" value="576" min="64" step="64"></label>
+          <label title="滑动窗口/local attention 层数；0 = 关闭">Local 层数<input type="number" id="cm-local-layers" value="0" min="0"></label>
+          <label title="局部 attention 保留的 KV token 数">SWA window<input type="number" id="cm-window" value="0" min="0" step="128"></label>
+          <label>MLP 中间维度<input type="number" id="cm-intermediate" value="0" min="0" step="128"></label>
+          <label>MoE 中间维度<input type="number" id="cm-moe-intermediate" value="0" min="0" step="128"></label>
+          <label>专家总数<input type="number" id="cm-experts" value="0" min="0" max="4096"></label>
+          <label>每 token 专家<input type="number" id="cm-topk" value="0" min="0" max="128"></label>
+          <label>共享专家<input type="number" id="cm-shared" value="0" min="0" max="128"></label>
+          <label>MoE 层数<input type="number" id="cm-moelayers" value="0" min="0" max="256"></label>
+          <label>MTP 预测头<input type="number" id="cm-mtpheads" value="0" min="0" max="32"></label>
+          <label>媒体 encoder 参数 B<input type="number" id="cm-encoderparams" value="0" min="0" step="0.1"></label>
+        </div>
+        <div class="segrow">
+          <div class="seg" id="cm-arch">
+            <button data-v="dense" class="on">Dense</button><button data-v="moe">MoE</button>
+          </div>
+          <div class="seg" id="cm-kvt">
+            <button data-v="gqa" class="on">GQA</button><button data-v="mha">MHA</button><button data-v="mla">MLA</button>
+          </div>
+        </div>
+        <button class="minibtn" id="pl-custom-back">← 回到模型库</button>
+      </div>
+    </div>
+    <div class="grp">
+      <label class="lab" for="pl-tpm">目标吞吐 · TARGET TPM <span class="dim2">输入+输出合计 tok/min</span></label>
+      <input type="number" id="pl-tpm" value="6000" min="60" step="100">
+    </div>
+    <div class="grp">
+      <label class="lab" for="pl-tos">单流下限 · MIN TOS <span class="dim2">tok/s · 0=不限</span></label>
+      <input type="number" id="pl-tos" value="0" min="0" step="1">
+    </div>
+    <div class="grp">
+      <label class="lab">优化目标 · OBJECTIVE</label>
+      <div class="seg seg3" id="pl-obj">
+        <button data-v="cost" class="on">最低成本</button><button data-v="latency">最低时延</button><button data-v="avail">最高可用</button>
+      </div>
+    </div>
+    <div class="grp">
+      <label class="lab">量化范围 · QUANT</label>
+      <div class="cs" id="pl-qonly"></div>
+    </div>
+    <div class="grp">
+      <label class="lab">上下文 · CONTEXT</label>
+      <div class="cs" id="pl-ctx"></div>
+    </div>
+    <div class="grp">
+      <label class="lab">并发 · CONCURRENCY <span class="mono val" id="pl-c-v">16</span></label>
+      <input type="range" id="pl-c" min="1" max="128" step="1" value="16">
+    </div>
+    <div class="grp">
+      <label class="lab">推理框架 · ENGINE</label>
+      <div class="cs" id="pl-eng"></div>
+    </div>
+    <div class="grp">
+      <label class="lab">推测解码 · SPECULATIVE</label>
+      <div class="cs" id="pl-spec"></div>
+    </div>
+    <div class="grp">
+      <label class="lab">KV 量化 · KV CACHE</label>
+      <div class="seg seg3" id="pl-kvq">
+        <button data-v="fp16" class="on">FP16</button><button data-v="fp8">FP8</button><button data-v="fp4">FP4*</button>
+      </div>
+    </div>
+    <div class="grp">
+      <label class="lab">前缀缓存命中 · PREFIX HIT <span class="mono val" id="pl-hit-v">0%</span></label>
+      <input type="range" id="pl-hit" min="0" max="90" step="10" value="0">
+    </div>
+    <div class="grp">
+      <label class="lab">允许排队 · QUEUE
+        <span class="switch"><input type="checkbox" id="pl-queue"><i></i></span>
+      </label>
+      <div id="pl-queue-opts" style="display:none; margin-top:10px">
+        <label class="lab sub" for="pl-maxq">排队后单副本最大并发</label>
+        <input type="number" id="pl-maxq" value="256" min="1" max="2048">
+      </div>
+    </div>
+    <div class="grp">
+      <label class="lab" for="pl-outlen">平均输出 · OUT LEN <span class="dim2">token · 用于 QPS 换算</span></label>
+      <input type="number" id="pl-outlen" value="512" min="16" step="16">
+    </div>
+    <details class="grp advanced">
+      <summary>高级参数 · CALIBRATION <span>0 = 自动/解析值</span></summary>
+      <div class="cgrid advgrid" id="pl-advanced"></div>
+      <p class="hint">校准值应用于所有候选硬件；只在同一部署栈、模型和负载口径下填写。</p>
+    </details>
+    <p class="hint">枚举硬件 × 数量 × 量化 × 副本数；结果是静态容量筛选，不替代生产压测。<br>
+    TPM 按原始输入+输出计数；前缀命中减少 prefill，并按共享 block 计算 KV 驻留。推测解码必须用匹配模型/负载的接受率校准。<br>
+    成本仅含参考采购价的 36 月摊销与假设电费（0.8 元/kWh、60% 负载），不含主机、网络、制冷、PUE、运维和实际利用率。<br>
+    开启排队后显示 M/M/c 的目标利用率及平均/p95 等待；其泊松到达、指数服务、独立副本假设不等于生产 SLA。</p>
+  </aside>
+  <div class="result">
+    <div class="devline" id="pl-line"></div>
+    <div class="filterbar" id="pl-filter">
+      <input type="text" id="pl-q" placeholder="筛选型号…">
+      <div class="cs cs-inline" id="pl-vendor"></div>
+      <div class="cs cs-inline" id="pl-cls"></div>
+      <input type="number" id="pl-maxcards" placeholder="总卡数≤" min="0" step="1" title="0 = 不限">
+      <div class="seg seg-inline" id="pl-psize">
+        <button data-v="10" class="on">10/页</button><button data-v="20">20/页</button><button data-v="0">全部</button>
+      </div>
+    </div>
+    <div id="planList"></div>
+    <div class="pager" id="pl-pager"></div>
+  </div>
+</section>
+
+<!-- ============ 硬件库 ============ -->
+<section class="view" id="v-hw">
+  <div class="result wide">
+    <div class="filterbar">
+      <input type="text" id="hw-q" placeholder="筛选型号…">
+      <div class="cs cs-inline" id="hw-vendor"></div>
+    </div>
+    <div class="tblwrap"><table class="tbl" id="hwTable"></table></div>
+  </div>
+</section>
+
+<!-- ============ 模型库 ============ -->
+<section class="view" id="v-models">
+  <div class="result wide">
+    <div class="filterbar">
+      <input type="text" id="m-q" placeholder="筛选模型…">
+    </div>
+    <div class="tblwrap"><table class="tbl" id="modelTable"></table></div>
+  </div>
+</section>
+
+<!-- ============ 速查 ============ -->
+<section class="view" id="v-quick">
+  <div class="result wide">
+    <div class="devline">每张卡「能扛的最大模型参数量」速查 —— 已扣除框架底座与系统预留，按 8K 上下文估算，实际以模式一为准。</div>
+    <div class="tblwrap"><table class="tbl" id="quickTable"></table></div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <span>一阶 roofline 容量筛选；未建模排队分布、算子融合、EP/DP/PP/CP、KV offload、PD 传输和模型特定内核。生产前必须用目标模型、引擎版本和真实流量校准。</span>
+  <span class="mono" id="footMeta"></span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
