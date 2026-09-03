@@ -359,6 +359,7 @@ type Opts struct {
 	SpecTau      float64 `json:"spec_tau,omitempty"`     // 实测每步接受 token
 	SpecOvh      float64 `json:"spec_ovh,omitempty"`     // 实测 draft/verify 相对开销
 	Lang         string  `json:"lang,omitempty"`         // en（默认）| zh；仅影响展示文本
+	skipTrace    bool
 }
 
 func (o Opts) norm() Opts {
@@ -747,6 +748,7 @@ type MemDetail struct {
 	OffloadedKV float64 `json:"offloaded_kv"`
 	Sys         float64 `json:"sys"`
 	Total       float64 `json:"total"`
+	P999Total   float64 `json:"p999_total,omitempty"` // 按驻留时间加权的并发显存 P99.9 保护值
 	Cap         float64 `json:"cap"`
 	Budget      float64 `json:"budget"`   // 引擎可分配预算；Cap 为物理显存
 	HeadPct     float64 `json:"head_pct"` // (Budget-已分配)/物理显存
@@ -802,43 +804,84 @@ func Memory(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) MemDetail {
 	return d
 }
 
-// ---------- 吞吐 ----------
+// ---------- 吞吐 / 真实工作负载 ----------
+
+// WorkloadBucket 是按请求到达数统计的工作负载桶；Share 会在计算时归一化。
+type WorkloadBucket struct {
+	Context   int     `json:"context"`
+	Output    int     `json:"output"`
+	Share     float64 `json:"share"`
+	PrefixHit float64 `json:"prefix_hit"`
+}
+
+type WorkloadBucketPerf struct {
+	Context     int     `json:"context"`
+	Output      int     `json:"output"`
+	Share       float64 `json:"share"`     // 请求到达占比
+	Occupancy   float64 `json:"occupancy"` // share × request latency 后的在途占比
+	PrefixHit   float64 `json:"prefix_hit"`
+	SingleTPS   float64 `json:"single_tps"`
+	TTFTms      float64 `json:"ttft_ms"`
+	TPOTms      float64 `json:"tpot_ms"`
+	ReqMs       float64 `json:"req_ms"`
+	BatchMemory float64 `json:"batch_memory"`
+	Fit         bool    `json:"fit"`
+}
+
+type WorkloadStats struct {
+	Buckets      []WorkloadBucketPerf `json:"buckets"`
+	MeanContext  float64              `json:"mean_context"`
+	MeanOutput   float64              `json:"mean_output"`
+	P95Context   int                  `json:"p95_context"`
+	P99Context   int                  `json:"p99_context"`
+	P999Context  int                  `json:"p999_context"`
+	MaxContext   int                  `json:"max_context"`
+	P95TTFTms    float64              `json:"p95_ttft_ms"`
+	P99TTFTms    float64              `json:"p99_ttft_ms"`
+	P999TTFTms   float64              `json:"p999_ttft_ms"`
+	P95ReqMs     float64              `json:"p95_req_ms"`
+	P99ReqMs     float64              `json:"p99_req_ms"`
+	P999ReqMs    float64              `json:"p999_req_ms"`
+	P95SingleTPS float64              `json:"p95_single_tps"`
+}
 
 type Perf struct {
-	Fit             bool       `json:"fit"`
-	Mem             MemDetail  `json:"mem"`
-	SingleTPS       float64    `json:"single_tps"`
-	AggTPS          float64    `json:"agg_tps"`
-	PreTPS          float64    `json:"pre_tps"`   // 有效 prefill 速度 tok/s（当前上下文口径）
-	ReqS            float64    `json:"req_s"`     // 稳态请求速率 req/s（当前并发）
-	TPM             float64    `json:"tpm"`       // decode 输出 tok/min
-	TPMMixed        float64    `json:"tpm_mixed"` // 混合 TPM：一分钟处理的输入+输出总 token
-	TTFTms          float64    `json:"ttft_ms"`
-	TPOTms          float64    `json:"tpot_ms"`
-	ReqMs           float64    `json:"req_ms"` // 单请求时延（TTFT + (outlen-1)×TPOT）
-	MaxBatch        int        `json:"max_batch"`
-	Accel           bool       `json:"accel"`
-	QuantID         string     `json:"quant"`
-	QuantLocked     bool       `json:"quant_locked"`
-	KVSupported     bool       `json:"kv_supported"`
-	SpecApplied     bool       `json:"spec_applied"`
-	EngName         string     `json:"eng_name"`
-	EngOK           bool       `json:"eng_ok"` // 框架是否原生支持该硬件
-	SpecName        string     `json:"spec_name"`
-	Bottleneck      string     `json:"bottleneck"`        // memory | compute
-	DecodeMemMs     float64    `json:"decode_mem_ms"`     // 每 decode step 的显存 roof
-	DecodeComputeMs float64    `json:"decode_compute_ms"` // 每 decode step 的算力 roof
-	CommMs          float64    `json:"comm_ms"`           // 每 decode step 的 TP collective
-	ScheduleMs      float64    `json:"schedule_ms"`       // 每 decode step 的调度场景值
-	OffloadMs       float64    `json:"offload_ms"`
-	EncoderMs       float64    `json:"encoder_ms"`
-	PeakTF          float64    `json:"peak_tf"`
-	PeakExact       bool       `json:"peak_exact"`
-	Accuracy        string     `json:"accuracy"` // analytical | calibrated
-	Topology        string     `json:"topology"`
-	TopologyOK      bool       `json:"topology_ok"`
-	Trace           []TraceRow `json:"trace"`
-	tPre            float64    // 纯 prefill 耗时 ms（内部复用，不序列化）
+	Fit             bool           `json:"fit"`
+	Mem             MemDetail      `json:"mem"`
+	SingleTPS       float64        `json:"single_tps"`
+	AggTPS          float64        `json:"agg_tps"`
+	PreTPS          float64        `json:"pre_tps"`   // 有效 prefill 速度 tok/s（当前上下文口径）
+	ReqS            float64        `json:"req_s"`     // 稳态请求速率 req/s（当前并发）
+	TPM             float64        `json:"tpm"`       // decode 输出 tok/min
+	TPMMixed        float64        `json:"tpm_mixed"` // 混合 TPM：一分钟处理的输入+输出总 token
+	TTFTms          float64        `json:"ttft_ms"`
+	TPOTms          float64        `json:"tpot_ms"`
+	ReqMs           float64        `json:"req_ms"` // 单请求时延（TTFT + (outlen-1)×TPOT）
+	MaxBatch        int            `json:"max_batch"`
+	Accel           bool           `json:"accel"`
+	QuantID         string         `json:"quant"`
+	QuantLocked     bool           `json:"quant_locked"`
+	KVSupported     bool           `json:"kv_supported"`
+	SpecApplied     bool           `json:"spec_applied"`
+	EngName         string         `json:"eng_name"`
+	EngOK           bool           `json:"eng_ok"` // 框架是否原生支持该硬件
+	SpecName        string         `json:"spec_name"`
+	Bottleneck      string         `json:"bottleneck"`        // memory | compute
+	DecodeMemMs     float64        `json:"decode_mem_ms"`     // 每 decode step 的显存 roof
+	DecodeComputeMs float64        `json:"decode_compute_ms"` // 每 decode step 的算力 roof
+	CommMs          float64        `json:"comm_ms"`           // 每 decode step 的 TP collective
+	ScheduleMs      float64        `json:"schedule_ms"`       // 每 decode step 的调度场景值
+	OffloadMs       float64        `json:"offload_ms"`
+	EncoderMs       float64        `json:"encoder_ms"`
+	PeakTF          float64        `json:"peak_tf"`
+	PeakExact       bool           `json:"peak_exact"`
+	Accuracy        string         `json:"accuracy"` // analytical | calibrated
+	Topology        string         `json:"topology"`
+	TopologyOK      bool           `json:"topology_ok"`
+	Trace           []TraceRow     `json:"trace"`
+	Workload        *WorkloadStats `json:"workload,omitempty"`
+	tPre            float64        // 纯 prefill 耗时 ms（内部复用，不序列化）
+	reqSec          float64        // 单请求占用的串行服务预算（内部复用）
 }
 
 type TraceRow struct {
@@ -1204,8 +1247,9 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	}
 	decodeTokens := math.Max(0, float64(o.OutLen-1))
 	if agg > 0 {
-		reqS := 1 / (decodeTokens/agg + tPre/1000)
-		p.ReqS = round2(reqS)
+		p.reqSec = decodeTokens/agg + tPre/1000
+		reqS := 1 / p.reqSec
+		p.ReqS = round4(reqS)
 		p.TPMMixed = round1(reqS * (float64(ctx) + float64(o.OutLen)) * 60)
 	}
 	p.TPOTms = round1(tStep / g)
@@ -1220,6 +1264,10 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	fixed := mem.Weights + mem.Fw + mem.Adapter + math.Max(0, kvOne-kvPerReq)
 	if perRequest := kvPerReq + actPerReq; perRequest > 0 {
 		p.MaxBatch = max(0, int((mem.Budget-fixed)/perRequest))
+	}
+
+	if o.skipTrace {
+		return p
 	}
 
 	peakLabel := localText(o.Lang, "vendor per-precision peak", "厂商逐精度峰值")
@@ -1303,6 +1351,228 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 			localText(o.Lang, fmt.Sprintf("%dK > %dK native", ctx/1024, m.Ctx/1024), fmt.Sprintf("%dK > 原生 %dK", ctx/1024, m.Ctx/1024)),
 			localText(o.Lang, "Requires YaRN / RoPE extension; long-context accuracy and stability may degrade", "需 YaRN / RoPE 外推，长文精度与稳定性可能下降")))
 	}
+	return p
+}
+
+type workloadRun struct {
+	bucket    WorkloadBucket
+	perf      Perf
+	mem1      MemDetail
+	mem2      MemDetail
+	occupancy float64
+}
+
+func normalizeWorkload(workload []WorkloadBucket) []WorkloadBucket {
+	out := make([]WorkloadBucket, 0, len(workload))
+	total := 0.0
+	for _, b := range workload {
+		if b.Share <= 0 || b.Context <= 0 || b.Output <= 0 {
+			continue
+		}
+		b.PrefixHit = clamp(b.PrefixHit, 0, 0.9)
+		out = append(out, b)
+		total += b.Share
+	}
+	if total <= 0 {
+		return nil
+	}
+	for i := range out {
+		out[i].Share /= total
+	}
+	return out
+}
+
+func workloadQuantile(runs []workloadRun, q float64, value func(workloadRun) float64) workloadRun {
+	ordered := append([]workloadRun(nil), runs...)
+	sort.Slice(ordered, func(i, j int) bool { return value(ordered[i]) < value(ordered[j]) })
+	cumulative := 0.0
+	for _, run := range ordered {
+		cumulative += run.bucket.Share
+		if cumulative >= q {
+			return run
+		}
+	}
+	return ordered[len(ordered)-1]
+}
+
+// ThroughputWorkload 按请求到达占比聚合各桶服务需求，并按请求驻留时间
+// 重加权显存占用。P99.9 并发显存使用正态矩近似，同时保留单请求尾桶保护。
+func ThroughputWorkload(h HW, m Model, q Quant, workload []WorkloadBucket, batch, cards int, o Opts) Perf {
+	workload = normalizeWorkload(workload)
+	if len(workload) == 0 {
+		return Perf{}
+	}
+	batch = max(1, batch)
+	runs := make([]workloadRun, len(workload))
+	residenceTotal := 0.0
+	for i, b := range workload {
+		bo := o
+		bo.skipTrace = o.skipTrace || i > 0
+		bo.OutLen, bo.HitRate = b.Output, b.PrefixHit
+		perf := Throughput(h, m, q, b.Context, batch, cards, bo)
+		runs[i] = workloadRun{
+			bucket: b,
+			perf:   perf,
+			mem1:   Memory(h, m, q, b.Context, 1, cards, bo),
+			mem2:   Memory(h, m, q, b.Context, 2, cards, bo),
+		}
+		residenceTotal += b.Share * math.Max(perf.ReqMs, 0.1)
+	}
+	for i := range runs {
+		runs[i].occupancy = runs[i].bucket.Share * math.Max(runs[i].perf.ReqMs, 0.1) / residenceTotal
+	}
+
+	p := runs[0].perf
+	p.Workload = &WorkloadStats{}
+	if !o.skipTrace {
+		p.Workload.Buckets = make([]WorkloadBucketPerf, len(runs))
+	}
+	var meanCtx, meanOut, effectiveInput, preSeconds, reqSeconds, reqLatency, ttft float64
+	var decodeTokens, singleSeconds, aggregateSeconds, decodeMem, decodeCompute, comm, schedule, offload, encoder float64
+	maxProfileContext := 0
+	for _, run := range runs {
+		share := run.bucket.Share
+		outTokens := math.Max(1, float64(run.bucket.Output-1))
+		meanCtx += share * float64(run.bucket.Context)
+		meanOut += share * float64(run.bucket.Output)
+		maxProfileContext = max(maxProfileContext, run.bucket.Context)
+		effectiveInput += share * float64(run.bucket.Context) * (1 - run.bucket.PrefixHit)
+		preSeconds += share * run.perf.tPre / 1000
+		reqSeconds += share * run.perf.reqSec
+		reqLatency += share * run.perf.ReqMs
+		ttft += share * run.perf.TTFTms
+		decodeTokens += share * outTokens
+		singleSeconds += share * outTokens / math.Max(run.perf.SingleTPS, 1e-9)
+		aggregateSeconds += share * outTokens / math.Max(run.perf.AggTPS, 1e-9)
+		decodeMem += share * outTokens * run.perf.DecodeMemMs
+		decodeCompute += share * outTokens * run.perf.DecodeComputeMs
+		comm += share * outTokens * run.perf.CommMs
+		schedule += share * outTokens * run.perf.ScheduleMs
+		offload += share * outTokens * run.perf.OffloadMs
+		encoder += share * run.perf.EncoderMs
+	}
+	p.SingleTPS = round1(decodeTokens / math.Max(singleSeconds, 1e-9))
+	p.AggTPS = round1(decodeTokens / math.Max(aggregateSeconds, 1e-9))
+	p.PreTPS = round1(effectiveInput / math.Max(preSeconds, 1e-9))
+	p.reqSec = reqSeconds
+	reqRate := 1 / math.Max(reqSeconds, 1e-9)
+	p.ReqS = round4(reqRate)
+	p.TPM = round1(p.AggTPS * 60)
+	p.TPMMixed = round1(reqRate * (meanCtx + meanOut) * 60)
+	p.TTFTms = round1(ttft)
+	p.TPOTms = round1(singleSeconds / math.Max(decodeTokens, 1e-9) * 1000)
+	p.ReqMs = round1(reqLatency)
+	p.tPre = preSeconds * 1000
+	p.DecodeMemMs = round2(decodeMem / math.Max(decodeTokens, 1e-9))
+	p.DecodeComputeMs = round2(decodeCompute / math.Max(decodeTokens, 1e-9))
+	p.CommMs = round2(comm / math.Max(decodeTokens, 1e-9))
+	p.ScheduleMs = round2(schedule / math.Max(decodeTokens, 1e-9))
+	p.OffloadMs = round2(offload / math.Max(decodeTokens, 1e-9))
+	p.EncoderMs = round2(encoder)
+	p.Bottleneck = "memory"
+	if p.DecodeComputeMs > p.DecodeMemMs {
+		p.Bottleneck = "compute"
+	} else if p.OffloadMs > p.DecodeMemMs-p.OffloadMs && p.OffloadMs > p.DecodeComputeMs {
+		p.Bottleneck = "offload"
+	}
+
+	mix := MemDetail{Cap: runs[0].mem1.Cap, Budget: runs[0].mem1.Budget}
+	var meanFirst, meanInc, secondFirst, secondInc, maxFirst, maxInc float64
+	allOneFit := true
+	for _, run := range runs {
+		w := run.occupancy
+		inc := math.Max(0, run.mem2.Total-run.mem1.Total)
+		meanFirst += w * run.mem1.Total
+		meanInc += w * inc
+		secondFirst += w * run.mem1.Total * run.mem1.Total
+		secondInc += w * inc * inc
+		maxFirst = math.Max(maxFirst, run.mem1.Total)
+		maxInc = math.Max(maxInc, inc)
+		allOneFit = allOneFit && run.mem1.Fit
+		scale := float64(batch - 1)
+		mix.Weights += w * (run.mem1.Weights + scale*(run.mem2.Weights-run.mem1.Weights))
+		mix.KV += w * (run.mem1.KV + scale*(run.mem2.KV-run.mem1.KV))
+		mix.Fw += w * (run.mem1.Fw + scale*(run.mem2.Fw-run.mem1.Fw))
+		mix.Act += w * (run.mem1.Act + scale*(run.mem2.Act-run.mem1.Act))
+		mix.Adapter += w * (run.mem1.Adapter + scale*(run.mem2.Adapter-run.mem1.Adapter))
+		mix.OffloadedKV += w * (run.mem1.OffloadedKV + scale*(run.mem2.OffloadedKV-run.mem1.OffloadedKV))
+		mix.Sys += w * (run.mem1.Sys + scale*(run.mem2.Sys-run.mem1.Sys))
+	}
+	varFirst := math.Max(0, secondFirst-meanFirst*meanFirst)
+	varInc := math.Max(0, secondInc-meanInc*meanInc)
+	guardAt := func(b int) float64 {
+		if b <= 0 {
+			return 0
+		}
+		scale := float64(b - 1)
+		mean := meanFirst + scale*meanInc
+		guard := mean + 3.090232*math.Sqrt(varFirst+scale*varInc)
+		return math.Min(guard, maxFirst+scale*maxInc)
+	}
+	mix.Total = meanFirst + float64(batch-1)*meanInc
+	mix.P999Total = guardAt(batch)
+	mix.HeadPct = (mix.Cap - mix.P999Total) / mix.Cap
+	mix.Fit = allOneFit && mix.P999Total <= mix.Cap
+	p.Mem, p.Fit = mix, mix.Fit
+	if allOneFit {
+		lo, hi := 0, 4096
+		for lo < hi {
+			mid := (lo + hi + 1) / 2
+			if guardAt(mid) <= mix.Cap {
+				lo = mid
+			} else {
+				hi = mid - 1
+			}
+		}
+		p.MaxBatch = lo
+	} else {
+		p.MaxBatch = 0
+	}
+
+	ctx95 := workloadQuantile(runs, .95, func(r workloadRun) float64 { return float64(r.bucket.Context) })
+	ctx99 := workloadQuantile(runs, .99, func(r workloadRun) float64 { return float64(r.bucket.Context) })
+	ctx999 := workloadQuantile(runs, .999, func(r workloadRun) float64 { return float64(r.bucket.Context) })
+	lat95 := workloadQuantile(runs, .95, func(r workloadRun) float64 { return r.perf.ReqMs })
+	lat99 := workloadQuantile(runs, .99, func(r workloadRun) float64 { return r.perf.ReqMs })
+	lat999 := workloadQuantile(runs, .999, func(r workloadRun) float64 { return r.perf.ReqMs })
+	stats := p.Workload
+	stats.MeanContext, stats.MeanOutput = round1(meanCtx), round1(meanOut)
+	stats.P95Context, stats.P99Context, stats.P999Context, stats.MaxContext = ctx95.bucket.Context, ctx99.bucket.Context, ctx999.bucket.Context, maxProfileContext
+	stats.P95TTFTms, stats.P99TTFTms, stats.P999TTFTms = lat95.perf.TTFTms, lat99.perf.TTFTms, lat999.perf.TTFTms
+	stats.P95ReqMs, stats.P99ReqMs, stats.P999ReqMs = lat95.perf.ReqMs, lat99.perf.ReqMs, lat999.perf.ReqMs
+	stats.P95SingleTPS = lat95.perf.SingleTPS
+	if !o.skipTrace {
+		for i, run := range runs {
+			stats.Buckets[i] = WorkloadBucketPerf{
+				Context: run.bucket.Context, Output: run.bucket.Output, Share: run.bucket.Share,
+				Occupancy: run.occupancy, PrefixHit: run.bucket.PrefixHit, SingleTPS: run.perf.SingleTPS,
+				TTFTms: run.perf.TTFTms, TPOTms: run.perf.TPOTms, ReqMs: run.perf.ReqMs,
+				BatchMemory: run.perf.Mem.Total, Fit: run.perf.Fit,
+			}
+		}
+	}
+	if o.skipTrace {
+		return p
+	}
+
+	metadata := min(4, len(p.Trace))
+	p.Trace = append([]TraceRow(nil), p.Trace[:metadata]...)
+	p.Trace = append(p.Trace,
+		tr(localText(o.Lang, "Workload distribution", "工作负载分布"), fmt.Sprintf("%d buckets", len(runs)),
+			localText(o.Lang,
+				fmt.Sprintf("request-arrival weighted; mean %.0f input + %.0f output tokens", meanCtx, meanOut),
+				fmt.Sprintf("按请求到达占比加权；平均输入 %.0f + 输出 %.0f token", meanCtx, meanOut))),
+		tr(localText(o.Lang, "Context percentiles", "上下文分位"), fmt.Sprintf("P95 %dK · P99 %dK · P99.9 %dK · max %dK", stats.P95Context/1024, stats.P99Context/1024, stats.P999Context/1024, stats.MaxContext/1024),
+			localText(o.Lang, "percentiles use request-arrival share; max preserves the rarest configured tail", "分位数按请求到达占比统计；max 保留配置中最稀有的尾部")),
+		tr(localText(o.Lang, "Concurrent memory", "并发显存"), fmt.Sprintf("mean %.1f · P99.9 %.1f GB", mix.Total, mix.P999Total),
+			localText(o.Lang, "occupancy weighted by request latency; P99.9 uses a normal moment approximation", "按请求时延重加权驻留占比；P99.9 使用正态矩近似")),
+		tr(localText(o.Lang, "TTFT distribution", "TTFT 分布"), fmt.Sprintf("mean %.0f · P95 %.0f · P99 %.0f ms", p.TTFTms, stats.P95TTFTms, stats.P99TTFTms),
+			localText(o.Lang, "each bucket is evaluated by the same prefill roofline", "每个桶使用同一 prefill roofline 独立计算")),
+		tr(localText(o.Lang, "Request latency distribution", "请求时延分布"), fmt.Sprintf("mean %.0f · P95 %.0f · P99 %.0f ms", p.ReqMs, stats.P95ReqMs, stats.P99ReqMs),
+			localText(o.Lang, "TTFT + bucket output length × TPOT", "TTFT + 各桶输出长度 × TPOT")),
+		tr(localText(o.Lang, "Steady-state mixed rate", "混合稳态速率"), fmt.Sprintf("%.2f req/s · %.0f tok/min", p.ReqS, p.TPMMixed),
+			localText(o.Lang, "harmonic aggregation of per-bucket serial service demand", "按各桶串行服务预算做调和聚合")),
+	)
 	return p
 }
 
@@ -1466,6 +1736,9 @@ func round1(v float64) float64 {
 func round2(v float64) float64 {
 	return math.Round(v*100) / 100
 }
+func round4(v float64) float64 {
+	return math.Round(v*10000) / 10000
+}
 
 // ---------- 模式 1：能装什么 ----------
 
@@ -1518,51 +1791,64 @@ type PlanOpts struct {
 	Objective string  `json:"objective"`  // cost | latency | avail
 	Queue     bool    `json:"queue"`      // 允许请求排队
 	MaxQ      int     `json:"maxq"`       // 排队后单副本最大并发上限
-	OutLen    int     `json:"outlen"`     // 平均输出 token 数（QPS 换算）
 	QuantOnly string  `json:"quant_only"` // 限定量化档位，空=全部
 }
 
 type Plan struct {
-	HW          HW      `json:"hw"`
-	N           int     `json:"n"`        // 单副本卡数
-	Replicas    int     `json:"replicas"` // 副本（节点）数
-	Quant       string  `json:"quant"`
-	QName       string  `json:"qname"`
-	EngName     string  `json:"eng_name"`
-	SpecName    string  `json:"spec_name"`
-	Strategy    string  `json:"strategy"`
-	Single      float64 `json:"single_tps"`
-	Agg         float64 `json:"agg_tps"`      // 单副本聚合 tok/s（容量场景并发口径）
-	TPM         float64 `json:"tpm"`          // 集群混合 tok/min 容量
-	CapacityQPS float64 `json:"capacity_qps"` // 集群最大稳定请求/s
-	ArrivalQPS  float64 `json:"arrival_qps"`  // 目标 TPM 换算的到达请求/s
-	MaxConc     int     `json:"max_conc"`     // 容量场景的单副本并发
-	UtilPct     float64 `json:"util_pct"`     // 目标负载 / 集群服务能力
-	WaitAvgMs   float64 `json:"wait_avg_ms"`  // M/M/c 平均排队等待
-	WaitP95Ms   float64 `json:"wait_p95_ms"`  // M/M/c 无条件 p95 排队等待
-	QueueModel  string  `json:"queue_model"`  // none | M/M/c
-	TTFTms      float64 `json:"ttft_ms"`
-	TPOTms      float64 `json:"tpot_ms"`
-	CostCNY     float64 `json:"cost_cny"`
-	Monthly     float64 `json:"monthly"`
-	PerMtok     float64 `json:"per_mtok"` // 每百万 token 成本（按集群实际容量满负载）
-	Warn        string  `json:"warn,omitempty"`
+	HW           HW      `json:"hw"`
+	N            int     `json:"n"`        // 单副本卡数
+	Replicas     int     `json:"replicas"` // 副本（节点）数
+	Quant        string  `json:"quant"`
+	QName        string  `json:"qname"`
+	EngName      string  `json:"eng_name"`
+	SpecName     string  `json:"spec_name"`
+	Strategy     string  `json:"strategy"`
+	Single       float64 `json:"single_tps"`
+	Agg          float64 `json:"agg_tps"`      // 单副本聚合 tok/s（容量场景并发口径）
+	TPM          float64 `json:"tpm"`          // 集群混合 tok/min 容量
+	CapacityQPS  float64 `json:"capacity_qps"` // 集群最大稳定请求/s
+	ArrivalQPS   float64 `json:"arrival_qps"`  // 目标 TPM 换算的到达请求/s
+	MaxConc      int     `json:"max_conc"`     // 容量场景的单副本并发
+	UtilPct      float64 `json:"util_pct"`     // 目标负载 / 集群服务能力
+	WaitAvgMs    float64 `json:"wait_avg_ms"`  // M/M/c 平均排队等待
+	WaitP95Ms    float64 `json:"wait_p95_ms"`  // M/M/c 无条件 p95 排队等待
+	QueueModel   string  `json:"queue_model"`  // none | M/M/c
+	TTFTms       float64 `json:"ttft_ms"`
+	TPOTms       float64 `json:"tpot_ms"`
+	P95SingleTPS float64 `json:"p95_single_tps"`
+	TTFTP95ms    float64 `json:"p95_ttft_ms"`
+	ReqP95ms     float64 `json:"p95_req_ms"`
+	ReqP99ms     float64 `json:"p99_req_ms"`
+	MeanContext  float64 `json:"mean_context"`
+	P99Context   int     `json:"p99_context"`
+	P999Context  int     `json:"p999_context"`
+	MaxContext   int     `json:"max_context"`
+	MemoryP999   float64 `json:"p999_memory"`
+	CostCNY      float64 `json:"cost_cny"`
+	Monthly      float64 `json:"monthly"`
+	PerMtok      float64 `json:"per_mtok"` // 每百万 token 成本（按集群实际容量满负载）
+	Warn         string  `json:"warn,omitempty"`
 }
 
 const maxReplicas = 64 // 防止离谱目标生成几百副本的方案
 
-func Planner(hws []HW, m Model, po PlanOpts, ctx, conc int, st Opts) []Plan {
+func Planner(hws []HW, m Model, po PlanOpts, workload []WorkloadBucket, conc int, st Opts) []Plan {
 	st = st.norm()
+	st.skipTrace = true
+	workload = normalizeWorkload(workload)
+	if len(workload) == 0 {
+		return nil
+	}
 	if po.TargetTPM <= 0 {
 		po.TargetTPM = 6000
 	}
 	if po.MaxQ <= 0 {
 		po.MaxQ = 256
 	}
-	if po.OutLen <= 0 {
-		po.OutLen = 512
+	maxContext := 0
+	for _, bucket := range workload {
+		maxContext = max(maxContext, bucket.Context)
 	}
-	st.OutLen = po.OutLen
 	quants := Quants
 	if fixed := m.FixedQuantID(); fixed != "" {
 		quants = []Quant{QuantByID(fixed)}
@@ -1595,22 +1881,26 @@ func Planner(hws []HW, m Model, po PlanOpts, ctx, conc int, st Opts) []Plan {
 				continue // 框架不支持该硬件（如 TRT-LLM × Apple），不出方案
 			}
 			for n := 1; n <= maxN; n *= 2 {
-				pf := Throughput(h, m, q, ctx, conc, n, st)
+				pf := ThroughputWorkload(h, m, q, workload, conc, n, st)
 				if !pf.Fit {
 					continue
 				}
-				if po.MinTOS > 0 && pf.SingleTPS < po.MinTOS {
+				minSingle := pf.SingleTPS
+				if pf.Workload != nil {
+					minSingle = pf.Workload.P95SingleTPS
+				}
+				if po.MinTOS > 0 && minSingle < po.MinTOS {
 					continue
 				}
 				// 单副本服务能力：关闭排队时用请求并发；开启后将容量场景并发
-				// 提升到 KV/显存允许上限，再受 MaxQ 限制。
+				// 提升到驻留时间加权的 P99.9 显存上限，再受 MaxQ 限制。
 				servicePerf := pf
 				maxConc := conc
 				if po.Queue {
 					maxConc = min(pf.MaxBatch, po.MaxQ)
 					maxConc = max(maxConc, conc)
 					if maxConc > conc {
-						pc := Throughput(h, m, q, ctx, maxConc, n, st)
+						pc := ThroughputWorkload(h, m, q, workload, maxConc, n, st)
 						if pc.Fit {
 							servicePerf = pc
 						} else {
@@ -1618,14 +1908,12 @@ func Planner(hws []HW, m Model, po PlanOpts, ctx, conc int, st Opts) []Plan {
 						}
 					}
 				}
-				capTPS := servicePerf.AggTPS
-				// 串行资源预算：未命中 prefill + 后续 decode；TPM 仍统计原始输入 token。
-				decodeTokens := math.Max(0, float64(po.OutLen-1))
-				capReqS := capTPS / math.Max(1, decodeTokens)
-				if servicePerf.tPre > 0 {
-					capReqS = 1 / (decodeTokens/capTPS + servicePerf.tPre/1000)
+				if servicePerf.Workload == nil || servicePerf.reqSec <= 0 {
+					continue
 				}
-				capTPM := capReqS * (float64(ctx) + float64(po.OutLen)) * 60
+				meanTokens := servicePerf.Workload.MeanContext + servicePerf.Workload.MeanOutput
+				capReqS := 1 / servicePerf.reqSec
+				capTPM := capReqS * meanTokens * 60
 				if capTPM <= 0 {
 					continue
 				}
@@ -1642,7 +1930,7 @@ func Planner(hws []HW, m Model, po PlanOpts, ctx, conc int, st Opts) []Plan {
 				totalCards := float64(n * replicas)
 				clusterTPM := capTPM * float64(replicas)
 				capacityQPS := capReqS * float64(replicas)
-				arrivalQPS := po.TargetTPM / (float64(ctx+po.OutLen) * 60)
+				arrivalQPS := po.TargetTPM / (meanTokens * 60)
 				util, waitAvg, waitP95 := erlangC(arrivalQPS, capReqS, replicas)
 				queueModel := "none"
 				if po.Queue {
@@ -1655,11 +1943,16 @@ func Planner(hws []HW, m Model, po PlanOpts, ctx, conc int, st Opts) []Plan {
 					HW: h, N: n, Replicas: replicas, Quant: q.ID, QName: q.Name,
 					EngName: engineDisplay(eng, st.Lang), SpecName: specDisplay(spec, st.Lang),
 					Single: servicePerf.SingleTPS, Agg: servicePerf.AggTPS, TPM: round1(clusterTPM),
-					CapacityQPS: round2(capacityQPS), ArrivalQPS: round2(arrivalQPS),
+					CapacityQPS: round4(capacityQPS), ArrivalQPS: round4(arrivalQPS),
 					MaxConc: maxConc, UtilPct: round1(util * 100),
 					WaitAvgMs: round1(waitAvg), WaitP95Ms: round1(waitP95), QueueModel: queueModel,
 					TTFTms: servicePerf.TTFTms, TPOTms: servicePerf.TPOTms,
-					CostCNY: h.CNY * totalCards,
+					P95SingleTPS: servicePerf.Workload.P95SingleTPS, TTFTP95ms: servicePerf.Workload.P95TTFTms,
+					ReqP95ms: servicePerf.Workload.P95ReqMs, ReqP99ms: servicePerf.Workload.P99ReqMs,
+					MeanContext: servicePerf.Workload.MeanContext, P99Context: servicePerf.Workload.P99Context,
+					P999Context: servicePerf.Workload.P999Context, MaxContext: servicePerf.Workload.MaxContext,
+					MemoryP999: servicePerf.Mem.P999Total,
+					CostCNY:    h.CNY * totalCards,
 				}
 				p.Strategy = strategy(h, n, st.Lang)
 				elec := h.TDP * totalCards * 0.6 * 24 * 30 / 1000 * 0.8 // 60% 负载，0.8 元/kWh
@@ -1668,10 +1961,10 @@ func Planner(hws []HW, m Model, po PlanOpts, ctx, conc int, st Opts) []Plan {
 					p.PerMtok = p.Monthly / (clusterTPM * 60 * 24 * 30 / 1e6)
 				}
 				p.Warn = warnOf(h, m, q, pf, st.Lang)
-				if m.Ctx > 0 && ctx > m.Ctx {
+				if m.Ctx > 0 && maxContext > m.Ctx {
 					p.Warn = joinWarn(p.Warn, localText(st.Lang,
-						fmt.Sprintf("Above the model's native context (%dK>%dK); YaRN/RoPE extension required", ctx/1024, m.Ctx/1024),
-						fmt.Sprintf("超模型原生上下文（%dK>%dK），需 YaRN/RoPE 外推", ctx/1024, m.Ctx/1024)))
+						fmt.Sprintf("The workload tail exceeds the model's native context (%dK>%dK); YaRN/RoPE extension required", maxContext/1024, m.Ctx/1024),
+						fmt.Sprintf("工作负载尾部超过模型原生上下文（%dK>%dK），需 YaRN/RoPE 外推", maxContext/1024, m.Ctx/1024)))
 				}
 				if st.KVQuant != "fp16" && !st.kvSupported(h, eng) {
 					p.Warn = joinWarn(p.Warn, localText(st.Lang, "The hardware/engine does not support this KV format; capacity and reads use FP16", "所选硬件/引擎不支持该 KV 格式，容量与读取均按 FP16"))
@@ -1682,7 +1975,7 @@ func Planner(hws []HW, m Model, po PlanOpts, ctx, conc int, st Opts) []Plan {
 				if st.Spec != "" && st.Spec != "none" && (st.SpecTau <= 0 || st.SpecOvh <= 0) {
 					p.Warn = joinWarn(p.Warn, localText(st.Lang, "Measured τ and draft/verify overhead were not supplied; speculative acceleration is not applied", "未提供实测 τ 与 draft/verify 开销，未应用推测加速"))
 				}
-				if ctx >= 32768 && n > 1 {
+				if maxContext >= 32768 && n > 1 {
 					p.Warn = joinWarn(p.Warn, localText(st.Lang, "For long-context multi-card deployments, evaluate context parallelism or PD disaggregation; benefit depends on SLO and KV transfer", "长上下文多卡应评估 context parallel 或 PD 分离；收益取决于 SLO 与 KV 传输"))
 				}
 				if po.Queue {

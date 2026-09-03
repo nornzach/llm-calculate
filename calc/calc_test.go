@@ -10,6 +10,9 @@ import (
 func hw(id string, vram, bw float64) HW {
 	return HW{ID: id, Name: id, VRAM: vram, BW: bw, TF: 300, Prec: []string{"fp16", "bf16", "fp8", "int8"}}
 }
+func singleWorkload(ctx, output int) []WorkloadBucket {
+	return []WorkloadBucket{{Context: ctx, Output: output, Share: 1}}
+}
 
 var (
 	hw4090  = HW{ID: "rtx4090", Vendor: "nvidia", VRAM: 24, BW: 1008, TF: 330, Prec: []string{"fp16", "bf16", "fp8", "int8"}}
@@ -120,7 +123,7 @@ func TestSlidingWindowKV(t *testing.T) {
 // 反向规划：R1 目标 6000 TPM 应给出方案且默认按成本升序
 func TestPlanner(t *testing.T) {
 	hws := []HW{hw4090, h200, hw("a100", 80, 2039)}
-	plans := Planner(hws, r1, PlanOpts{TargetTPM: 6000}, 8192, 16, Opts{})
+	plans := Planner(hws, r1, PlanOpts{TargetTPM: 6000}, singleWorkload(8192, 512), 16, Opts{})
 	if len(plans) == 0 {
 		t.Fatal("R1 6000 TPM 应有方案")
 	}
@@ -135,12 +138,12 @@ func TestPlanner(t *testing.T) {
 		}
 	}
 	// 排队模式应抬高单副本承载并发
-	q := Planner(hws, r1, PlanOpts{TargetTPM: 6000, Queue: true, MaxQ: 128}, 8192, 16, Opts{})
+	q := Planner(hws, r1, PlanOpts{TargetTPM: 6000, Queue: true, MaxQ: 128}, singleWorkload(8192, 512), 16, Opts{})
 	if len(q) == 0 {
 		t.Fatal("排队模式应有方案")
 	}
 	// 时延目标应按 TTFT+TPOT 升序
-	l := Planner(hws, r1, PlanOpts{TargetTPM: 6000, Objective: "latency"}, 8192, 16, Opts{})
+	l := Planner(hws, r1, PlanOpts{TargetTPM: 6000, Objective: "latency"}, singleWorkload(8192, 512), 16, Opts{})
 	for i := 1; i < len(l); i++ {
 		li, lj := l[i].TTFTms+l[i].TPOTms, l[i-1].TTFTms+l[i-1].TPOTms
 		if li < lj {
@@ -153,7 +156,7 @@ func TestPlanner(t *testing.T) {
 func TestPlannerDedup(t *testing.T) {
 	hws := []HW{hw4090, h200, b200, hw("a100", 80, 2039), hw("mi300x", 192, 5300)}
 	for _, obj := range []string{"", "cost", "latency", "avail"} {
-		plans := Planner(hws, r1, PlanOpts{TargetTPM: 6000, Objective: obj}, 8192, 16, Opts{})
+		plans := Planner(hws, r1, PlanOpts{TargetTPM: 6000, Objective: obj}, singleWorkload(8192, 512), 16, Opts{})
 		if len(plans) == 0 {
 			t.Fatalf("objective=%q 应有方案", obj)
 		}
@@ -259,11 +262,11 @@ func TestEngineCompatibilityAndNeutralBaseline(t *testing.T) {
 	if (Engine{ID: "x", Vendors: []string{"nvidia"}}).EngineOK(m3ultra) {
 		t.Error("nvidia-only 引擎不应兼容 Apple")
 	}
-	plans := Planner([]HW{m3ultra}, llama70, PlanOpts{TargetTPM: 600}, 4096, 4, Opts{Engine: "trtllm"})
+	plans := Planner([]HW{m3ultra}, llama70, PlanOpts{TargetTPM: 600}, singleWorkload(4096, 512), 4, Opts{Engine: "trtllm"})
 	if len(plans) != 0 {
 		t.Error("TRT-LLM × M3 Ultra 不应出方案")
 	}
-	if len(Planner([]HW{m3ultra}, llama70, PlanOpts{TargetTPM: 600}, 4096, 4, Opts{})) == 0 {
+	if len(Planner([]HW{m3ultra}, llama70, PlanOpts{TargetTPM: 600}, singleWorkload(4096, 512), 4, Opts{})) == 0 {
 		t.Error("auto 应回退 MLX 并出方案")
 	}
 }
@@ -566,7 +569,7 @@ func TestNativeCheckpointLocksWeightQuantization(t *testing.T) {
 	if applicable != 1 {
 		t.Fatalf("预量化模型应仅有一个可用权重格式，得 %d", applicable)
 	}
-	plans := Planner([]HW{h100}, m, PlanOpts{TargetTPM: 60, QuantOnly: "int4"}, 4096, 1, Opts{})
+	plans := Planner([]HW{h100}, m, PlanOpts{TargetTPM: 60, QuantOnly: "int4"}, singleWorkload(4096, 512), 1, Opts{})
 	for _, plan := range plans {
 		if plan.Quant != "fp8" {
 			t.Fatalf("规划器绕过了原生格式锁定: %+v", plan)
@@ -660,8 +663,8 @@ func TestErlangCAndPlannerLoadMetrics(t *testing.T) {
 		t.Errorf("M/M/1 解析值错误: util %.3f avg %.3f p95 %.3f", util, avg, p95)
 	}
 	plans := Planner([]HW{h200}, llama8b,
-		PlanOpts{TargetTPM: 6000, Queue: true, MaxQ: 64, OutLen: 256, QuantOnly: "fp16"},
-		8192, 4, Opts{})
+		PlanOpts{TargetTPM: 6000, Queue: true, MaxQ: 64, QuantOnly: "fp16"},
+		singleWorkload(8192, 256), 4, Opts{})
 	if len(plans) == 0 {
 		t.Fatal("排队规划应有方案")
 	}
@@ -670,6 +673,72 @@ func TestErlangCAndPlannerLoadMetrics(t *testing.T) {
 			math.IsInf(p.WaitAvgMs, 0) || math.IsInf(p.WaitP95Ms, 0) {
 			t.Errorf("规划负载指标必须稳定且自洽: %+v", p)
 		}
+	}
+}
+func TestThroughputWorkloadSingleBucketParity(t *testing.T) {
+	o := Opts{OutLen: 256, HitRate: 0.2}
+	base := Throughput(h100, llama8b, QuantByID("fp16"), 8192, 4, 1, o)
+	mixed := ThroughputWorkload(h100, llama8b, QuantByID("fp16"),
+		[]WorkloadBucket{{Context: 8192, Output: 256, Share: 1, PrefixHit: 0.2}}, 4, 1, Opts{})
+	if mixed.Workload == nil || len(mixed.Workload.Buckets) != 1 {
+		t.Fatalf("单桶工作负载必须返回分布明细: %+v", mixed.Workload)
+	}
+	if math.Abs(mixed.ReqS-base.ReqS) > 0.01 || math.Abs(mixed.TPMMixed-base.TPMMixed) > 1 ||
+		math.Abs(mixed.Mem.Total-base.Mem.Total) > 1e-9 || mixed.Mem.P999Total != mixed.Mem.Total {
+		t.Errorf("单桶聚合应退化为原单点计算: base=%+v mixed=%+v", base, mixed)
+	}
+	if mixed.Workload.MeanContext != 8192 || mixed.Workload.P999Context != 8192 ||
+		mixed.Workload.MaxContext != 8192 || mixed.Workload.Buckets[0].Occupancy != 1 {
+		t.Errorf("单桶统计错误: %+v", mixed.Workload)
+	}
+}
+
+func TestThroughputWorkloadLongTailReweightsOccupancy(t *testing.T) {
+	workload := []WorkloadBucket{
+		{Context: 102400, Output: 512, Share: 0.80},
+		{Context: 204800, Output: 512, Share: 0.15},
+		{Context: 512000, Output: 512, Share: 0.03},
+		{Context: 1048576, Output: 512, Share: 0.001},
+	}
+	p := ThroughputWorkload(h200, qwen7b, QuantByID("fp16"), workload, 4, 1, Opts{})
+	if p.Workload == nil {
+		t.Fatal("长尾工作负载缺少统计")
+	}
+	if p.Workload.MeanContext < 131000 || p.Workload.MeanContext > 132000 {
+		t.Errorf("归一化平均上下文应约 131.5K，得 %.1f", p.Workload.MeanContext)
+	}
+	if p.Workload.P99Context != 512000 || p.Workload.P999Context != 1048576 ||
+		p.Workload.MaxContext != 1048576 {
+		t.Errorf("上下文分位错误: P99=%d P99.9=%d max=%d", p.Workload.P99Context, p.Workload.P999Context, p.Workload.MaxContext)
+	}
+	tail := p.Workload.Buckets[len(p.Workload.Buckets)-1]
+	if tail.Occupancy <= tail.Share {
+		t.Errorf("长请求驻留占比应高于到达占比: arrival %.5f occupancy %.5f", tail.Share, tail.Occupancy)
+	}
+	if p.Mem.P999Total <= p.Mem.Total || p.Workload.P99ReqMs <= p.ReqMs {
+		t.Errorf("长尾必须抬高显存保护值和尾延迟: mean/p999 mem %.1f/%.1f mean/p99 req %.1f/%.1f",
+			p.Mem.Total, p.Mem.P999Total, p.ReqMs, p.Workload.P99ReqMs)
+	}
+}
+
+func TestPlannerUsesWorkloadDistribution(t *testing.T) {
+	workload := []WorkloadBucket{
+		{Context: 4096, Output: 128, Share: 0.96, PrefixHit: 0.5},
+		{Context: 65536, Output: 1024, Share: 0.04},
+	}
+	plans := Planner([]HW{h200}, llama8b,
+		PlanOpts{TargetTPM: 100, QuantOnly: "fp16"}, workload, 4, Opts{})
+	if len(plans) == 0 {
+		t.Fatal("分布式工作负载应生成规划方案")
+	}
+	p := plans[0]
+	if p.MeanContext < 6000 || p.P99Context != 65536 || p.MaxContext != 65536 ||
+		p.P95SingleTPS <= 0 || p.ReqP99ms <= p.ReqP95ms {
+		t.Errorf("规划结果未携带真实工作负载分位: %+v", p)
+	}
+	wantArrival := 100 / ((p.MeanContext + 0.96*128 + 0.04*1024) * 60)
+	if p.ArrivalQPS == 0 || math.Abs(p.ArrivalQPS-wantArrival) > 0.0001 {
+		t.Errorf("目标 TPM 应按平均输入输出换算 QPS 且保留低流量精度: got %.4f want %.4f", p.ArrivalQPS, wantArrival)
 	}
 }
 

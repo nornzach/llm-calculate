@@ -157,6 +157,39 @@ aside {
   color: var(--sub); font: 500 10px var(--mono); letter-spacing: 0; text-transform: none;
 }
 .lab .sym sub { font-size: 8px; }
+.workload-editor { border-top: 1px solid var(--line); }
+.workload-summary {
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding: 9px 0; color: var(--faint); font: 9.5px var(--mono);
+  border-bottom: 1px solid var(--line);
+}
+.workload-summary strong { color: var(--ok); font-weight: 600; }
+.workload-summary strong.invalid { color: var(--bad); }
+.workload-row { padding: 11px 0; border-bottom: 1px solid var(--line); }
+.workload-row-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px; color: var(--sub); font: 600 9.5px var(--mono);
+}
+.workload-remove {
+  padding: 0; border: 0; background: transparent; color: var(--faint);
+  font: 10px var(--mono); cursor: pointer;
+}
+.workload-remove:hover { color: var(--bad); }
+.workload-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.workload-field { color: var(--faint); font-size: 8.5px; letter-spacing: .06em; text-transform: uppercase; }
+.workload-field input {
+  min-height: 34px; margin-top: 4px; padding: 6px 8px;
+  border-radius: 6px; font: 11px var(--mono);
+}
+.workload-actions { display: flex; gap: 8px; padding-top: 9px; }
+.workload-actions button {
+  flex: 1; padding: 6px 7px; border: 1px solid var(--line2); border-radius: 6px;
+  background: var(--panel); color: var(--sub); font: 9px var(--mono); cursor: pointer;
+}
+.workload-actions button:hover { color: var(--acc); border-color: var(--acc); }
+.workload-note { margin-top: 8px; color: var(--faint); font-size: 9.5px; line-height: 1.45; }
+.workload-table { min-width: 920px; }
+.workload-table .share-shift { color: var(--acc); }
 
 select, input[type=number], input[type=text] {
   width: 100%; min-height: 42px; appearance: none;
@@ -302,11 +335,16 @@ input[type=range]::-moz-range-thumb {
   margin: 0 0 12px; display: flex; justify-content: space-between; align-items: baseline;
 }
 .seclab span { color: var(--faint); font-size: 10.5px; font-weight: 500; }
+.vguard {
+  position: absolute; top: -1px; bottom: -1px; width: 2px; margin-left: -1px;
+  background: var(--bad); box-shadow: 0 0 0 1px var(--panel);
+}
+.vlegend i.guard { width: 2px; height: 11px; background: var(--bad); }
 .seclab:not(:first-child) { margin-top: 28px; }
 
 /* 显存条 */
 .vbar {
-  display: flex; height: 34px; border: 1px solid var(--line2); border-radius: 9px;
+  position: relative; display: flex; height: 34px; border: 1px solid var(--line2); border-radius: 9px;
   overflow: hidden; background: var(--panel2);
 }
 .vbar > div { height: 100%; }
@@ -385,7 +423,7 @@ input[type=range]::-moz-range-thumb {
 .planrow.top3 .rank { color: var(--acc); }
 .planrow .phw { font-weight: 700; font-size: 13.5px; }
 .planrow .phw .x { color: var(--acc); font-family: var(--mono); font-size: 12px; margin-left: 6px; }
-.planrow .phw .msub { display: block; margin: 3px 0 0; color: var(--faint); font-size: 10.5px; font-weight: 400; font-family: var(--mono); }
+.planrow .msub { display: block; margin: 3px 0 0; color: var(--faint); font-size: 10.5px; font-weight: 400; font-family: var(--mono); line-height: 1.35; }
 .planrow .pstrat { color: var(--sub); font-size: 12px; }
 .planrow .pk { font-size: 9px; letter-spacing: .08em; color: var(--faint); display: block; font-weight: 700; }
 .planrow .pv { font-family: var(--mono); font-size: 13px; }

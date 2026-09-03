@@ -105,8 +105,8 @@
       <p class="field-note" id="p-quant-note">基础权重可模拟不同部署量化；预量化检查点会自动锁定。</p>
     </div>
     <div class="grp">
-      <label class="lab">上下文 · CONTEXT <span class="sym">L<sub>ctx</sub></span></label>
-      <div class="cs" id="p-ctx"></div>
+      <label class="lab">工作负载分布 · WORKLOAD MIX <span class="sym">P(L<sub>in</sub>, L<sub>out</sub>)</span></label>
+      <div class="workload-editor" id="p-workload"></div>
     </div>
     <div class="grp">
       <label class="lab">并发 · BATCH <span class="lab-meta"><span class="sym">B</span><span class="mono val" id="p-b-v">4</span></span></label>
@@ -126,14 +126,6 @@
         <button data-v="fp16" class="on">FP16</button><button data-v="fp8">FP8</button><button data-v="fp4">FP4*</button>
       </div>
     </div>
-    <div class="grp">
-      <label class="lab">前缀缓存命中 · PREFIX HIT <span class="lab-meta"><span class="sym">h<sub>prefix</sub></span><span class="mono val" id="p-hit-v">0%</span></span></label>
-      <input type="range" id="p-hit" min="0" max="90" step="10" value="0">
-    </div>
-    <div class="grp">
-      <label class="lab" for="p-outlen">平均输出 · OUT LEN <span class="lab-meta"><span class="sym">L<sub>out</sub></span><span class="dim2">token · 请求时延口径</span></span></label>
-      <input type="number" id="p-outlen" value="512" min="16" step="16">
-    </div>
     <details class="grp advanced">
       <summary>高级参数 · CALIBRATION <span>0 = 自动/解析值</span></summary>
       <div class="cgrid advgrid" id="p-advanced"></div>
@@ -144,6 +136,8 @@
     <div class="hero" id="perfHero"></div>
     <div class="seclab">计算路径 · COMPUTATION PIPELINE<span>参数 → 容量 → roofline → 时延 → 吞吐</span></div>
     <div class="method-flow" id="perfFlow"></div>
+    <div class="seclab">分桶结果 · WORKLOAD BUCKETS<span>请求到达占比 ≠ 并发驻留占比</span></div>
+    <div class="workload-results" id="perfBuckets"></div>
     <div class="seclab">显存分解 · MEMORY BREAKDOWN<span id="perfFitState"></span></div>
     <div id="vramBar"></div>
     <div class="seclab">部署仿真 · CONCURRENCY SWEEP<span>同一公式逐点重算</span></div>
@@ -214,8 +208,8 @@
       <p class="field-note" id="pl-quant-note">基础权重枚举量化方案；预量化检查点只使用自身格式。</p>
     </div>
     <div class="grp">
-      <label class="lab">上下文 · CONTEXT</label>
-      <div class="cs" id="pl-ctx"></div>
+      <label class="lab">工作负载分布 · WORKLOAD MIX <span class="sym">P(L<sub>in</sub>, L<sub>out</sub>)</span></label>
+      <div class="workload-editor" id="pl-workload"></div>
     </div>
     <div class="grp">
       <label class="lab">并发 · CONCURRENCY <span class="mono val" id="pl-c-v">16</span></label>
@@ -236,10 +230,6 @@
       </div>
     </div>
     <div class="grp">
-      <label class="lab">前缀缓存命中 · PREFIX HIT <span class="mono val" id="pl-hit-v">0%</span></label>
-      <input type="range" id="pl-hit" min="0" max="90" step="10" value="0">
-    </div>
-    <div class="grp">
       <label class="lab">允许排队 · QUEUE
         <span class="switch"><input type="checkbox" id="pl-queue"><i></i></span>
       </label>
@@ -247,10 +237,6 @@
         <label class="lab sub" for="pl-maxq">排队后单副本最大并发</label>
         <input type="number" id="pl-maxq" value="256" min="1" max="2048">
       </div>
-    </div>
-    <div class="grp">
-      <label class="lab" for="pl-outlen">平均输出 · OUT LEN <span class="dim2">token · 用于 QPS 换算</span></label>
-      <input type="number" id="pl-outlen" value="512" min="16" step="16">
     </div>
     <details class="grp advanced">
       <summary>高级参数 · CALIBRATION <span>0 = 自动/解析值</span></summary>

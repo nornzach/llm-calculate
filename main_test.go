@@ -81,3 +81,22 @@ func TestValidStackRejectsUnknownOptions(t *testing.T) {
 		}
 	}
 }
+
+func TestSanitizeWorkloadRejectsInvalidBuckets(t *testing.T) {
+	valid := []calc.WorkloadBucket{{Context: 8192, Output: 512, Share: 0.8, PrefixHit: 0.2}, {Context: 65536, Output: 1024, Share: 0.2}}
+	if got, err := sanitizeWorkload(valid); err != nil || len(got) != 2 {
+		t.Fatalf("valid workload rejected: got=%v err=%v", got, err)
+	}
+	invalid := [][]calc.WorkloadBucket{
+		nil,
+		{{Context: 511, Output: 512, Share: 1}},
+		{{Context: 8192, Output: 0, Share: 1}},
+		{{Context: 8192, Output: 512, Share: 0}},
+		{{Context: 8192, Output: 512, Share: 1, PrefixHit: 0.91}},
+	}
+	for _, workload := range invalid {
+		if _, err := sanitizeWorkload(workload); err == nil {
+			t.Errorf("invalid workload accepted: %+v", workload)
+		}
+	}
+}

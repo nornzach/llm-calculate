@@ -179,31 +179,28 @@ type fitReq struct {
 }
 
 type perfReq struct {
-	HW       string    `json:"hw"`
-	N        int       `json:"n"`
-	Model    string    `json:"model"`
-	Quant    string    `json:"quant"`
-	Ctx      int       `json:"ctx"`
-	Batch    int       `json:"batch"`
-	Eng      string    `json:"eng"`
-	Spec     string    `json:"spec"`
-	KVQ      string    `json:"kvq"`
-	Hit      float64   `json:"hit"`
-	OutLen   int       `json:"outlen"`
-	Advanced calc.Opts `json:"advanced"`
-	Lang     string    `json:"lang"`
+	HW       string                `json:"hw"`
+	N        int                   `json:"n"`
+	Model    string                `json:"model"`
+	Quant    string                `json:"quant"`
+	Workload []calc.WorkloadBucket `json:"workload"`
+	Batch    int                   `json:"batch"`
+	Eng      string                `json:"eng"`
+	Spec     string                `json:"spec"`
+	KVQ      string                `json:"kvq"`
+	Advanced calc.Opts             `json:"advanced"`
+	Lang     string                `json:"lang"`
 }
 
 type planReq struct {
-	Model  string      `json:"model"`
-	Custom *calc.Model `json:"custom"` // 自定义假想模型（优先于 model id）
+	Model    string                `json:"model"`
+	Custom   *calc.Model           `json:"custom"` // 自定义假想模型（优先于 model id）
+	Workload []calc.WorkloadBucket `json:"workload"`
 	calc.PlanOpts
-	Ctx      int       `json:"ctx"`
 	Conc     int       `json:"conc"`
 	Eng      string    `json:"eng"`
 	Spec     string    `json:"spec"`
 	KVQ      string    `json:"kvq"`
-	Hit      float64   `json:"hit"`
 	Advanced calc.Opts `json:"advanced"`
 	Lang     string    `json:"lang"`
 }
@@ -329,6 +326,31 @@ func clamp(v, lo, hi, def int) int {
 	}
 	return v
 }
+func sanitizeWorkload(workload []calc.WorkloadBucket) ([]calc.WorkloadBucket, error) {
+	if len(workload) == 0 || len(workload) > 8 {
+		return nil, fmt.Errorf("workload must contain 1 to 8 buckets")
+	}
+	total := 0.0
+	for i, bucket := range workload {
+		if bucket.Context < 512 || bucket.Context > 1048576 {
+			return nil, fmt.Errorf("workload bucket %d context must be between 512 and 1048576", i+1)
+		}
+		if bucket.Output < 1 || bucket.Output > 8192 {
+			return nil, fmt.Errorf("workload bucket %d output must be between 1 and 8192", i+1)
+		}
+		if bucket.Share <= 0 || bucket.Share > 1 {
+			return nil, fmt.Errorf("workload bucket %d share must be in (0, 1]", i+1)
+		}
+		if bucket.PrefixHit < 0 || bucket.PrefixHit > 0.9 {
+			return nil, fmt.Errorf("workload bucket %d prefix_hit must be between 0 and 0.9", i+1)
+		}
+		total += bucket.Share
+	}
+	if total <= 0 {
+		return nil, fmt.Errorf("workload share total must be positive")
+	}
+	return workload, nil
+}
 
 func main() {
 	addr := flag.String("addr", ":8317", "listen address")
@@ -408,8 +430,12 @@ func main() {
 			writeErr(w, 422, "hardware has no local roofline inputs")
 			return
 		}
+		workload, err := sanitizeWorkload(req.Workload)
+		if err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
 		n := clamp(req.N, 1, 8, 1)
-		ctx := clamp(req.Ctx, 512, 1048576, 8192)
 		batch := clamp(req.Batch, 1, 256, 8)
 		if req.Quant == "" {
 			req.Quant = "fp16"
@@ -422,25 +448,24 @@ func main() {
 		o := req.Advanced
 		o.Engine, o.Spec, o.KVQuant = req.Eng, req.Spec, req.KVQ
 		o.Lang = req.Lang
-		o.HitRate = clampF64(req.Hit, 0, 0.9, 0)
-		o.OutLen = clamp(req.OutLen, 16, 8192, 512)
-		p := calc.Throughput(*h, *m, q, ctx, batch, n, o)
+		p := calc.ThroughputWorkload(*h, *m, q, workload, batch, n, o)
 		// 所有点复用同一计算函数；额外插入当前并发，避免图表与主指标口径分叉。
 		type pt struct {
-			B      int     `json:"b"`
-			Agg    float64 `json:"agg"`
-			Single float64 `json:"single"`
-			Used   float64 `json:"used"`
-			Cap    float64 `json:"cap"`
-			Fit    bool    `json:"fit"`
+			B        int     `json:"b"`
+			Agg      float64 `json:"agg"`
+			Single   float64 `json:"single"`
+			Used     float64 `json:"used"`      // P99.9 concurrent memory guard
+			MeanUsed float64 `json:"mean_used"` // occupancy-weighted mean
+			Cap      float64 `json:"cap"`
+			Fit      bool    `json:"fit"`
 		}
 		batches := append([]int{1, 2, 4, 8, 16, 32, 64, 128}, batch)
 		slices.Sort(batches)
 		batches = slices.Compact(batches)
 		curve := make([]pt, 0, len(batches))
 		for _, b := range batches {
-			pp := calc.Throughput(*h, *m, q, ctx, b, n, o)
-			curve = append(curve, pt{B: b, Agg: pp.AggTPS, Single: pp.SingleTPS, Used: pp.Mem.Total, Cap: pp.Mem.Cap, Fit: pp.Fit})
+			pp := calc.ThroughputWorkload(*h, *m, q, workload, b, n, o)
+			curve = append(curve, pt{B: b, Agg: pp.AggTPS, Single: pp.SingleTPS, Used: pp.Mem.P999Total, MeanUsed: pp.Mem.Total, Cap: pp.Mem.Cap, Fit: pp.Fit})
 		}
 		writeJSON(w, map[string]any{"perf": p, "curve": curve})
 	})
@@ -472,14 +497,16 @@ func main() {
 			}
 			m = *found
 		}
-		ctx := clamp(req.Ctx, 512, 1048576, 8192)
+		workload, err := sanitizeWorkload(req.Workload)
+		if err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
 		conc := clamp(req.Conc, 1, 256, 16)
 		o := req.Advanced
 		o.Engine, o.Spec, o.KVQuant = req.Eng, req.Spec, req.KVQ
 		o.Lang = req.Lang
-		o.HitRate = clampF64(req.Hit, 0, 0.9, 0)
-		o.OutLen = clamp(req.OutLen, 16, 8192, 512)
-		writeJSON(w, calc.Planner(hws, m, req.PlanOpts, ctx, conc, o))
+		writeJSON(w, calc.Planner(hws, m, req.PlanOpts, workload, conc, o))
 	})
 
 	// 简单日志

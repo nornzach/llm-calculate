@@ -45,6 +45,9 @@ const STATIC_EN = new Map([
   ["部署仿真 · CONCURRENCY SWEEP", "Concurrency Sweep"],
   ["计算路径 · COMPUTATION PIPELINE", "Computation Pipeline"],
   ["参数 → 容量 → roofline → 时延 → 吞吐", "parameters → capacity → roofline → latency → throughput"],
+  ["工作负载分布 · WORKLOAD MIX", "Workload Distribution"],
+  ["分桶结果 · WORKLOAD BUCKETS", "Workload Buckets"],
+  ["请求到达占比 ≠ 并发驻留占比", "request-arrival share ≠ concurrent occupancy share"],
   ["同一公式逐点重算", "recomputed at every point"],
   ["计算过程 · FORMULA TRACE", "Formula Trace"],
   ["✎ 自定义假想模型…", "✎ Custom Model…"],
@@ -146,6 +149,7 @@ function applyLanguage() {
 
 let HW = [], MODELS = [], QUANTS = [], ENGINES = [], SPECS = [];
 let modelPage = 0;
+let workloadP, workloadPl;
 const CS = {}; // 自定义下拉注册表
 const fixedQuantID = m => m && m.native_quant && m.native_quant !== "fp16" && QUANTS.some(q => q.id === m.native_quant) ? m.native_quant : "";
 
@@ -540,6 +544,97 @@ const CTX_OPTS = [
     { v: "1048576", n: "1 M", m: "1048576" },
   ]},
 ];
+const LONG_TAIL_WORKLOAD = [
+  { context: 102400, output: 512, share: 81.55, prefix_hit: 0 },
+  { context: 204800, output: 512, share: 15.29, prefix_hit: 0 },
+  { context: 512000, output: 512, share: 3.06, prefix_hit: 0 },
+  { context: 1048576, output: 512, share: 0.10, prefix_hit: 0 },
+];
+
+const formatTokens = v => v >= 1048576 ? `${(v / 1048576).toFixed(v % 1048576 ? 1 : 0)}M` :
+  v >= 1024 ? `${(v / 1024).toFixed(v % 1024 ? 1 : 0)}K` : `${Math.round(v)}`;
+
+function summarizeWorkload(workload) {
+  const total = workload.reduce((sum, b) => sum + b.share, 0);
+  const rows = workload.map(b => ({ ...b, share: b.share / total })).sort((a, b) => a.context - b.context);
+  const quantile = q => {
+    let cumulative = 0;
+    for (const row of rows) {
+      cumulative += row.share;
+      if (cumulative >= q) return row.context;
+    }
+    return rows.at(-1).context;
+  };
+  return {
+    meanContext: rows.reduce((sum, b) => sum + b.share * b.context, 0),
+    meanOutput: rows.reduce((sum, b) => sum + b.share * b.output, 0),
+    p99Context: quantile(.99),
+    p999Context: quantile(.999),
+    maxContext: rows.at(-1).context,
+  };
+}
+
+function workloadEditor(el, initial, onChange) {
+  let rows = initial.map(x => ({ ...x }));
+  let timer;
+  const valid = () => rows.length > 0 && rows.length <= 8 && rows.every(r =>
+    Number.isFinite(r.context) && r.context >= 512 && r.context <= 1048576 &&
+    Number.isFinite(r.output) && r.output >= 1 && r.output <= 8192 &&
+    Number.isFinite(r.share) && r.share > 0 && r.share <= 100 &&
+    Number.isFinite(r.prefix_hit) && r.prefix_hit >= 0 && r.prefix_hit <= 90);
+  const updateSummary = () => {
+    const total = rows.reduce((sum, r) => sum + (Number.isFinite(r.share) ? r.share : 0), 0);
+    const out = el.querySelector(".workload-total");
+    out.textContent = `Σ ${total.toFixed(total < 1 ? 2 : 1)}%`;
+    out.classList.toggle("invalid", !valid());
+  };
+  const render = () => {
+    el.innerHTML = `<div class="workload-summary"><span>${tr("Arrival distribution; normalized at calculation", "请求到达分布；计算时自动归一化")}</span><strong class="workload-total"></strong></div>` +
+      rows.map((r, i) => `<div class="workload-row" data-index="${i}">
+        <div class="workload-row-head"><span>${tr("Bucket", "分桶")} ${String(i + 1).padStart(2, "0")}</span><button type="button" class="workload-remove" data-remove="${i}" ${rows.length === 1 ? "disabled" : ""}>${tr("Remove", "删除")}</button></div>
+        <div class="workload-grid">
+          <label class="workload-field">${tr("Request share (%)", "请求占比 (%)")}<input type="number" data-field="share" value="${r.share}" min="0.01" max="100" step="0.01"></label>
+          <label class="workload-field">${tr("Input tokens", "输入 token")}<input type="number" data-field="context" value="${r.context}" min="512" max="1048576" step="512"></label>
+          <label class="workload-field">${tr("Output tokens", "输出 token")}<input type="number" data-field="output" value="${r.output}" min="1" max="8192" step="16"></label>
+          <label class="workload-field">${tr("Prefix hit (%)", "前缀命中 (%)")}<input type="number" data-field="prefix_hit" value="${r.prefix_hit}" min="0" max="90" step="1"></label>
+        </div>
+      </div>`).join("") +
+      `<div class="workload-actions"><button type="button" data-action="add" ${rows.length >= 8 ? "disabled" : ""}>+ ${tr("Bucket", "分桶")}</button><button type="button" data-action="tail">${tr("Long-tail example", "长尾示例")}</button></div>` +
+      `<p class="workload-note">${tr("Shares describe arriving requests. Memory occupancy is reweighted by each bucket's request latency; capacity uses a P99.9 guard.", "占比表示到达请求。并发显存会按各桶请求时延重加权驻留占比，并使用 P99.9 保护值。")}</p>`;
+    updateSummary();
+  };
+  const notify = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => { if (valid()) onChange(); }, 180);
+  };
+  el.oninput = e => {
+    const input = e.target.closest("input[data-field]");
+    if (!input) return;
+    rows[+input.closest(".workload-row").dataset.index][input.dataset.field] = +input.value;
+    updateSummary();
+    notify();
+  };
+  el.onclick = e => {
+    const remove = e.target.closest("[data-remove]");
+    const action = e.target.closest("[data-action]")?.dataset.action;
+    if (remove && rows.length > 1) rows.splice(+remove.dataset.remove, 1);
+    else if (action === "add" && rows.length < 8) {
+      const last = rows.at(-1);
+      rows.push({ context: last.context, output: last.output, share: 1, prefix_hit: last.prefix_hit });
+    } else if (action === "tail") rows = LONG_TAIL_WORKLOAD.map(x => ({ ...x }));
+    else return;
+    render();
+    notify();
+  };
+  render();
+  return {
+    get: () => valid() ? rows.map(r => ({
+      context: Math.round(r.context), output: Math.round(r.output),
+      share: r.share / 100, prefix_hit: r.prefix_hit / 100,
+    })) : null,
+  };
+}
+
 
 // 量化档位按家族分组；withAll 时最前加「全部档位」（规划器用）
 function quantGroups(withAll) {
@@ -660,9 +755,9 @@ async function boot() {
   CS["p-hw"] = cselect($("#p-hw"), hwGroups(), { onChange: runPerf });
   CS["p-model"] = cselect($("#p-model"), modelGroups(), { onChange: () => { syncModelQuant("p-model", "p-quant", "p-quant-note"); runPerf(); } });
   CS["p-quant"] = cselect($("#p-quant"), quantGroups(), { onChange: runPerf });
-  CS["p-ctx"] = cselect($("#p-ctx"), CTX_OPTS, { search: false, onChange: runPerf });
+  workloadP = workloadEditor($("#p-workload"), [{ context: 4096, output: 512, share: 100, prefix_hit: 0 }], runPerf);
   CS["pl-model"] = cselect($("#pl-model"), modelGroups(), { onChange: () => { syncModelQuant("pl-model", "pl-qonly", "pl-quant-note"); runPlan(); } });
-  CS["pl-ctx"] = cselect($("#pl-ctx"), CTX_OPTS, { search: false, onChange: runPlan });
+  workloadPl = workloadEditor($("#pl-workload"), [{ context: 8192, output: 512, share: 100, prefix_hit: 0 }], runPlan);
   CS["pl-qonly"] = cselect($("#pl-qonly"), quantGroups(true), { search: false, onChange: runPlan });
   CS["hw-vendor"] = cselect($("#hw-vendor"), [{ label: "", items: [{ v: "", n: tr("All vendors", "全部厂商") }, ...Object.keys(VENDOR).map(v => ({ v, n: vendorName(v) }))] }], { search: false, onChange: renderHWTable });
   const planFilter = () => { planPage = 0; renderPlans(); };
@@ -682,8 +777,8 @@ async function boot() {
   // 默认值
   CS["f-hw"].set("rtx4090", true); CS["f-ctx"].set("8192", true);
   CS["p-hw"].set("rtx4090", true); CS["p-model"].set("llama-3.1-70b", true);
-  CS["p-quant"].set("q4km", true); CS["p-ctx"].set("4096", true);
-  CS["pl-model"].set("deepseek-r1", true); CS["pl-ctx"].set("8192", true);
+  CS["p-quant"].set("q4km", true);
+  CS["pl-model"].set("deepseek-r1", true);
   CS["pl-qonly"].set("", true); CS["hw-vendor"].set("", true);
   CS["pl-vendor"].set("", true); CS["pl-cls"].set("", true);
   syncModelQuant("p-model", "p-quant", "p-quant-note");
@@ -729,9 +824,6 @@ function wire() {
   $("#f-q").oninput = () => { fitPage = 0; renderFitRows(); };
   $("#m-q").oninput = () => { modelPage = 0; renderModelTable(); };
   $("#g-q").oninput = renderGlossary;
-  $("#p-hit").oninput = () => { $("#p-hit-v").textContent = $("#p-hit").value + "%"; runPerf(); };
-  $("#pl-hit").oninput = () => { $("#pl-hit-v").textContent = $("#pl-hit").value + "%"; runPlan(); };
-  $("#p-outlen").oninput = runPerf;
   $$("#p-advanced input").forEach(el => { el.oninput = runPerf; });
   $$("#pl-advanced input").forEach(el => { el.oninput = runPlan; });
 }
@@ -805,33 +897,33 @@ function renderFitRows() {
 }
 
 /* ---------- 模式二：能跑多快 ---------- */
-
 async function runPerf() {
+  const workload = workloadP?.get();
+  if (!workload) return;
   const body = {
     hw: CS["p-hw"].get(), n: +$("#p-n").value, model: CS["p-model"].get(),
-    quant: CS["p-quant"].get(), ctx: +CS["p-ctx"].get(), batch: +$("#p-b").value,
+    quant: CS["p-quant"].get(), workload, batch: +$("#p-b").value,
     eng: CS["p-eng"].get(), spec: CS["p-spec"].get(), kvq: segKvqP ? segKvqP.get() : "fp16",
-    hit: (+$("#p-hit").value) / 100, outlen: +$("#p-outlen").value,
-    advanced: advancedOpts("p"),
-    lang,
+    advanced: advancedOpts("p"), lang,
   };
   const { perf: p, curve } = await post("/api/perf", body);
   const h = HW.find(x => x.id === body.hw);
   const m = MODELS.find(x => x.id === body.model);
 
+  const stats = p.workload;
   $("#perfHero").innerHTML = [
-    [tr("Decode · single stream", "decode 单流"), fmt.tps(p.single_tps), tr("tok / s · per-user experience", "tok / s · 每用户体感"), true],
-    [tr("Decode · aggregate", "decode 聚合"), fmt.tps(p.agg_tps), tr(`tok / s · ${body.batch} concurrent total`, `tok / s · ${body.batch} 并发合计`)],
-    [tr("Prefill speed", "prefill 速度"), fmt.tps(p.pre_tps), tr("tok / s · prompt processing", "tok / s · 提示词处理")],
-    [tr("Mixed TPM", "TPM 混合"), fmt.tpm(p.tpm_mixed), tr("tok / min · input + output", "tok / min · 输入+输出")],
-    ["TTFT", fmt.ms(p.ttft_ms), tr("first-token latency", "首 token 延迟")],
-    ["TPOT", fmt.ms(p.tpot_ms), tr("per-token interval", "逐 token 间隔")],
-    [tr("Request latency", "请求时延"), fmt.ms(p.req_ms), tr(`TTFT + ${body.outlen} output tokens`, `TTFT + ${body.outlen} tok 输出`)],
-    [tr("Request rate", "请求速率"), fmt.rate(p.req_s), tr("req / s · current input/output length", "req / s · 当前输入/输出长度")],
+    [tr("Decode · single stream", "decode 单流"), fmt.tps(p.single_tps), tr("tok / s · output-token weighted", "tok / s · 按输出 token 加权"), true],
+    [tr("Decode · aggregate", "decode 聚合"), fmt.tps(p.agg_tps), tr(`tok / s · ${body.batch} concurrent mixed load`, `tok / s · ${body.batch} 并发混合负载`)],
+    [tr("Prefill speed", "prefill 速度"), fmt.tps(p.pre_tps), tr("tok / s · workload weighted", "tok / s · 按工作负载加权")],
+    [tr("Mixed TPM", "TPM 混合"), fmt.tpm(p.tpm_mixed), tr("tok / min · raw input + output", "tok / min · 原始输入+输出")],
+    [tr("TTFT · mean", "TTFT · 均值"), fmt.ms(p.ttft_ms), tr(`P95 ${fmt.ms(stats.p95_ttft_ms)} · P99 ${fmt.ms(stats.p99_ttft_ms)}`, `P95 ${fmt.ms(stats.p95_ttft_ms)} · P99 ${fmt.ms(stats.p99_ttft_ms)}`)],
+    [tr("TPOT · weighted", "TPOT · 加权"), fmt.ms(p.tpot_ms), tr("per-output-token interval", "逐输出 token 间隔")],
+    [tr("Request latency · mean", "请求时延 · 均值"), fmt.ms(p.req_ms), `P95 ${fmt.ms(stats.p95_req_ms)} · P99 ${fmt.ms(stats.p99_req_ms)}`],
+    [tr("Request capacity", "请求容量"), fmt.rate(p.req_s), tr("req / s · harmonic service demand", "req / s · 调和聚合服务预算")],
     [tr("Decode bottleneck", "decode 瓶颈"), ({ compute: tr("Compute", "算力"), memory: tr("Memory bandwidth", "显存带宽"), offload: "KV offload" })[p.bottleneck] || p.bottleneck,
       `memory ${fmt.ms(p.decode_mem_ms)} · compute ${fmt.ms(p.decode_compute_ms)} · comm ${fmt.ms(p.comm_ms)}`],
-    [tr("Estimate basis", "计算口径"), !p.topology_ok ? tr("Topology fallback", "拓扑已回退") : p.accuracy === "calibrated" ? tr("Calibrated", "已校准") : tr("Parsed estimate", "解析估算"),
-      `${p.topology} · ${p.peak_tf.toFixed(0)} TF ${p.peak_exact ? tr("vendor precision-specific", "厂商逐精度") : tr("multiplier estimate", "倍率估算")}${p.accuracy === "analytical" ? tr(" · no statistical confidence interval", " · 无统计置信区间") : ""}`],
+    [tr("Estimate basis", "计算口径"), !p.topology_ok ? tr("Topology fallback", "拓扑已回退") : p.accuracy === "calibrated" ? tr("Calibrated", "已校准") : tr("Analytical mix", "解析混合估算"),
+      `${p.topology} · ${stats.buckets.length} ${tr("workload buckets", "个工作负载桶")} · ${p.peak_tf.toFixed(0)} TF${p.accuracy === "analytical" ? tr(" · no statistical confidence interval", " · 无统计置信区间") : ""}`],
   ].map(([k, v, u, hot]) =>
     `<div class="stat ${p.fit ? "" : "bad"} ${hot ? "hot" : ""}">
       <div class="k">${k}</div><div class="v">${v}</div><div class="u">${u}</div></div>`).join("");
@@ -847,33 +939,45 @@ async function runPerf() {
   const effectiveQuant = QUANTS.find(q => q.id === p.quant);
   const bottleneckName = ({ compute: tr("compute", "算力"), memory: tr("memory bandwidth", "显存带宽"), offload: "KV offload" })[p.bottleneck] || p.bottleneck;
   const flow = [
-    ["01", tr("Inputs · θ", "输入 · θ"), `N_GPU=${body.n} · B=${body.batch} · L_ctx=${body.ctx}`, `${m.name} · ${effectiveQuant?.name || p.quant}`],
-    ["02", tr("Memory · M", "显存 · M"), `M=${fmt.gb(used)} / ${fmt.gb(d.budget)}`, tr("estimated use / engine budget", "估算占用 / 引擎预算")],
+    ["01", tr("Workload · P(L)", "负载 · P(L)"), `μL_in=${formatTokens(stats.mean_context)} · B=${body.batch}`, `P99 ${formatTokens(stats.p99_context)} · P99.9 ${formatTokens(stats.p999_context)} · max ${formatTokens(stats.max_context)}`],
+    ["02", tr("Memory · M", "显存 · M"), `μ=${fmt.gb(used)} · P99.9=${fmt.gb(d.p999_total)}`, `${tr("physical", "物理")} ${fmt.gb(cap)} · ${tr("occupancy weighted", "驻留时间加权")}`],
     ["03", tr(`Roofline · ${bottleneckName}`, `Roofline · ${bottleneckName}`), `t_step=${fmt.ms(p.tpot_ms)}`, "max(t_mem, t_compute) + t_comm"],
-    ["04", tr("Request latency · T", "请求时延 · T"), `T_req=${fmt.ms(p.req_ms)}`, "TTFT + (L_out − 1) × TPOT"],
+    ["04", tr("Request latency · T", "请求时延 · T"), `μ=${fmt.ms(p.req_ms)} · P95=${fmt.ms(stats.p95_req_ms)}`, "TTFT + (L_out − 1) × TPOT"],
     ["05", tr("Service capacity · λ", "服务容量 · λ"), `λ=${fmt.rate(p.req_s)} req/s`, `TPM=${fmt.tpm(p.tpm_mixed)}`],
   ];
   $("#perfFlow").innerHTML = flow.map(([i, label, value, note]) =>
     `<div class="method-step"><span class="method-index">${i}</span><span class="method-label">${label}</span><strong class="method-value">${value}</strong><small class="method-note">${note}</small></div>`).join("");
+
+  $("#perfBuckets").innerHTML = `<div class="tblwrap"><table class="tbl workload-table"><thead><tr>
+    <th>${tr("Input", "输入")}</th><th>${tr("Output", "输出")}</th><th>${tr("Arrival", "到达占比")}</th><th>${tr("Occupancy", "驻留占比")}</th>
+    <th>TTFT</th><th>TPOT</th><th>${tr("Request latency", "请求时延")}</th><th>${tr(`VRAM @ B=${body.batch}`, `显存 @ B=${body.batch}`)}</th>
+  </tr></thead><tbody>${stats.buckets.map(b => `<tr>
+    <td class="n">${formatTokens(b.context)}</td><td class="n">${formatTokens(b.output)}</td><td class="n">${(b.share * 100).toFixed(2)}%</td>
+    <td class="n ${b.occupancy > b.share * 1.05 ? "share-shift" : ""}">${(b.occupancy * 100).toFixed(2)}%</td>
+    <td class="n">${fmt.ms(b.ttft_ms)}</td><td class="n">${fmt.ms(b.tpot_ms)}</td><td class="n">${fmt.ms(b.req_ms)}</td>
+    <td class="n" style="color:var(--${b.fit ? "ok" : "bad"})">${fmt.gb(b.batch_memory)}</td>
+  </tr>`).join("")}</tbody></table></div>`;
+
   $("#vramBar").innerHTML =
     `<div class="vbar">` +
     segs.map(([k, v, c]) => `<div class="${c}" style="width:${pct(v)}%" title="${k} ${fmt.gb(v)}"></div>`).join("") +
-    `<div class="vfree" style="width:${Math.max(0, 100 - pct(used))}%"></div></div>` +
+    `<div class="vfree" style="width:${Math.max(0, 100 - pct(used))}%"></div><i class="vguard" style="left:${Math.min(100, pct(d.p999_total))}%" title="P99.9 ${fmt.gb(d.p999_total)}"></i></div>` +
     `<div class="vlegend">` +
     segs.map(([k, v, c]) => `<span><i style="background:${colors[c]}"></i>${k} <span class="mono">${fmt.gb(v)}</span></span>`).join("") +
-    `<span><i style="background:transparent;border:1px solid var(--line2)"></i>${tr("Free", "空闲")} <span class="mono">${fmt.gb(Math.max(0, cap - used))}</span></span>` +
+    `<span><i class="guard"></i>P99.9 <span class="mono">${fmt.gb(d.p999_total)}</span></span>` +
+    `<span><i style="background:transparent;border:1px solid var(--line2)"></i>${tr("Mean free", "均值空闲")} <span class="mono">${fmt.gb(Math.max(0, cap - used))}</span></span>` +
     (d.offloaded_kv > 0 ? `<span>${tr("External KV", "外部 KV")} <span class="mono">${fmt.gb(d.offloaded_kv)}</span></span>` : "") +
     `</div>`;
 
   $("#perfFitState").innerHTML = p.fit
-    ? `<span style="color:var(--ok)">${tr(`Fits · engine budget ${fmt.gb(d.budget)} · ${(d.head_pct * 100).toFixed(0)}% headroom`, `可部署 · 引擎预算 ${fmt.gb(d.budget)} · 余量 ${(d.head_pct * 100).toFixed(0)}%`)}</span>`
-    : `<span style="color:var(--bad)">${tr(`Does not fit · ${fmt.gb(used - cap)} above engine budget`, `装不下 · 超引擎预算 ${fmt.gb(used - cap)}`)}</span>`;
+    ? `<span style="color:var(--ok)">${tr(`P99.9 fits · ${fmt.gb(d.p999_total)} / ${fmt.gb(cap)} · ${(d.head_pct * 100).toFixed(0)}% headroom`, `P99.9 可部署 · ${fmt.gb(d.p999_total)} / ${fmt.gb(cap)} · 余量 ${(d.head_pct * 100).toFixed(0)}%`)}</span>`
+    : `<span style="color:var(--bad)">${tr(`P99.9 does not fit · ${fmt.gb(d.p999_total - cap)} above physical VRAM`, `P99.9 装不下 · 超物理显存 ${fmt.gb(d.p999_total - cap)}`)}</span>`;
 
   $("#perfTrace").innerHTML =
     `<div class="trow thead"><span>${tr("Quantity", "量")}</span><span>${tr("Estimate", "估算值")}</span><span>${tr("Relation / assumption", "关系式 / 假设")}</span></div>` +
     `<div class="trow"><span class="tk">${tr("Deployment", "部署")}</span><span class="tv">${hardwareName(h)} × ${body.n}</span><span class="tn">${m.name} · ${effectiveQuant?.name || p.quant}${p.quant_locked ? tr(" · native checkpoint locked", " · 原生 checkpoint 锁定") : ""}${p.accel ? "" : tr(" · memory saving only; no acceleration", " · 该档仅省显存不加速")}${p.kv_supported ? "" : tr(" · selected KV format not applied", " · 所选 KV 格式未应用")}</span></div>` +
     p.trace.map(t => `<div class="trow"><span class="tk">${t.k}</span><span class="tv">${t.v}</span><span class="tn">${t.n}</span></div>`).join("") +
-    `<div class="trow"><span class="tk">${tr("Maximum concurrency", "最大并发")}</span><span class="tv">${p.max_batch}</span><span class="tn">${tr("Capacity limit using the current shared-prefix, KV, and peak-activation assumptions", "当前共享前缀、KV 与激活峰值口径的容量上限")}</span></div>`;
+    `<div class="trow"><span class="tk">${tr("Maximum concurrency", "最大并发")}</span><span class="tv">${p.max_batch}</span><span class="tn">${tr("Capacity limit under the workload's occupancy-weighted P99.9 memory guard", "按工作负载驻留占比加权的 P99.9 显存保护上限")}</span></div>`;
 
   drawCurve(curve, body.batch);
 }
@@ -909,12 +1013,12 @@ function drawCurve(curve, curB) {
       `<circle class="cdot secondary${current}${infeasible}" cx="${x(i)}" cy="${yTPS(p.single / maxTPS)}" r="${current ? 3.5 : 2}"><title>${tr(`B=${p.b}: single stream ${fmt.tps(p.single)} tok/s`, `B=${p.b}：单流 ${fmt.tps(p.single)} tok/s`)}</title></circle>`;
   }).join("");
 
-  const maxMem = Math.max(...curve.map(p => p.used), ...curve.map(p => p.cap), 1);
+  const maxMem = Math.max(...curve.map(p => p.used), ...curve.map(p => p.mean_used), ...curve.map(p => p.cap), 1);
   const yMem = ratio => plotBottom - ratio * (plotBottom - PT);
-  const memPath = curve.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${yMem(p.used / maxMem).toFixed(1)}`).join("");
+  const memPath = key => curve.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${yMem(p[key] / maxMem).toFixed(1)}`).join("");
   const memDots = curve.map((p, i) => {
     const current = p.b === curB ? " current" : "";
-    return `<circle class="cdot${current}${p.fit ? "" : " unfit"}" cx="${x(i)}" cy="${yMem(p.used / maxMem)}" r="${current ? 4 : 2.5}"><title>${tr(`B=${p.b}: ${fmt.gb(p.used)} used / ${fmt.gb(p.cap)} physical`, `B=${p.b}：占用 ${fmt.gb(p.used)} / 物理 ${fmt.gb(p.cap)}`)}</title></circle>`;
+    return `<circle class="cdot${current}${p.fit ? "" : " unfit"}" cx="${x(i)}" cy="${yMem(p.used / maxMem)}" r="${current ? 4 : 2.5}"><title>${tr(`B=${p.b}: P99.9 ${fmt.gb(p.used)}, mean ${fmt.gb(p.mean_used)} / ${fmt.gb(p.cap)} physical`, `B=${p.b}：P99.9 ${fmt.gb(p.used)}，均值 ${fmt.gb(p.mean_used)} / 物理 ${fmt.gb(p.cap)}`)}</title></circle>`;
   }).join("");
   const capY = yMem(curve[0].cap / maxMem);
   const sweepMeta = tr(`deterministic analytical sweep · n=${n} · selected B=${curB}`, `确定性解析扫描 · n=${n} · 当前 B=${curB}`);
@@ -933,10 +1037,10 @@ function drawCurve(curve, curB) {
       <h3>${tr("VRAM CAPACITY", "显存容量")}</h3><p>${sweepMeta}</p>
       <svg role="img" aria-label="${tr("VRAM use by concurrency", "显存占用随并发变化")}" viewBox="0 0 ${W} ${H}">
         ${axes(yMem, maxMem, v => v.toFixed(v >= 100 ? 0 : 1), tr("VRAM (GB)", "显存 (GB)"))}${guide}
-        <path class="cline" d="${memPath}"/><line class="cline limit" x1="${PL}" y1="${capY}" x2="${W - PR}" y2="${capY}"/>
+        <path class="cline" d="${memPath("used")}"/><path class="cline secondary" d="${memPath("mean_used")}"/><line class="cline limit" x1="${PL}" y1="${capY}" x2="${W - PR}" y2="${capY}"/>
         ${memDots}
       </svg>
-      <figcaption class="chart-legend"><span><i></i>${tr("Estimated use", "估算占用")}</span><span><i class="limit"></i>${fmt.gb(curve[0].cap)} ${tr("physical limit", "物理上限")}</span></figcaption>
+      <figcaption class="chart-legend"><span><i></i>P99.9 ${tr("guard", "保护值")}</span><span><i class="secondary"></i>${tr("Occupancy-weighted mean", "驻留加权均值")}</span><span><i class="limit"></i>${fmt.gb(curve[0].cap)} ${tr("physical limit", "物理上限")}</span></figcaption>
     </figure>`;
 }
 
@@ -1024,24 +1128,24 @@ function wireCustom() {
     $("#pl-queue-opts").style.display = $("#pl-queue").checked ? "" : "none";
     runPlan();
   };
-  $("#pl-tos").oninput = $("#pl-maxq").oninput = $("#pl-outlen").oninput = () => runPlan();
+  $("#pl-tos").oninput = $("#pl-maxq").oninput = () => runPlan();
   $("#pl-q").oninput = $("#pl-maxcards").oninput = () => { planPage = 0; renderPlans(); };
   segPsize = seg("#pl-psize", () => { planPage = 0; renderPlans(); });
 }
 
 async function runPlan() {
+  const workload = workloadPl?.get();
+  if (!workload) return;
   const body = {
     model: CS["pl-model"].get(),
     tpm: +$("#pl-tpm").value, tos: +$("#pl-tos").value,
     objective: segObj ? segObj.get() : "cost",
     quant_only: CS["pl-qonly"] ? CS["pl-qonly"].get() : "",
-    ctx: +CS["pl-ctx"].get(), conc: +$("#pl-c").value,
-    queue: $("#pl-queue").checked,
-    maxq: +$("#pl-maxq").value, outlen: +$("#pl-outlen").value,
+    workload, conc: +$("#pl-c").value,
+    queue: $("#pl-queue").checked, maxq: +$("#pl-maxq").value,
     eng: CS["pl-eng"].get(), spec: CS["pl-spec"].get(),
-    kvq: segKvqPl ? segKvqPl.get() : "fp16", hit: (+$("#pl-hit").value) / 100,
-    advanced: advancedOpts("pl"),
-    lang,
+    kvq: segKvqPl ? segKvqPl.get() : "fp16",
+    advanced: advancedOpts("pl"), lang,
   };
   if (customOn) body.custom = customModel();
   const plans = await post("/api/plan", body);
@@ -1064,11 +1168,11 @@ async function runPlan() {
   const selectedSpec = SPECS.find(s => s.id === body.spec);
   const stack = (selectedEngine ? engineName(selectedEngine) : body.eng) +
     (selectedSpec && selectedSpec.id !== "none" ? " · " + specName(selectedSpec) : "") +
-    (body.kvq !== "fp16" ? " · KV " + body.kvq.toUpperCase() : "") +
-    (body.hit > 0 ? tr(` · ${Math.round(body.hit * 100)}% prefix hit`, ` · 前缀命中 ${Math.round(body.hit * 100)}%`) : "");
+    (body.kvq !== "fp16" ? " · KV " + body.kvq.toUpperCase() : "");
+  const profile = summarizeWorkload(body.workload);
   $("#pl-line").innerHTML = line +
-    `<span class="mono">${tr("Target", "目标")} <b>${fmt.tpm(body.tpm)}</b> tok/min${body.tos > 0 ? tr(` · single stream ≥${body.tos}`, ` · 单流 ≥${body.tos}`) : ""}</span>` +
-    `<span class="mono">${body.ctx >= 1024 ? body.ctx / 1024 + "K" : body.ctx} ${tr("context", "上下文")} · ${body.conc} ${tr("concurrent", "并发")}${body.queue ? tr(" · queue ≤", " · 排队≤") + body.maxq : ""}</span>` +
+    `<span class="mono">${tr("Target", "目标")} <b>${fmt.tpm(body.tpm)}</b> tok/min${body.tos > 0 ? tr(` · P95 single stream ≥${body.tos}`, ` · P95 单流 ≥${body.tos}`) : ""}</span>` +
+    `<span class="mono">${body.workload.length} ${tr("buckets", "个分桶")} · μ ${formatTokens(profile.meanContext)} · P99.9 ${formatTokens(profile.p999Context)} · max ${formatTokens(profile.maxContext)} · ${body.conc} ${tr("concurrent", "并发")}${body.queue ? tr(" · queue ≤", " · 排队≤") + body.maxq : ""}</span>` +
     `<span class="mono">${stack}</span>` +
     `<span class="mono" style="color:var(--acc)">${OBJ[body.objective] ?? ""}</span>`;
 
@@ -1112,10 +1216,10 @@ function renderPlans() {
     html += `<div class="planrow ${base + i < 3 ? "top3" : ""}">
       <span class="rank">${String(base + i + 1).padStart(2, "0")}</span>
       <span class="phw">${hardwareName(p.hw)}${repMark(p.hw.conf)}${p.n > 1 ? `<span class="x">×${p.n}</span>` : ""}<div class="msub">${scale}</div></span>
-      <span class="pstrat">${p.strategy}</span>
+      <span class="pstrat">${p.strategy}<span class="msub">μ ${formatTokens(p.mean_context)} · P99 ${formatTokens(p.p99_context)} · P99.9 ${formatTokens(p.p999_context)} · max ${formatTokens(p.max_context)}</span></span>
       <span><span class="pk">QUANT</span><span class="pv">${p.qname}</span><div class="msub">${p.eng_name || ""}${p.spec_name && p.spec_name !== tr("Off", "关闭") ? " · " + p.spec_name : ""}</div></span>
-      <span><span class="pk">SINGLE</span><span class="pv">${fmt.tps(p.single_tps)} tok/s</span></span>
-      <span><span class="pk">${tr("MIXED TPM", "TPM 混合")}</span><span class="pv">${fmt.tpm(p.tpm)} tok/min</span></span>
+      <span><span class="pk">${tr("SINGLE μ / P95", "单流 μ / P95")}</span><span class="pv">${fmt.tps(p.single_tps)} / ${fmt.tps(p.p95_single_tps)}</span><div class="msub">tok/s</div></span>
+      <span><span class="pk">${tr("MIXED TPM", "TPM 混合")}</span><span class="pv">${fmt.tpm(p.tpm)} tok/min</span><div class="msub">${tr("P95 request", "P95 请求")} ${fmt.ms(p.p95_req_ms)} · P99 ${fmt.ms(p.p99_req_ms)} · M₉₉.₉ ${fmt.gb(p.p999_memory)}</div></span>
       <span><span class="pk">CAPACITY REQ/S</span><span class="pv">${fmt.rate(p.capacity_qps)}</span>
         <div class="msub">${tr(`Target ${fmt.rate(p.arrival_qps)} · ${p.util_pct.toFixed(1)}% utilization`, `目标 ${fmt.rate(p.arrival_qps)} · 利用率 ${p.util_pct.toFixed(1)}%`)}</div>
         ${p.queue_model === "M/M/c" ? `<div class="msub">${tr("Wait mean/p95", "等待 avg/p95")} ${fmt.ms(p.wait_avg_ms)} / ${fmt.ms(p.wait_p95_ms)}</div>` : ""}</span>
