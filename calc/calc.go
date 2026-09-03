@@ -358,6 +358,7 @@ type Opts struct {
 	RouterSkew   float64 `json:"router_skew,omitempty"`  // EP 最忙 rank / 平均负载
 	SpecTau      float64 `json:"spec_tau,omitempty"`     // 实测每步接受 token
 	SpecOvh      float64 `json:"spec_ovh,omitempty"`     // 实测 draft/verify 相对开销
+	Lang         string  `json:"lang,omitempty"`         // en（默认）| zh；仅影响展示文本
 }
 
 func (o Opts) norm() Opts {
@@ -395,6 +396,9 @@ func (o Opts) norm() Opts {
 	o.SpecTau = clamp(o.SpecTau, 0, 32)
 	o.SpecOvh = clamp(o.SpecOvh, 0, 10)
 	o.MediaTokens = max(0, o.MediaTokens)
+	if o.Lang != "zh" {
+		o.Lang = "en"
+	}
 	return o
 }
 
@@ -845,6 +849,123 @@ type TraceRow struct {
 
 func tr(k, v, n string) TraceRow { return TraceRow{K: k, V: v, N: n} }
 
+func localText(lang, en, zh string) string {
+	if lang == "zh" {
+		return zh
+	}
+	return en
+}
+
+func engineDisplay(e Engine, lang string) string {
+	if e.ID == "auto" {
+		return localText(lang, "Auto", "自动选型")
+	}
+	return e.Name
+}
+
+func engineDescription(e Engine, lang string) string {
+	if lang == "zh" {
+		return e.Note
+	}
+	switch e.ID {
+	case "auto":
+		return "Select the runtime from the quantization format and hardware vendor"
+	case "vllm":
+		return "PagedAttention and continuous batching; secondary hardware often requires vendor plugins or forks"
+	case "sglang":
+		return "RadixAttention and PD/EP/DP serving; verify supported combinations against the deployed version"
+	case "trtllm":
+		return "NVIDIA CUDA inference stack; kernels and features depend on GPU generation and version"
+	case "llamacpp":
+		return "GGUF runtime across CPU, Metal, CUDA, HIP, and other backends"
+	case "mlx":
+		return "Apple Silicon unified-memory runtime"
+	case "exllama":
+		return "EXL3 quantized runtime for NVIDIA GPUs"
+	case "lmdeploy":
+		return "TurboMind/vLLM backends; only verified NVIDIA paths are listed here"
+	case "mindie":
+		return "Official Ascend inference engine"
+	default:
+		return e.Note
+	}
+}
+
+func quantDescription(q Quant, lang string) string {
+	if lang == "zh" {
+		return q.Note
+	}
+	switch q.ID {
+	case "fp16":
+		return "Baseline precision"
+	case "fp8":
+		return "FP8 weights and activations on Ada/Hopper or newer; 2× prefill compute path"
+	case "int8":
+		return "SmoothQuant-style INT8 tensor path on Ampere or newer"
+	case "int4":
+		return "AWQ/GPTQ/QAT weight-only quantization; saves memory and bandwidth, while kernel support controls speed"
+	case "fp4":
+		return "Blackwell FP4 pipeline; other GPUs only receive the storage benefit"
+	case "mxfp4":
+		return "MXFP4 weights; activation precision and unquantized tensors depend on the checkpoint"
+	case "q8":
+		return "Near-lossless GGUF format across CPU, Metal, and CUDA"
+	case "q6":
+		return "GGUF quality/size sweet spot"
+	case "q4km":
+		return "Common GGUF format at roughly 4.85 bits per weight"
+	case "iq2":
+		return "Extreme 2-bit GGUF format with material accuracy loss"
+	case "mlx8":
+		return "Native Apple Silicon 8-bit unified-memory format"
+	case "mlx4":
+		return "Primary native Apple Silicon 4-bit format"
+	case "exl3":
+		return "ExLlamaV3 format optimized for low-concurrency NVIDIA inference"
+	default:
+		return q.Note
+	}
+}
+
+func specDisplay(s SpecMethod, lang string) string {
+	switch s.ID {
+	case "none":
+		return localText(lang, "Off", "关闭")
+	case "mtp":
+		return localText(lang, "Native MTP heads", "MTP 原生多头")
+	case "draft":
+		return localText(lang, "Draft model", "草稿模型")
+	default:
+		return s.Name
+	}
+}
+
+func specDescription(s SpecMethod, lang string) string {
+	if lang == "zh" {
+		return s.Note
+	}
+	switch s.ID {
+	case "none":
+		return "Standard one-token-at-a-time autoregressive decoding"
+	case "mtp":
+		return "Requires model metadata for MTP heads; acceptance and gain must be calibrated for the workload"
+	case "eagle3":
+		return "Requires a compatible trained draft head; built-in coefficients are scenario inputs only"
+	case "medusa":
+		return "Requires Medusa heads for the target model; built-in coefficients are scenario inputs only"
+	case "draft":
+		return "Assumes a compatible small model; draft memory defaults to 5% of target weights and gain requires measurements"
+	case "lookahead":
+		return "N-gram proposal without a draft model; gain depends heavily on repeated code or editing patterns"
+	case "dflash":
+		return "Requires a compatible block-diffusion draft; paper averages are not production throughput"
+	case "dflash2":
+		return "Requires a compatible draft checkpoint; model-card results are not production throughput"
+	default:
+		return s.Note
+	}
+}
+
 const pcieBW = 25.0 // 无互联时 PCIe4 x16 有效带宽 GB/s
 
 func tpCommMs(h HW, m Model, tokens float64, t topology, o Opts) float64 {
@@ -924,7 +1045,7 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	p := Perf{
 		Fit: mem.Fit, Mem: mem, QuantID: q.ID, QuantLocked: quantLocked,
 		KVSupported: o.kvSupported(h, eng), Accel: h.Accel(q),
-		EngName: eng.Name, EngOK: eng.EngineOK(h), SpecName: spec.Name,
+		EngName: engineDisplay(eng, o.Lang), EngOK: eng.EngineOK(h), SpecName: specDisplay(spec, o.Lang),
 		PeakTF: h.PeakTF(q), PeakExact: h.peakExact(q),
 		Accuracy: "analytical", Topology: t.String(), TopologyOK: topologyOK,
 	}
@@ -1101,139 +1222,170 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 		p.MaxBatch = max(0, int((mem.Budget-fixed)/perRequest))
 	}
 
-	peakLabel := "厂商逐精度峰值"
+	peakLabel := localText(o.Lang, "vendor per-precision peak", "厂商逐精度峰值")
 	if !p.PeakExact {
-		peakLabel = "由 FP16 峰值和架构倍率估算"
+		peakLabel = localText(o.Lang, "estimated from FP16 peak and architecture ratio", "由 FP16 峰值和架构倍率估算")
 	}
-	weightNote := fmt.Sprintf("%gB 参数 × %.2f B/param（%s）", m.Params, q.Bytes, q.Name)
+	weightNote := localText(o.Lang,
+		fmt.Sprintf("%gB parameters × %.2f B/param (%s)", m.Params, q.Bytes, q.Name),
+		fmt.Sprintf("%gB 参数 × %.2f B/param（%s）", m.Params, q.Bytes, q.Name))
 	if o.WeightGB > 0 {
-		weightNote = "使用用户输入的实际加载权重"
+		weightNote = localText(o.Lang, "Using the measured loaded weight size", "使用用户输入的实际加载权重")
 	} else if m.CheckpointGB > 0 && m.NativeQuant == q.ID {
-		weightNote = "使用 HF safetensors payload（匹配原生量化）"
+		weightNote = localText(o.Lang, "Using the HF safetensors payload matching the native quantization", "使用 HF safetensors payload（匹配原生量化）")
 	}
 	p.Trace = []TraceRow{
-		tr("估算级别", p.Accuracy, "analytical 为未校准 roofline；calibrated 表示已提供关键实测利用率"),
-		tr("并行拓扑", p.Topology, fmt.Sprintf("%d cards；乘积必须相等", cards)),
-		tr("推理框架", eng.Name, engNote(eng, h, p.EngOK, p.Accuracy == "calibrated")),
-		tr("量化路径", fmt.Sprintf("W%s · A%s · KV %s", q.W, q.A, strings.ToUpper(o.KVQuant)), quantNote(h, q, eng, peakTF/h.TF)),
-		tr("权重显存", gb(mem.Weights), weightNote),
-		tr("KV / 状态", gb(mem.KV), kvNote(m, ctx, batch, t, o, kvrf)),
-		tr("单卡预算", fmt.Sprintf("%.1f / %.1f GB", mem.Budget, mem.Cap), capNote(h, eng, o)),
-		tr("decode 单步访存", fmt.Sprintf("%.2f GB", wGB+kvGPU+stateGB), moeNote(m, activeW)+sparseReadNote(m, ctx)),
-		tr("decode roofline", fmt.Sprintf("%.2f ms", math.Max(tMem, tCompute)), fmt.Sprintf("max(访存 %.2fms, 计算 %.2fms)；峰值 %.0f TF（%s）", tMem, tCompute, peakTF, peakLabel)),
-		tr("有效带宽", fmt.Sprintf("%.0f GB/s", h.BW*eta), fmt.Sprintf("标称 %.0f × η%.2f", h.BW, eta)),
-		tr("通信耗时", fmt.Sprintf("%.2f ms", tComm), fmt.Sprintf("%s；TP %.2f + EP %.2f + CP %.2f + PP %.2f ms", commNote(h, t, o), tpComm, epComm, cpComm, ppComm)),
-		tr("单步耗时", fmt.Sprintf("%.2f ms", tStep), fmt.Sprintf("roofline + 通信 + 调度 %.2fms（%s）", tFixed, eng.Name)),
+		tr(localText(o.Lang, "Estimate status", "估算级别"), p.Accuracy,
+			localText(o.Lang, "analytical is an uncalibrated roofline; calibrated means key measured utilization inputs were supplied", "analytical 为未校准 roofline；calibrated 表示已提供关键实测利用率")),
+		tr(localText(o.Lang, "Parallel topology", "并行拓扑"), p.Topology,
+			localText(o.Lang, fmt.Sprintf("%d cards; the product must match", cards), fmt.Sprintf("%d cards；乘积必须相等", cards))),
+		tr(localText(o.Lang, "Inference engine", "推理框架"), engineDisplay(eng, o.Lang), engNote(eng, h, p.EngOK, p.Accuracy == "calibrated", o.Lang)),
+		tr(localText(o.Lang, "Quantization path", "量化路径"), fmt.Sprintf("W%s · A%s · KV %s", q.W, q.A, strings.ToUpper(o.KVQuant)), quantNote(h, q, eng, peakTF/h.TF, o.Lang)),
+		tr(localText(o.Lang, "Weight memory", "权重显存"), gb(mem.Weights), weightNote),
+		tr(localText(o.Lang, "KV / state", "KV / 状态"), gb(mem.KV), kvNote(m, ctx, batch, t, o, kvrf)),
+		tr(localText(o.Lang, "Per-card budget", "单卡预算"), fmt.Sprintf("%.1f / %.1f GB", mem.Budget, mem.Cap), capNote(h, eng, o)),
+		tr(localText(o.Lang, "Decode-step reads", "decode 单步访存"), fmt.Sprintf("%.2f GB", wGB+kvGPU+stateGB), moeNote(m, activeW, o.Lang)+sparseReadNote(m, ctx, o.Lang)),
+		tr("decode roofline", fmt.Sprintf("%.2f ms", math.Max(tMem, tCompute)),
+			localText(o.Lang,
+				fmt.Sprintf("max(memory %.2fms, compute %.2fms); peak %.0f TF (%s)", tMem, tCompute, peakTF, peakLabel),
+				fmt.Sprintf("max(访存 %.2fms, 计算 %.2fms)；峰值 %.0f TF（%s）", tMem, tCompute, peakTF, peakLabel))),
+		tr(localText(o.Lang, "Effective bandwidth", "有效带宽"), fmt.Sprintf("%.0f GB/s", h.BW*eta),
+			localText(o.Lang, fmt.Sprintf("rated %.0f × η%.2f", h.BW, eta), fmt.Sprintf("标称 %.0f × η%.2f", h.BW, eta))),
+		tr(localText(o.Lang, "Communication", "通信耗时"), fmt.Sprintf("%.2f ms", tComm),
+			localText(o.Lang,
+				fmt.Sprintf("%s; TP %.2f + EP %.2f + CP %.2f + PP %.2f ms", commNote(h, t, o), tpComm, epComm, cpComm, ppComm),
+				fmt.Sprintf("%s；TP %.2f + EP %.2f + CP %.2f + PP %.2f ms", commNote(h, t, o), tpComm, epComm, cpComm, ppComm))),
+		tr(localText(o.Lang, "Step time", "单步耗时"), fmt.Sprintf("%.2f ms", tStep),
+			localText(o.Lang, fmt.Sprintf("roofline + communication + %.2fms scheduling (%s)", tFixed, eng.Name), fmt.Sprintf("roofline + 通信 + 调度 %.2fms（%s）", tFixed, eng.Name))),
 	}
 	if o.KVOffload > 0 {
 		p.Trace = append(p.Trace, tr("KV offload", fmt.Sprintf("%.2f ms/step", tOffload),
-			fmt.Sprintf("%.0f%% KV 经 %.0f GB/s 层级回读；外部容量 %.1f GB", o.KVOffload*100, o.OffloadBW, mem.OffloadedKV)))
+			localText(o.Lang,
+				fmt.Sprintf("%.0f%% of KV reread through a %.0f GB/s tier; %.1f GB external capacity", o.KVOffload*100, o.OffloadBW, mem.OffloadedKV),
+				fmt.Sprintf("%.0f%% KV 经 %.0f GB/s 层级回读；外部容量 %.1f GB", o.KVOffload*100, o.OffloadBW, mem.OffloadedKV))))
 	}
 	if spec.ID != "none" {
-		note := specNote(specScenario, batch)
+		note := specNote(specScenario, batch, o.Lang)
 		if !modelSpecOK {
-			note = "⚠ 模型没有 MTP 头元数据，本次不应用加速"
+			note = localText(o.Lang, "⚠ The model has no MTP-head metadata; acceleration is not applied", "⚠ 模型没有 MTP 头元数据，本次不应用加速")
 		} else if !specCalibrated {
-			note = "⚠ 未同时填写实测接受 token τ 与 draft/verify 开销，本次不应用加速"
+			note = localText(o.Lang, "⚠ Measured accepted tokens τ and draft/verify overhead are both required; acceleration is not applied", "⚠ 未同时填写实测接受 token τ 与 draft/verify 开销，本次不应用加速")
 		}
 		p.Trace = append(p.Trace,
-			tr("推测解码", fmt.Sprintf("%s ×%.2f", spec.Name, g), note),
-			tr("有效 TPOT", fmt.Sprintf("%.2f ms", tStep/g), fmt.Sprintf("单步 %.2fms ÷ 场景增益 ×%.2f", tStep, g)),
+			tr(localText(o.Lang, "Speculative decoding", "推测解码"), fmt.Sprintf("%s ×%.2f", specDisplay(spec, o.Lang), g), note),
+			tr(localText(o.Lang, "Effective TPOT", "有效 TPOT"), fmt.Sprintf("%.2f ms", tStep/g),
+				localText(o.Lang, fmt.Sprintf("%.2fms per step ÷ %.2f× scenario gain", tStep, g), fmt.Sprintf("单步 %.2fms ÷ 场景增益 ×%.2f", tStep, g))),
 		)
 	}
 	p.Trace = append(p.Trace,
-		tr("prefill 耗时", fmt.Sprintf("%.0f ms", tPre), prefillNote(m, ctx, o, tLin, tAttn, tPreComm)),
-		tr("prefill 分块", fmt.Sprintf("%.0f × %d", float64(o.PrefillChunk), int(chunks)), fmt.Sprintf("KV 写入 %.0fms；encoder %.0fms", tKVWrite, tEncoder)),
-		tr("prefill 速度", fmt.Sprintf("%.0f tok/s", p.PreTPS), fmt.Sprintf("未命中输入 %d tok ÷ %.0f ms", int(inEff), tPre)),
-		tr("请求时延", fmt.Sprintf("%.0f ms", p.ReqMs), fmt.Sprintf("TTFT + %d 个后续 token × TPOT", int(decodeTokens))),
-		tr("稳态速率", fmt.Sprintf("%.2f req/s", p.ReqS), fmt.Sprintf("后续 decode 预算 %.0f/%.0f + prefill 预算 %.2fs", decodeTokens, agg, tPre/1000)),
-		tr("混合 TPM", fmt.Sprintf("%.0f tok/min", p.TPMMixed), fmt.Sprintf("%.2f req/s ×（%d 原始输入 + %d 输出）× 60", p.ReqS, ctx, o.OutLen)),
+		tr(localText(o.Lang, "Prefill time", "prefill 耗时"), fmt.Sprintf("%.0f ms", tPre), prefillNote(m, ctx, o, tLin, tAttn, tPreComm)),
+		tr(localText(o.Lang, "Prefill chunks", "prefill 分块"), fmt.Sprintf("%.0f × %d", float64(o.PrefillChunk), int(chunks)),
+			localText(o.Lang, fmt.Sprintf("KV writes %.0fms; encoder %.0fms", tKVWrite, tEncoder), fmt.Sprintf("KV 写入 %.0fms；encoder %.0fms", tKVWrite, tEncoder))),
+		tr(localText(o.Lang, "Prefill throughput", "prefill 速度"), fmt.Sprintf("%.0f tok/s", p.PreTPS),
+			localText(o.Lang, fmt.Sprintf("%d uncached input tokens ÷ %.0f ms", int(inEff), tPre), fmt.Sprintf("未命中输入 %d tok ÷ %.0f ms", int(inEff), tPre))),
+		tr(localText(o.Lang, "Request latency", "请求时延"), fmt.Sprintf("%.0f ms", p.ReqMs),
+			localText(o.Lang, fmt.Sprintf("TTFT + %d subsequent tokens × TPOT", int(decodeTokens)), fmt.Sprintf("TTFT + %d 个后续 token × TPOT", int(decodeTokens)))),
+		tr(localText(o.Lang, "Steady-state rate", "稳态速率"), fmt.Sprintf("%.2f req/s", p.ReqS),
+			localText(o.Lang, fmt.Sprintf("decode budget %.0f/%.0f + %.2fs prefill budget", decodeTokens, agg, tPre/1000), fmt.Sprintf("后续 decode 预算 %.0f/%.0f + prefill 预算 %.2fs", decodeTokens, agg, tPre/1000))),
+		tr(localText(o.Lang, "Mixed TPM", "混合 TPM"), fmt.Sprintf("%.0f tok/min", p.TPMMixed),
+			localText(o.Lang, fmt.Sprintf("%.2f req/s × (%d raw input + %d output) × 60", p.ReqS, ctx, o.OutLen), fmt.Sprintf("%.2f req/s ×（%d 原始输入 + %d 输出）× 60", p.ReqS, ctx, o.OutLen))),
 	)
 	if !topologyOK {
-		p.Trace = append(p.Trace, tr("⚠ 拓扑无效", p.Topology, "TP×PP×EP×CP 必须等于 cards，且 EP 仅适用于 MoE；已回退全 TP"))
+		p.Trace = append(p.Trace, tr(localText(o.Lang, "⚠ Invalid topology", "⚠ 拓扑无效"), p.Topology,
+			localText(o.Lang, "TP×PP×EP×CP must equal cards, and EP only applies to MoE; reverted to full TP", "TP×PP×EP×CP 必须等于 cards，且 EP 仅适用于 MoE；已回退全 TP")))
 	}
 	if m.Multimodal && m.EncoderParams == 0 {
-		p.Trace = append(p.Trace, tr("⚠ 多模态 encoder", "参数量未知", "文本塔可计算；媒体 encoder TTFT 未计入"))
+		p.Trace = append(p.Trace, tr(localText(o.Lang, "⚠ Multimodal encoder", "⚠ 多模态 encoder"), localText(o.Lang, "Unknown parameter count", "参数量未知"),
+			localText(o.Lang, "The text tower is modeled; media encoder TTFT is omitted", "文本塔可计算；媒体 encoder TTFT 未计入")))
 	}
 	if m.Ctx > 0 && ctx > m.Ctx {
-		p.Trace = append(p.Trace, tr("⚠ 上下文外推",
-			fmt.Sprintf("%dK > 原生 %dK", ctx/1024, m.Ctx/1024),
-			"需 YaRN / RoPE 外推，长文精度与稳定性可能下降"))
+		p.Trace = append(p.Trace, tr(localText(o.Lang, "⚠ Context extension", "⚠ 上下文外推"),
+			localText(o.Lang, fmt.Sprintf("%dK > %dK native", ctx/1024, m.Ctx/1024), fmt.Sprintf("%dK > 原生 %dK", ctx/1024, m.Ctx/1024)),
+			localText(o.Lang, "Requires YaRN / RoPE extension; long-context accuracy and stability may degrade", "需 YaRN / RoPE 外推，长文精度与稳定性可能下降")))
 	}
 	return p
 }
 
-func engNote(eng Engine, h HW, ok, calibrated bool) string {
+func engNote(eng Engine, h HW, ok, calibrated bool, lang string) string {
 	if !ok {
-		return fmt.Sprintf("⚠ %s 未列出 %s 原生支持；性能数字仅为通用基线", eng.Name, h.Vendor)
+		return localText(lang,
+			fmt.Sprintf("⚠ %s does not list native %s support; performance is a generic baseline", eng.Name, h.Vendor),
+			fmt.Sprintf("⚠ %s 未列出 %s 原生支持；性能数字仅为通用基线", eng.Name, h.Vendor))
 	}
 	if calibrated {
-		return eng.Note + "；使用当前部署实测校准参数"
+		return engineDescription(eng, lang) + localText(lang, "; using measurements from this deployment", "；使用当前部署实测校准参数")
 	}
-	return eng.Note + "；性能系数未做同条件基准校准"
+	return engineDescription(eng, lang) + localText(lang, "; performance coefficients are not calibrated against a matching benchmark", "；性能系数未做同条件基准校准")
 }
 
 // quantNote 量化路径说明：框架错配与 prefill 算力倍率。
-func quantNote(h HW, q Quant, eng Engine, fmul float64) string {
-	s := q.Note
+func quantNote(h HW, q Quant, eng Engine, fmul float64, lang string) string {
+	s := quantDescription(q, lang)
 	switch q.Fam {
 	case "gguf":
 		if eng.ID != "llamacpp" {
-			s = "⚠ GGUF 在 " + eng.Name + " 下支持有限，建议 llama.cpp；" + s
+			s = localText(lang, "⚠ GGUF support is limited in "+eng.Name+"; use llama.cpp; ", "⚠ GGUF 在 "+eng.Name+" 下支持有限，建议 llama.cpp；") + s
 		}
 	case "mlx":
 		if eng.ID != "mlx" {
-			s = "⚠ MLX 量化需 MLX 框架（Apple Silicon）；" + s
+			s = localText(lang, "⚠ MLX quantization requires MLX on Apple Silicon; ", "⚠ MLX 量化需 MLX 框架（Apple Silicon）；") + s
 		}
 	case "exl":
 		if eng.ID != "exllama" {
-			s = "⚠ EXL3 需 ExLlamaV3 框架；" + s
+			s = localText(lang, "⚠ EXL3 requires ExLlamaV3; ", "⚠ EXL3 需 ExLlamaV3 框架；") + s
 		}
 	}
 	if fmul > 1 {
-		s += fmt.Sprintf("；prefill 算力 ×%.0f", fmul)
+		s += localText(lang, fmt.Sprintf("; prefill compute ×%.0f", fmul), fmt.Sprintf("；prefill 算力 ×%.0f", fmul))
 	} else if q.Mul > 1 {
-		s += "；该卡无 " + strings.ToUpper(q.Need) + " 路径，prefill 不加速"
+		s += localText(lang, "; this device has no "+strings.ToUpper(q.Need)+" path, so prefill is not accelerated", "；该卡无 "+strings.ToUpper(q.Need)+" 路径，prefill 不加速")
 	}
 	return s
 }
 
 func kvNote(m Model, ctx, batch int, t topology, o Opts, readF float64) string {
 	rank := m.kvRankFactor(t.tp) / float64(t.pp*t.cp)
-	base := fmt.Sprintf("%.1f MB/请求原始 KV × %d 并发 × rank比例 %.3f",
-		m.KVBytes(ctx)/1e6, batch, rank)
+	base := localText(o.Lang,
+		fmt.Sprintf("%.1f MB raw KV/request × %d concurrent × %.3f rank ratio", m.KVBytes(ctx)/1e6, batch, rank),
+		fmt.Sprintf("%.1f MB/请求原始 KV × %d 并发 × rank比例 %.3f", m.KVBytes(ctx)/1e6, batch, rank))
 	if o.HitRate > 0 {
-		base += fmt.Sprintf("；共享前缀 %.0f%% 的 block 仅驻留一份", o.HitRate*100)
+		base += localText(o.Lang, fmt.Sprintf("; blocks in the %.0f%% shared prefix reside once", o.HitRate*100), fmt.Sprintf("；共享前缀 %.0f%% 的 block 仅驻留一份", o.HitRate*100))
 	}
 	if local := m.localLayers(); local > 0 {
-		base += fmt.Sprintf("（%d full + %d local@%d）", m.kvLayers()-local, local, m.Window)
+		base += localText(o.Lang,
+			fmt.Sprintf(" (%d full + %d local@%d)", m.kvLayers()-local, local, m.Window),
+			fmt.Sprintf("（%d full + %d local@%d）", m.kvLayers()-local, local, m.Window))
 	}
 	if m.StateMB > 0 {
-		base += fmt.Sprintf(" + %.1f MB/请求 recurrent state", m.StateMB)
+		base += localText(o.Lang, fmt.Sprintf(" + %.1f MB recurrent state/request", m.StateMB), fmt.Sprintf(" + %.1f MB/请求 recurrent state", m.StateMB))
 	}
-	switch o.KVQuant {
-	case "fp8":
-		base += "；逐 token KV 容量 ×0.50"
-	case "fp4":
-		base += "；逐 token KV 容量 ×0.281（SGLang block16 实验格式）"
+	if readF != 1 {
+		switch o.KVQuant {
+		case "fp8":
+			base += localText(o.Lang, "; per-token KV capacity ×0.50", "；逐 token KV 容量 ×0.50")
+		case "fp4":
+			base += localText(o.Lang, "; per-token KV capacity ×0.281 (experimental SGLang block16 format)", "；逐 token KV 容量 ×0.281（SGLang block16 实验格式）")
+		}
 	}
 	if o.KVOverhead != 1 {
-		base += fmt.Sprintf("；allocator ×%.2f", o.KVOverhead)
+		base += localText(o.Lang, fmt.Sprintf("; allocator ×%.2f", o.KVOverhead), fmt.Sprintf("；allocator ×%.2f", o.KVOverhead))
 	}
 	if o.KVOffload > 0 {
-		base += fmt.Sprintf("；GPU 保留 %.0f%%", (1-o.KVOffload)*100)
+		base += localText(o.Lang, fmt.Sprintf("; %.0f%% remains on GPU", (1-o.KVOffload)*100), fmt.Sprintf("；GPU 保留 %.0f%%", (1-o.KVOffload)*100))
 	}
 	if o.KVQuant != "fp16" && readF == 1 {
-		base += "；⚠ 当前硬件/引擎不支持该 KV 格式，容量与读取均按 FP16"
+		base += localText(o.Lang, "; ⚠ this hardware/engine does not support the KV format; capacity and reads use FP16", "；⚠ 当前硬件/引擎不支持该 KV 格式，容量与读取均按 FP16")
 	}
 	return base
 }
 
-func specNote(spec SpecMethod, batch int) string {
-	s := spec.Note
+func specNote(spec SpecMethod, batch int, lang string) string {
+	s := specDescription(spec, lang)
 	if batch > 1 {
 		g1 := spec.Tau / (1 + spec.Ovh)
-		s += fmt.Sprintf("；b=%d 时增益 %.2f×（单流峰值 %.2f×）", batch, spec.gain(batch), g1)
+		s += localText(lang,
+			fmt.Sprintf("; %.2f× gain at b=%d (%.2f× single-stream peak)", spec.gain(batch), batch, g1),
+			fmt.Sprintf("；b=%d 时增益 %.2f×（单流峰值 %.2f×）", batch, spec.gain(batch), g1))
 	}
 	return s
 }
@@ -1241,57 +1393,69 @@ func specNote(spec SpecMethod, batch int) string {
 func prefillNote(m Model, ctx int, o Opts, tLin, tAttn, tComm float64) string {
 	s := ""
 	if o.HitRate > 0 {
-		s = fmt.Sprintf("前缀 token 命中 %.0f%% → 重算 %d tok；", o.HitRate*100, int(float64(ctx)*(1-o.HitRate)))
+		s = localText(o.Lang,
+			fmt.Sprintf("%.0f%% prefix-token hit → recompute %d tok; ", o.HitRate*100, int(float64(ctx)*(1-o.HitRate))),
+			fmt.Sprintf("前缀 token 命中 %.0f%% → 重算 %d tok；", o.HitRate*100, int(float64(ctx)*(1-o.HitRate))))
 	}
-	s += fmt.Sprintf("linear roof %.0fms + attention %.0fms + 通信 %.0fms", tLin, tAttn, tComm)
+	s += localText(o.Lang,
+		fmt.Sprintf("linear roof %.0fms + attention %.0fms + communication %.0fms", tLin, tAttn, tComm),
+		fmt.Sprintf("linear roof %.0fms + attention %.0fms + 通信 %.0fms", tLin, tAttn, tComm))
 	if m.Sparse > 0 {
-		s += "；稀疏 attention 已按选择预算折减"
+		s += localText(o.Lang, "; sparse attention reduced by the selection budget", "；稀疏 attention 已按选择预算折减")
 	}
 	if m.LocalLayers > 0 && m.Window > 0 {
-		s += fmt.Sprintf("；%d 个 local attention 层按 %d-token window", m.LocalLayers, m.Window)
+		s += localText(o.Lang,
+			fmt.Sprintf("; %d local-attention layers use a %d-token window", m.LocalLayers, m.Window),
+			fmt.Sprintf("；%d 个 local attention 层按 %d-token window", m.LocalLayers, m.Window))
 	}
 	return s
 }
 
-func moeNote(m Model, activeW float64) string {
+func moeNote(m Model, activeW float64, lang string) string {
 	if !m.MoE {
-		return "dense：每步读全部权重"
+		return localText(lang, "dense: read all weights per step", "dense：每步读全部权重")
 	}
 	if m.Experts > m.TopK && m.TopK > 0 {
-		return fmt.Sprintf("MoE：按 %d/%d 路由的期望去重专家估算，读取 %.1fB", m.TopK, m.Experts, activeW)
+		return localText(lang,
+			fmt.Sprintf("MoE: expected unique experts under %d/%d routing; read %.1fB", m.TopK, m.Experts, activeW),
+			fmt.Sprintf("MoE：按 %d/%d 路由的期望去重专家估算，读取 %.1fB", m.TopK, m.Experts, activeW))
 	}
-	return fmt.Sprintf("MoE：缺专家元数据，按 min(total, active×batch) 保守上界，读取 %.1fB", activeW)
+	return localText(lang,
+		fmt.Sprintf("MoE: missing expert metadata; conservative min(total, active×batch) bound reads %.1fB", activeW),
+		fmt.Sprintf("MoE：缺专家元数据，按 min(total, active×batch) 保守上界，读取 %.1fB", activeW))
 }
 
-func sparseReadNote(m Model, ctx int) string {
+func sparseReadNote(m Model, ctx int, lang string) string {
 	if m.Sparse <= 0 || m.Sparse >= float64(ctx) {
 		return ""
 	}
-	return fmt.Sprintf("；DSA 稀疏读取 %dK/%dK", int(m.Sparse/1024), ctx/1024)
+	return localText(lang,
+		fmt.Sprintf("; DSA sparse read %dK/%dK", int(m.Sparse/1024), ctx/1024),
+		fmt.Sprintf("；DSA 稀疏读取 %dK/%dK", int(m.Sparse/1024), ctx/1024))
 }
 
 func capNote(h HW, eng Engine, o Opts) string {
 	if o.MemUtil > 0 {
-		return fmt.Sprintf("%.0fG × %.2f（用户配置的执行器预算）", h.VRAM, o.MemUtil)
+		return localText(o.Lang, fmt.Sprintf("%.0fG × %.2f user-configured executor budget", h.VRAM, o.MemUtil), fmt.Sprintf("%.0fG × %.2f（用户配置的执行器预算）", h.VRAM, o.MemUtil))
 	}
 	if h.Unified {
-		return fmt.Sprintf("统一内存 %.0fG × 0.70", h.VRAM)
+		return localText(o.Lang, fmt.Sprintf("%.0fG unified memory × 0.70", h.VRAM), fmt.Sprintf("统一内存 %.0fG × 0.70", h.VRAM))
 	}
 	if eng.ID == "llamacpp" || eng.ID == "mlx" || eng.ID == "exllama" {
-		return fmt.Sprintf("%.0fG × 0.95（本地轻量运行时预算）", h.VRAM)
+		return localText(o.Lang, fmt.Sprintf("%.0fG × 0.95 local-runtime budget", h.VRAM), fmt.Sprintf("%.0fG × 0.95（本地轻量运行时预算）", h.VRAM))
 	}
-	return fmt.Sprintf("%.0fG × 0.90（%s 服务预算）", h.VRAM, eng.Name)
+	return localText(o.Lang, fmt.Sprintf("%.0fG × 0.90 %s serving budget", h.VRAM, eng.Name), fmt.Sprintf("%.0fG × 0.90（%s 服务预算）", h.VRAM, eng.Name))
 }
 
 func commNote(h HW, t topology, o Opts) string {
 	if t.tp*t.pp*t.ep*t.cp <= 1 {
-		return "单卡无通信"
+		return localText(o.Lang, "single card; no communication", "单卡无通信")
 	}
 	path := fmt.Sprintf("%s %.0f GB/s", h.Link.T, o.linkBW(h))
 	if h.Link.B <= 0 {
 		path = fmt.Sprintf("PCIe ~%.0f GB/s", o.linkBW(h))
 	}
-	return t.String() + " 走 " + path
+	return t.String() + localText(o.Lang, " over ", " 走 ") + path
 }
 
 func gb(v float64) string             { return fmt.Sprintf("%.1f GB", v) }
@@ -1489,7 +1653,7 @@ func Planner(hws []HW, m Model, po PlanOpts, ctx, conc int, st Opts) []Plan {
 				spec := SpecByID(st.Spec)
 				p := Plan{
 					HW: h, N: n, Replicas: replicas, Quant: q.ID, QName: q.Name,
-					EngName: eng.Name, SpecName: spec.Name,
+					EngName: engineDisplay(eng, st.Lang), SpecName: specDisplay(spec, st.Lang),
 					Single: servicePerf.SingleTPS, Agg: servicePerf.AggTPS, TPM: round1(clusterTPM),
 					CapacityQPS: round2(capacityQPS), ArrivalQPS: round2(arrivalQPS),
 					MaxConc: maxConc, UtilPct: round1(util * 100),
@@ -1497,33 +1661,39 @@ func Planner(hws []HW, m Model, po PlanOpts, ctx, conc int, st Opts) []Plan {
 					TTFTms: servicePerf.TTFTms, TPOTms: servicePerf.TPOTms,
 					CostCNY: h.CNY * totalCards,
 				}
-				p.Strategy = strategy(h, n)
+				p.Strategy = strategy(h, n, st.Lang)
 				elec := h.TDP * totalCards * 0.6 * 24 * 30 / 1000 * 0.8 // 60% 负载，0.8 元/kWh
 				if p.CostCNY > 0 {
 					p.Monthly = p.CostCNY/36 + elec
 					p.PerMtok = p.Monthly / (clusterTPM * 60 * 24 * 30 / 1e6)
 				}
-				p.Warn = warnOf(h, m, q, pf)
+				p.Warn = warnOf(h, m, q, pf, st.Lang)
 				if m.Ctx > 0 && ctx > m.Ctx {
-					p.Warn = joinWarn(p.Warn, fmt.Sprintf("超模型原生上下文（%dK>%dK），需 YaRN/RoPE 外推", ctx/1024, m.Ctx/1024))
+					p.Warn = joinWarn(p.Warn, localText(st.Lang,
+						fmt.Sprintf("Above the model's native context (%dK>%dK); YaRN/RoPE extension required", ctx/1024, m.Ctx/1024),
+						fmt.Sprintf("超模型原生上下文（%dK>%dK），需 YaRN/RoPE 外推", ctx/1024, m.Ctx/1024)))
 				}
 				if st.KVQuant != "fp16" && !st.kvSupported(h, eng) {
-					p.Warn = joinWarn(p.Warn, "所选硬件/引擎不支持该 KV 格式，容量与读取均按 FP16")
+					p.Warn = joinWarn(p.Warn, localText(st.Lang, "The hardware/engine does not support this KV format; capacity and reads use FP16", "所选硬件/引擎不支持该 KV 格式，容量与读取均按 FP16"))
 				}
 				if st.Spec == "mtp" && !m.MTP && m.MTPHeads == 0 {
-					p.Warn = joinWarn(p.Warn, "模型无 MTP 头元数据，未应用推测加速")
+					p.Warn = joinWarn(p.Warn, localText(st.Lang, "The model has no MTP-head metadata; speculative acceleration is not applied", "模型无 MTP 头元数据，未应用推测加速"))
 				}
 				if st.Spec != "" && st.Spec != "none" && (st.SpecTau <= 0 || st.SpecOvh <= 0) {
-					p.Warn = joinWarn(p.Warn, "未提供实测 τ 与 draft/verify 开销，未应用推测加速")
+					p.Warn = joinWarn(p.Warn, localText(st.Lang, "Measured τ and draft/verify overhead were not supplied; speculative acceleration is not applied", "未提供实测 τ 与 draft/verify 开销，未应用推测加速"))
 				}
 				if ctx >= 32768 && n > 1 {
-					p.Warn = joinWarn(p.Warn, "长上下文多卡应评估 context parallel 或 PD 分离；收益取决于 SLO 与 KV 传输")
+					p.Warn = joinWarn(p.Warn, localText(st.Lang, "For long-context multi-card deployments, evaluate context parallelism or PD disaggregation; benefit depends on SLO and KV transfer", "长上下文多卡应评估 context parallel 或 PD 分离；收益取决于 SLO 与 KV 传输"))
 				}
 				if po.Queue {
-					p.Warn = joinWarn(p.Warn, fmt.Sprintf("排队模型 M/M/%d：目标利用率 %.1f%%，平均/p95 等待 %.0f/%.0fms", replicas, p.UtilPct, p.WaitAvgMs, p.WaitP95Ms))
+					p.Warn = joinWarn(p.Warn, localText(st.Lang,
+						fmt.Sprintf("M/M/%d queue: %.1f%% target utilization, %.0f/%.0fms mean/p95 wait", replicas, p.UtilPct, p.WaitAvgMs, p.WaitP95Ms),
+						fmt.Sprintf("排队模型 M/M/%d：目标利用率 %.1f%%，平均/p95 等待 %.0f/%.0fms", replicas, p.UtilPct, p.WaitAvgMs, p.WaitP95Ms)))
 				}
 				if replicas > 1 && po.Objective != "avail" {
-					p.Warn = joinWarn(p.Warn, fmt.Sprintf("需 %d 副本集群，注意负载均衡与会话亲和", replicas))
+					p.Warn = joinWarn(p.Warn, localText(st.Lang,
+						fmt.Sprintf("Requires a %d-replica cluster; account for load balancing and session affinity", replicas),
+						fmt.Sprintf("需 %d 副本集群，注意负载均衡与会话亲和", replicas)))
 				}
 				plans = append(plans, p)
 			}
@@ -1648,7 +1818,7 @@ func joinWarn(a, b string) string {
 	if a == "" {
 		return b
 	}
-	return a + "；" + b
+	return a + "; " + b
 }
 
 func precHas(h HW, p string) bool {
@@ -1660,49 +1830,42 @@ func precHas(h HW, p string) bool {
 	return false
 }
 
-func strategy(h HW, n int) string {
+func strategy(h HW, n int, lang string) string {
 	if n == 1 {
-		return "单卡 / 单机"
+		return localText(lang, "Single card / host", "单卡 / 单机")
 	}
 	switch h.Link.T {
 	case "nvlink":
 		return fmt.Sprintf("TP%d · NVLink %.0fGB/s", n, h.Link.B)
 	case "bridge":
-		return fmt.Sprintf("TP%d · NVLink 桥", n)
+		return localText(lang, fmt.Sprintf("TP%d · NVLink bridge", n), fmt.Sprintf("TP%d · NVLink 桥", n))
 	case "xgmi", "hccs", "xelink", "ici", "blink", "mlulink", "neuronlink":
 		return fmt.Sprintf("TP%d · %s %.0fGB/s", n, strings.ToUpper(h.Link.T), h.Link.B)
 	case "ethernet":
-		return fmt.Sprintf("TP%d · 以太网 RDMA（Gaudi 架构）", n)
+		return localText(lang, fmt.Sprintf("TP%d · Ethernet RDMA (Gaudi)", n), fmt.Sprintf("TP%d · 以太网 RDMA（Gaudi 架构）", n))
 	default:
-		return fmt.Sprintf("TP%d · PCIe（无 NVLink，大并发慎用）", n)
+		return localText(lang, fmt.Sprintf("TP%d · PCIe (no NVLink; avoid high concurrency)", n), fmt.Sprintf("TP%d · PCIe（无 NVLink，大并发慎用）", n))
 	}
 }
 
-func warnOf(h HW, m Model, q Quant, pf Perf) string {
+func warnOf(h HW, m Model, q Quant, pf Perf, lang string) string {
 	var w []string
 	if m.MoE {
-		w = append(w, "MoE：显存按总参数、速度按激活参数估算")
+		w = append(w, localText(lang, "MoE: memory uses total parameters; speed uses active parameters", "MoE：显存按总参数、速度按激活参数估算"))
 	}
 	if !pf.Accel {
-		w = append(w, q.Name+" 在该卡仅省显存、不硬件加速")
+		w = append(w, localText(lang, q.Name+" saves memory on this device but has no hardware acceleration", q.Name+" 在该卡仅省显存、不硬件加速"))
 	}
 	if pf.SingleTPS < 10 {
-		w = append(w, "单流偏慢；仅在有匹配草稿/预测头时考虑推测解码")
+		w = append(w, localText(lang, "Low single-stream speed; consider speculative decoding only with compatible draft/prediction heads", "单流偏慢；仅在有匹配草稿/预测头时考虑推测解码"))
 	}
 	if pf.Mem.HeadPct < 0.15 {
-		w = append(w, "显存贴边，长上下文需降并发或开 KV 量化")
+		w = append(w, localText(lang, "Low memory headroom; reduce long-context concurrency or enable supported KV quantization", "显存贴边，长上下文需降并发或开 KV 量化"))
 	}
 	if h.Conf == "reported" {
-		w = append(w, "硬件参数为公开报道口径")
+		w = append(w, localText(lang, "Hardware specifications use publicly reported figures", "硬件参数为公开报道口径"))
 	}
-	if len(w) == 0 {
-		return ""
-	}
-	s := w[0]
-	for _, x := range w[1:] {
-		s += "；" + x
-	}
-	return s
+	return strings.Join(w, localText(lang, "; ", "；"))
 }
 
 // ---------- 速查表 ----------

@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>推理计算器 · LLM Inference Calculator</title>
+<title>LLM Inference Calculator</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -20,7 +20,7 @@
       <span>LLM INFERENCE CALCULATOR</span>
     </div>
   </div>
-  <div class="topmeta"><div class="meta mono" id="dbMeta"></div><button type="button" class="theme-btn" id="themeBtn" aria-label="切换深浅配色">深色</button></div>
+  <div class="topmeta"><div class="meta mono" id="dbMeta"></div><button type="button" class="theme-btn" id="themeBtn" aria-label="切换深浅配色">深色</button><button type="button" class="theme-btn lang-btn" id="langBtn" aria-label="Switch to Chinese">中文</button></div>
 </header>
 
 <nav class="tabs" id="tabs">
@@ -285,6 +285,13 @@
 <!-- ============ 硬件库 ============ -->
 <section class="view" id="v-hw">
   <div class="result wide">
+    <div class="library-head">
+      <div>
+        <div class="eyebrow">CATALOG · 可筛选</div>
+        <h2>推理硬件库</h2>
+        <p>对比显存、带宽、互联、低精度路径与参考价格，快速缩小部署候选范围。</p>
+      </div>
+    </div>
     <div class="filterbar">
       <input type="text" id="hw-q" placeholder="筛选型号…">
       <div class="cs cs-inline" id="hw-vendor"></div>
@@ -296,6 +303,13 @@
 <!-- ============ 模型库 ============ -->
 <section class="view" id="v-models">
   <div class="result wide">
+    <div class="library-head">
+      <div>
+        <div class="eyebrow">MODEL CATALOG · 可搜索</div>
+        <h2>模型与检查点</h2>
+        <p>浏览模型结构、上下文、KV 规模、原生量化格式与数据来源。</p>
+      </div>
+    </div>
     <div class="filterbar">
       <input type="text" id="m-q" placeholder="筛选模型…">
     </div>
@@ -307,6 +321,13 @@
 <!-- ============ 速查 ============ -->
 <section class="view" id="v-quick">
   <div class="result wide">
+    <div class="library-head">
+      <div>
+        <div class="eyebrow">DEPLOYMENT REFERENCE</div>
+        <h2>单卡容量速查</h2>
+        <p>按相同预留口径快速比较不同硬件的大致模型容量上限。</p>
+      </div>
+    </div>
     <div class="devline">每张卡「能扛的最大模型参数量」速查 —— 已扣除框架底座与系统预留，按 8K 上下文估算，实际以模式一为准。</div>
     <div class="tblwrap"><table class="tbl" id="quickTable"></table></div>
   </div>

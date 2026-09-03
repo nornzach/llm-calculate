@@ -341,7 +341,7 @@ func TestSparseAttention(t *testing.T) {
 
 // YaRN 警告：超原生上下文时 trace 应有外推提示
 func TestYarnWarn(t *testing.T) {
-	p := Throughput(h100, llama8b, QuantByID("fp16"), 262144, 1, 1, Opts{})
+	p := Throughput(h100, llama8b, QuantByID("fp16"), 262144, 1, 1, Opts{Lang: "zh"})
 	found := false
 	for _, r := range p.Trace {
 		if r.K == "⚠ 上下文外推" {
@@ -350,6 +350,23 @@ func TestYarnWarn(t *testing.T) {
 	}
 	if !found {
 		t.Error("256K 超原生 128K 应有 YaRN 警告")
+	}
+}
+
+func TestLocalizedPresentation(t *testing.T) {
+	en := Throughput(h100, llama8b, QuantByID("fp16"), 4096, 1, 1, Opts{})
+	zh := Throughput(h100, llama8b, QuantByID("fp16"), 4096, 1, 1, Opts{Lang: "zh"})
+	if en.Trace[0].K != "Estimate status" {
+		t.Fatalf("default locale should be English, got %q", en.Trace[0].K)
+	}
+	if zh.Trace[0].K != "估算级别" {
+		t.Fatalf("Chinese locale not applied, got %q", zh.Trace[0].K)
+	}
+	if got := strategy(h100, 1, ""); got != "Single card / host" {
+		t.Fatalf("default strategy locale should be English, got %q", got)
+	}
+	if got := strategy(h100, 1, "zh"); got != "单卡 / 单机" {
+		t.Fatalf("Chinese strategy locale not applied, got %q", got)
 	}
 }
 
@@ -375,7 +392,7 @@ func TestQuantComputePath(t *testing.T) {
 
 // GGUF/MLX 量化与非匹配框架组合时 trace 应有警告
 func TestQuantEngineMismatch(t *testing.T) {
-	p := Throughput(h100, llama8b, QuantByID("q4km"), 4096, 1, 1, Opts{Engine: "vllm"})
+	p := Throughput(h100, llama8b, QuantByID("q4km"), 4096, 1, 1, Opts{Engine: "vllm", Lang: "zh"})
 	found := false
 	for _, r := range p.Trace {
 		if r.K == "量化路径" && strings.HasPrefix(r.N, "⚠ GGUF") {
@@ -385,7 +402,7 @@ func TestQuantEngineMismatch(t *testing.T) {
 	if !found {
 		t.Error("GGUF×vLLM 应有错配警告")
 	}
-	p2 := Throughput(m3ultra, llama8b, QuantByID("mlx4"), 4096, 1, 1, Opts{Engine: "mlx"})
+	p2 := Throughput(m3ultra, llama8b, QuantByID("mlx4"), 4096, 1, 1, Opts{Engine: "mlx", Lang: "zh"})
 	for _, r := range p2.Trace {
 		if r.K == "量化路径" && strings.HasPrefix(r.N, "⚠") {
 			t.Error("MLX×MLX 不应有警告")

@@ -175,6 +175,7 @@ type fitReq struct {
 	Eng   string `json:"eng"`
 	Spec  string `json:"spec"`
 	KVQ   string `json:"kvq"`
+	Lang  string `json:"lang"`
 }
 
 type perfReq struct {
@@ -190,6 +191,7 @@ type perfReq struct {
 	Hit      float64   `json:"hit"`
 	OutLen   int       `json:"outlen"`
 	Advanced calc.Opts `json:"advanced"`
+	Lang     string    `json:"lang"`
 }
 
 type planReq struct {
@@ -203,6 +205,7 @@ type planReq struct {
 	KVQ      string    `json:"kvq"`
 	Hit      float64   `json:"hit"`
 	Advanced calc.Opts `json:"advanced"`
+	Lang     string    `json:"lang"`
 }
 
 // clampF64 限制浮点范围（0 值给默认）。
@@ -229,7 +232,7 @@ func validStack(engine, spec, kv string) bool {
 }
 
 // sanitizeCustom 校验/兜底用户输入的假想模型参数，避免除零与离谱值。
-func sanitizeCustom(m *calc.Model) calc.Model {
+func sanitizeCustom(m *calc.Model, lang string) calc.Model {
 	clampF := func(v, lo, hi, def float64) float64 {
 		if v <= 0 {
 			return def
@@ -302,9 +305,15 @@ func sanitizeCustom(m *calc.Model) calc.Model {
 		m.Sparse = float64(m.Ctx)
 	}
 	if m.Name == "" {
-		m.Name = "自定义模型"
+		m.Name = "Custom model"
+		if lang == "zh" {
+			m.Name = "自定义模型"
+		}
 	}
-	m.ID, m.Org, m.Year, m.Conf, m.Src = "custom", "自定义", 2026, "reported", "custom"
+	m.ID, m.Org, m.Year, m.Conf, m.Src = "custom", "Custom", 2026, "reported", "custom"
+	if lang == "zh" {
+		m.Org = "自定义"
+	}
 	return *m
 }
 
@@ -375,7 +384,7 @@ func main() {
 		n := clamp(req.N, 1, 8, 1)
 		ctx := clamp(req.Ctx, 512, 1048576, 8192)
 		batch := clamp(req.Batch, 1, 256, 8)
-		o := calc.Opts{Engine: req.Eng, Spec: req.Spec, KVQuant: req.KVQ}
+		o := calc.Opts{Engine: req.Eng, Spec: req.Spec, KVQuant: req.KVQ, Lang: req.Lang}
 		writeJSON(w, calc.FitMatrix(*h, models, n, ctx, batch, o))
 	})
 
@@ -412,6 +421,7 @@ func main() {
 		}
 		o := req.Advanced
 		o.Engine, o.Spec, o.KVQuant = req.Eng, req.Spec, req.KVQ
+		o.Lang = req.Lang
 		o.HitRate = clampF64(req.Hit, 0, 0.9, 0)
 		o.OutLen = clamp(req.OutLen, 16, 8192, 512)
 		p := calc.Throughput(*h, *m, q, ctx, batch, n, o)
@@ -453,7 +463,7 @@ func main() {
 		}
 		var m calc.Model
 		if req.Custom != nil {
-			m = sanitizeCustom(req.Custom)
+			m = sanitizeCustom(req.Custom, req.Lang)
 		} else {
 			found := findModel(req.Model)
 			if found == nil {
@@ -466,6 +476,7 @@ func main() {
 		conc := clamp(req.Conc, 1, 256, 16)
 		o := req.Advanced
 		o.Engine, o.Spec, o.KVQuant = req.Eng, req.Spec, req.KVQ
+		o.Lang = req.Lang
 		o.HitRate = clampF64(req.Hit, 0, 0.9, 0)
 		o.OutLen = clamp(req.OutLen, 16, 8192, 512)
 		writeJSON(w, calc.Planner(hws, m, req.PlanOpts, ctx, conc, o))
