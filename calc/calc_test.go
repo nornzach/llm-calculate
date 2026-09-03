@@ -742,6 +742,58 @@ func TestPlannerUsesWorkloadDistribution(t *testing.T) {
 	}
 }
 
+func TestWorkloadPercentilesUseTheirOwnMetric(t *testing.T) {
+	workload := []WorkloadBucket{
+		{Context: 32768, Output: 1, Share: 0.06},
+		{Context: 4096, Output: 512, Share: 0.88},
+		{Context: 512, Output: 8192, Share: 0.06},
+	}
+	mixed := ThroughputWorkload(h100, llama8b, QuantByID("fp16"), workload, 4, 1, Opts{})
+	longContext := Throughput(h100, llama8b, QuantByID("fp16"), 32768, 4, 1, Opts{OutLen: 1})
+	longOutput := Throughput(h100, llama8b, QuantByID("fp16"), 512, 4, 1, Opts{OutLen: 8192})
+	if mixed.Workload.P95SingleTPS != longContext.SingleTPS {
+		t.Errorf("95%% 请求吞吐下限应使用 TPS 的 P05: got %.1f want %.1f", mixed.Workload.P95SingleTPS, longContext.SingleTPS)
+	}
+	if mixed.Workload.P95TTFTms != longContext.TTFTms {
+		t.Errorf("TTFT P95 必须按 TTFT 自身排序: got %.1f want %.1f", mixed.Workload.P95TTFTms, longContext.TTFTms)
+	}
+	if mixed.Workload.P95ReqMs != longOutput.ReqMs {
+		t.Errorf("请求时延 P95 必须按请求时延自身排序: got %.1f want %.1f", mixed.Workload.P95ReqMs, longOutput.ReqMs)
+	}
+}
+
+func TestExtremeCalibrationAndTopologyRemainFinite(t *testing.T) {
+	p := ThroughputWorkload(h200, r1, QuantByID("fp8"), singleWorkload(1048576, 8192), 256, 8, Opts{
+		WeightGB: math.MaxFloat64, RuntimeGB: math.MaxFloat64, ActivationGB: math.MaxFloat64,
+		AdapterGB: math.MaxFloat64, DraftGB: math.MaxFloat64,
+		BWUtil: math.SmallestNonzeroFloat64, FlopsUtil: math.SmallestNonzeroFloat64,
+		LinkUtil: math.SmallestNonzeroFloat64, KVOffload: 1, OffloadBW: math.SmallestNonzeroFloat64,
+	})
+	for name, value := range map[string]float64{
+		"memory": p.Mem.Total, "memory guard": p.Mem.P999Total, "TPS": p.SingleTPS,
+		"request rate": p.ReqS, "request latency": p.ReqMs,
+	} {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			t.Errorf("%s must remain finite, got %v", name, value)
+		}
+	}
+
+	overflow := Throughput(h200, r1, QuantByID("fp8"), 4096, 4, 1, Opts{
+		TP: math.MaxInt, PP: math.MaxInt, EP: math.MaxInt, CP: math.MaxInt,
+	})
+	if overflow.TopologyOK || overflow.Topology != "TP1 · PP1 · EP1 · CP1" {
+		t.Errorf("overflowed topology must fall back safely: %+v", overflow)
+	}
+}
+
+func TestPlannerExtremeTargetReturnsEmptyArray(t *testing.T) {
+	plans := Planner([]HW{h200}, llama8b, PlanOpts{TargetTPM: math.MaxFloat64, QuantOnly: "fp16"},
+		singleWorkload(4096, 128), 4, Opts{})
+	if plans == nil || len(plans) != 0 {
+		t.Fatalf("unreachable target must return a non-nil empty result: %+v", plans)
+	}
+}
+
 func TestCatalogLoadersRejectConflictingMetadata(t *testing.T) {
 	_, err := LoadModels([]byte(`[{"id":"bad","name":"Bad","org":"x","params":2,"active":3,"layers":1,"hidden":1,"kvt":"gqa","kvh":1,"dim":1,"ctx":1}]`))
 	if err == nil {

@@ -155,10 +155,14 @@ func findModel(id string) *calc.Model {
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
+	body, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "response contains an invalid numeric value")
+		return
+	}
+	body = append(body, '\n')
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	enc.Encode(v)
+	_, _ = w.Write(body)
 }
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
@@ -351,6 +355,19 @@ func sanitizeWorkload(workload []calc.WorkloadBucket) ([]calc.WorkloadBucket, er
 	}
 	return workload, nil
 }
+
+func validatePlanOptions(po calc.PlanOpts, conc int) error {
+	if po.TargetTPM < 0 || po.MinTOS < 0 {
+		return fmt.Errorf("target TPM and minimum single-stream TPS must be non-negative")
+	}
+	if po.Objective != "" && po.Objective != "cost" && po.Objective != "latency" && po.Objective != "avail" {
+		return fmt.Errorf("unknown planning objective")
+	}
+	if po.Queue && po.MaxQ > 0 && po.MaxQ < conc {
+		return fmt.Errorf("queued maximum concurrency must be at least the base concurrency")
+	}
+	return nil
+}
 func inlineIndex() ([]byte, error) {
 	index, err := embedded.ReadFile("web/index.html")
 	if err != nil {
@@ -537,6 +554,10 @@ func main() {
 			return
 		}
 		conc := clamp(req.Conc, 1, 256, 16)
+		if err := validatePlanOptions(req.PlanOpts, conc); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
 		o := req.Advanced
 		o.Engine, o.Spec, o.KVQuant = req.Eng, req.Spec, req.KVQ
 		o.Lang = req.Lang

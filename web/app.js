@@ -150,6 +150,7 @@ function applyLanguage() {
 let HW = [], MODELS = [], QUANTS = [], ENGINES = [], SPECS = [];
 let modelPage = 0;
 let workloadP, workloadPl;
+let fitRun = 0, perfRun = 0, planRun = 0;
 const CS = {}; // 自定义下拉注册表
 const fixedQuantID = m => m && m.native_quant && m.native_quant !== "fp16" && QUANTS.some(q => q.id === m.native_quant) ? m.native_quant : "";
 
@@ -805,6 +806,13 @@ async function boot() {
   renderHWTable(); renderModelTable(); renderQuickTable(); renderGlossary();
 }
 
+function syncQueueCap() {
+  const input = $("#pl-maxq");
+  const concurrency = +$("#pl-c").value;
+  input.min = concurrency;
+  if (+input.value < concurrency) input.value = concurrency;
+}
+
 function wire() {
   $$("#tabs button").forEach(b => b.onclick = () => {
     $$("#tabs button").forEach(x => x.classList.toggle("on", x === b));
@@ -819,7 +827,8 @@ function wire() {
   };
   bind("#f-n", runFit); bind("#f-b", runFit);
   bind("#p-n", runPerf); bind("#p-b", runPerf);
-  bind("#pl-tpm", runPlan); bind("#pl-c", runPlan);
+  bind("#pl-tpm", runPlan);
+  bind("#pl-c", () => { syncQueueCap(); runPlan(); });
   $("#hw-q").oninput = renderHWTable;
   $("#f-q").oninput = () => { fitPage = 0; renderFitRows(); };
   $("#m-q").oninput = () => { modelPage = 0; renderModelTable(); };
@@ -839,12 +848,14 @@ async function post(url, body) {
 /* ---------- 模式一：能装什么 ---------- */
 
 async function runFit() {
+  const run = ++fitRun;
   const body = {
     hw: CS["f-hw"].get(), n: +$("#f-n").value, ctx: +CS["f-ctx"].get(), batch: +$("#f-b").value,
     eng: CS["f-eng"].get(), spec: CS["f-spec"].get(), kvq: segKvqF ? segKvqF.get() : "fp16",
     lang,
   };
   const rows = await post("/api/fit", body);
+  if (run !== fitRun) return;
   lastFitRows = rows;
   lastFitCtx = body.ctx;
   const h = HW.find(x => x.id === body.hw);
@@ -898,6 +909,7 @@ function renderFitRows() {
 
 /* ---------- 模式二：能跑多快 ---------- */
 async function runPerf() {
+  const run = ++perfRun;
   const workload = workloadP?.get();
   if (!workload) return;
   const body = {
@@ -907,6 +919,7 @@ async function runPerf() {
     advanced: advancedOpts("p"), lang,
   };
   const { perf: p, curve } = await post("/api/perf", body);
+  if (run !== perfRun) return;
   const h = HW.find(x => x.id === body.hw);
   const m = MODELS.find(x => x.id === body.model);
 
@@ -1126,14 +1139,17 @@ function wireCustom() {
     .forEach(id => { $("#" + id).oninput = () => runPlan(); });
   $("#pl-queue").onchange = () => {
     $("#pl-queue-opts").style.display = $("#pl-queue").checked ? "" : "none";
+    syncQueueCap();
     runPlan();
   };
-  $("#pl-tos").oninput = $("#pl-maxq").oninput = () => runPlan();
+  $("#pl-tos").oninput = runPlan;
+  $("#pl-maxq").oninput = () => { syncQueueCap(); runPlan(); };
   $("#pl-q").oninput = $("#pl-maxcards").oninput = () => { planPage = 0; renderPlans(); };
   segPsize = seg("#pl-psize", () => { planPage = 0; renderPlans(); });
 }
 
 async function runPlan() {
+  const run = ++planRun;
   const workload = workloadPl?.get();
   if (!workload) return;
   const body = {
@@ -1149,6 +1165,7 @@ async function runPlan() {
   };
   if (customOn) body.custom = customModel();
   const plans = await post("/api/plan", body);
+  if (run !== planRun) return;
 
   const OBJ = {
     cost: tr("Lowest Cost", "最低成本"),

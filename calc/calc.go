@@ -379,20 +379,32 @@ func (o Opts) norm() Opts {
 	}
 	o.KVOverhead = clamp(o.KVOverhead, 1, 2)
 	o.KVOffload = clamp(o.KVOffload, 0, 1)
-	if o.KVOffload > 0 && o.OffloadBW <= 0 {
-		o.KVOffload = 0
-	}
 	o.MemUtil = clamp(o.MemUtil, 0, 1)
 	o.BWUtil = clamp(o.BWUtil, 0, 1)
 	o.FlopsUtil = clamp(o.FlopsUtil, 0, 1)
 	o.LinkUtil = clamp(o.LinkUtil, 0, 1)
-	o.WeightGB = math.Max(0, o.WeightGB)
-	o.RuntimeGB = math.Max(0, o.RuntimeGB)
-	o.ActivationGB = math.Max(0, o.ActivationGB)
-	o.AdapterGB = math.Max(0, o.AdapterGB)
-	o.DraftGB = math.Max(0, o.DraftGB)
+	if o.BWUtil > 0 {
+		o.BWUtil = math.Max(o.BWUtil, 1e-6)
+	}
+	if o.FlopsUtil > 0 {
+		o.FlopsUtil = math.Max(o.FlopsUtil, 1e-6)
+	}
+	if o.LinkUtil > 0 {
+		o.LinkUtil = math.Max(o.LinkUtil, 1e-6)
+	}
+	const maxCalibratedGB = 1_000_000
+	o.WeightGB = clamp(o.WeightGB, 0, maxCalibratedGB)
+	o.RuntimeGB = clamp(o.RuntimeGB, 0, maxCalibratedGB)
+	o.ActivationGB = clamp(o.ActivationGB, 0, maxCalibratedGB)
+	o.AdapterGB = clamp(o.AdapterGB, 0, maxCalibratedGB)
+	o.DraftGB = clamp(o.DraftGB, 0, maxCalibratedGB)
 	o.ScheduleMS = clamp(o.ScheduleMS, 0, 10_000)
 	o.OffloadBW = clamp(o.OffloadBW, 0, 1_000_000)
+	if o.KVOffload > 0 && o.OffloadBW <= 0 {
+		o.KVOffload = 0
+	} else if o.KVOffload > 0 {
+		o.OffloadBW = math.Max(o.OffloadBW, 1e-6)
+	}
 	o.RouterSkew = clamp(o.RouterSkew, 1, 16)
 	o.SpecTau = clamp(o.SpecTau, 0, 32)
 	o.SpecOvh = clamp(o.SpecOvh, 0, 10)
@@ -551,17 +563,28 @@ type topology struct {
 }
 
 func (o Opts) topology(cards int) topology {
-	if cards < 1 {
-		cards = 1
-	}
+	cards = max(1, cards)
+	fallback := topology{tp: cards, pp: 1, ep: 1, cp: 1}
 	if o.TP == 0 && o.PP == 0 && o.EP == 0 && o.CP == 0 {
-		return topology{tp: cards, pp: 1, ep: 1, cp: 1, valid: true}
+		fallback.valid = true
+		return fallback
+	}
+	if o.TP < 0 || o.PP < 0 || o.EP < 0 || o.CP < 0 ||
+		o.TP > cards || o.PP > cards || o.EP > cards || o.CP > cards {
+		return fallback
 	}
 	t := topology{tp: max(1, o.TP), pp: max(1, o.PP), ep: max(1, o.EP), cp: max(1, o.CP)}
-	t.valid = t.tp*t.pp*t.ep*t.cp == cards
-	if !t.valid {
-		t.tp, t.pp, t.ep, t.cp = cards, 1, 1, 1
+	product := 1
+	for _, rank := range []int{t.tp, t.pp, t.ep, t.cp} {
+		if product > cards/rank {
+			return fallback
+		}
+		product *= rank
 	}
+	if product != cards {
+		return fallback
+	}
+	t.valid = true
 	return t
 }
 
@@ -842,7 +865,7 @@ type WorkloadStats struct {
 	P95ReqMs     float64              `json:"p95_req_ms"`
 	P99ReqMs     float64              `json:"p99_req_ms"`
 	P999ReqMs    float64              `json:"p999_req_ms"`
-	P95SingleTPS float64              `json:"p95_single_tps"`
+	P95SingleTPS float64              `json:"p95_single_tps"` // 95% 请求可达到的单流 TPS 下限（TPS P05）
 }
 
 type Perf struct {
@@ -1532,15 +1555,19 @@ func ThroughputWorkload(h HW, m Model, q Quant, workload []WorkloadBucket, batch
 	ctx95 := workloadQuantile(runs, .95, func(r workloadRun) float64 { return float64(r.bucket.Context) })
 	ctx99 := workloadQuantile(runs, .99, func(r workloadRun) float64 { return float64(r.bucket.Context) })
 	ctx999 := workloadQuantile(runs, .999, func(r workloadRun) float64 { return float64(r.bucket.Context) })
-	lat95 := workloadQuantile(runs, .95, func(r workloadRun) float64 { return r.perf.ReqMs })
-	lat99 := workloadQuantile(runs, .99, func(r workloadRun) float64 { return r.perf.ReqMs })
-	lat999 := workloadQuantile(runs, .999, func(r workloadRun) float64 { return r.perf.ReqMs })
+	ttft95 := workloadQuantile(runs, .95, func(r workloadRun) float64 { return r.perf.TTFTms })
+	ttft99 := workloadQuantile(runs, .99, func(r workloadRun) float64 { return r.perf.TTFTms })
+	ttft999 := workloadQuantile(runs, .999, func(r workloadRun) float64 { return r.perf.TTFTms })
+	req95 := workloadQuantile(runs, .95, func(r workloadRun) float64 { return r.perf.ReqMs })
+	req99 := workloadQuantile(runs, .99, func(r workloadRun) float64 { return r.perf.ReqMs })
+	req999 := workloadQuantile(runs, .999, func(r workloadRun) float64 { return r.perf.ReqMs })
+	tpsFloor95 := workloadQuantile(runs, .05, func(r workloadRun) float64 { return r.perf.SingleTPS })
 	stats := p.Workload
 	stats.MeanContext, stats.MeanOutput = round1(meanCtx), round1(meanOut)
 	stats.P95Context, stats.P99Context, stats.P999Context, stats.MaxContext = ctx95.bucket.Context, ctx99.bucket.Context, ctx999.bucket.Context, maxProfileContext
-	stats.P95TTFTms, stats.P99TTFTms, stats.P999TTFTms = lat95.perf.TTFTms, lat99.perf.TTFTms, lat999.perf.TTFTms
-	stats.P95ReqMs, stats.P99ReqMs, stats.P999ReqMs = lat95.perf.ReqMs, lat99.perf.ReqMs, lat999.perf.ReqMs
-	stats.P95SingleTPS = lat95.perf.SingleTPS
+	stats.P95TTFTms, stats.P99TTFTms, stats.P999TTFTms = ttft95.perf.TTFTms, ttft99.perf.TTFTms, ttft999.perf.TTFTms
+	stats.P95ReqMs, stats.P99ReqMs, stats.P999ReqMs = req95.perf.ReqMs, req99.perf.ReqMs, req999.perf.ReqMs
+	stats.P95SingleTPS = tpsFloor95.perf.SingleTPS
 	if !o.skipTrace {
 		for i, run := range runs {
 			stats.Buckets[i] = WorkloadBucketPerf{
@@ -1728,8 +1755,13 @@ func commNote(h HW, t topology, o Opts) string {
 	return t.String() + localText(o.Lang, " over ", " 走 ") + path
 }
 
-func gb(v float64) string             { return fmt.Sprintf("%.1f GB", v) }
-func clamp(v, lo, hi float64) float64 { return math.Min(hi, math.Max(lo, v)) }
+func gb(v float64) string { return fmt.Sprintf("%.1f GB", v) }
+func clamp(v, lo, hi float64) float64 {
+	if math.IsNaN(v) {
+		return lo
+	}
+	return math.Min(hi, math.Max(lo, v))
+}
 func round1(v float64) float64 {
 	return math.Round(v*10) / 10
 }
@@ -1815,7 +1847,7 @@ type Plan struct {
 	QueueModel   string  `json:"queue_model"`  // none | M/M/c
 	TTFTms       float64 `json:"ttft_ms"`
 	TPOTms       float64 `json:"tpot_ms"`
-	P95SingleTPS float64 `json:"p95_single_tps"`
+	P95SingleTPS float64 `json:"p95_single_tps"` // 95% 请求可达到的单流 TPS 下限
 	TTFTP95ms    float64 `json:"p95_ttft_ms"`
 	ReqP95ms     float64 `json:"p95_req_ms"`
 	ReqP99ms     float64 `json:"p99_req_ms"`
@@ -1845,6 +1877,9 @@ func Planner(hws []HW, m Model, po PlanOpts, workload []WorkloadBucket, conc int
 	if po.MaxQ <= 0 {
 		po.MaxQ = 256
 	}
+	if po.Queue {
+		po.MaxQ = max(po.MaxQ, conc)
+	}
 	maxContext := 0
 	for _, bucket := range workload {
 		maxContext = max(maxContext, bucket.Context)
@@ -1863,7 +1898,7 @@ func Planner(hws []HW, m Model, po PlanOpts, workload []WorkloadBucket, conc int
 			quants = Quants
 		}
 	}
-	var plans []Plan
+	plans := make([]Plan, 0)
 	for _, h := range hws {
 		if h.Svc {
 			continue
@@ -1917,7 +1952,11 @@ func Planner(hws []HW, m Model, po PlanOpts, workload []WorkloadBucket, conc int
 				if capTPM <= 0 {
 					continue
 				}
-				replicas := int(math.Ceil(po.TargetTPM / capTPM))
+				requiredReplicas := math.Ceil(po.TargetTPM / capTPM)
+				if requiredReplicas < 1 || requiredReplicas > maxReplicas || math.IsNaN(requiredReplicas) {
+					continue
+				}
+				replicas := int(requiredReplicas)
 				if po.Queue && float64(replicas)*capTPM <= po.TargetTPM*(1+1e-12) {
 					replicas++ // ρ=1 的 M/M/c 无稳态，至少留一个副本的服务余量
 				}

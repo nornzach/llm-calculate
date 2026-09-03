@@ -1,6 +1,8 @@
 package main
 
 import (
+	"math"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -117,5 +119,29 @@ func TestInlineIndexEmbedsFrontendAssets(t *testing.T) {
 		if strings.Contains(html, external) {
 			t.Errorf("inlined index still depends on %q", external)
 		}
+	}
+}
+
+func TestWriteJSONRejectsNonFiniteNumbers(t *testing.T) {
+	response := httptest.NewRecorder()
+	writeJSON(response, map[string]float64{"bad": math.Inf(1)})
+	if response.Code != 500 || !strings.Contains(response.Body.String(), "invalid numeric value") {
+		t.Fatalf("non-finite response must fail before writing partial JSON: status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestValidatePlanOptionsRejectsInconsistentBounds(t *testing.T) {
+	for _, po := range []calc.PlanOpts{
+		{TargetTPM: -1},
+		{MinTOS: -1},
+		{Objective: "unknown"},
+		{Queue: true, MaxQ: 15},
+	} {
+		if err := validatePlanOptions(po, 16); err == nil {
+			t.Errorf("invalid planner options accepted: %+v", po)
+		}
+	}
+	if err := validatePlanOptions(calc.PlanOpts{TargetTPM: 6000, Objective: "cost", Queue: true, MaxQ: 16}, 16); err != nil {
+		t.Fatalf("valid planner bounds rejected: %v", err)
 	}
 }
