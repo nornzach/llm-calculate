@@ -152,6 +152,11 @@ aside {
   margin-bottom: 8px; font-weight: 700; text-transform: uppercase;
 }
 .lab .val { color: var(--acc); font-size: 12px; letter-spacing: 0; }
+.lab-meta { display: inline-flex; align-items: baseline; gap: 10px; }
+.lab .sym {
+  color: var(--sub); font: 500 10px var(--mono); letter-spacing: 0; text-transform: none;
+}
+.lab .sym sub { font-size: 8px; }
 
 select, input[type=number], input[type=text] {
   width: 100%; min-height: 42px; appearance: none;
@@ -271,7 +276,26 @@ input[type=range]::-moz-range-thumb {
 .stat.hot .v { color: var(--acc); }
 .stat.bad .v { color: var(--bad); }
 
-.cols2 { display: grid; grid-template-columns: 1.05fr .95fr; gap: 24px; }
+.method-flow {
+  display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+}
+.method-step {
+  position: relative; min-width: 0; padding: 13px 16px;
+  border-right: 1px solid var(--line);
+}
+.method-step:last-child { border-right: 0; }
+.method-step:not(:last-child)::after {
+  content: "→"; position: absolute; right: -8px; top: 14px; z-index: 1;
+  width: 15px; color: var(--acc); background: var(--panel); font: 600 11px var(--mono); text-align: center;
+}
+.method-index { display: block; color: var(--acc); font: 600 9px var(--mono); margin-bottom: 7px; }
+.method-label {
+  display: block; color: var(--sub); font-size: 9px; font-weight: 700;
+  letter-spacing: .08em; text-transform: uppercase;
+}
+.method-value { display: block; margin-top: 5px; color: var(--text); font: 600 12px var(--mono); }
+.method-note { display: block; margin-top: 4px; color: var(--faint); font: 9.5px/1.4 var(--mono); }
 
 .seclab {
   font-size: 12px; letter-spacing: .04em; color: var(--text); font-weight: 700;
@@ -298,37 +322,49 @@ input[type=range]::-moz-range-thumb {
 .vlegend .mono { color: var(--text); }
 
 /* 公式过程 */
-.trace { overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.trace { overflow: hidden; border: 1px solid var(--line); border-radius: 0; background: var(--panel); }
 .trace .trow {
-  display: grid; grid-template-columns: 130px 140px 1fr;
+  display: grid; grid-template-columns: 160px 180px 1fr;
   padding: 10px 14px; border-bottom: 1px solid var(--line);
   font-size: 12px;
 }
 .trace .trow:last-child { border-bottom: none; }
+.trace .thead { background: var(--panel2); }
+.trace .thead span {
+  color: var(--faint); font: 700 9px var(--sans); letter-spacing: .08em;
+  text-transform: uppercase; text-align: left; padding-right: 16px;
+}
 .trace .tk { color: var(--sub); font-weight: 600; }
-.trace .tv { font-family: var(--mono); text-align: right; padding-right: 16px; }
+.trace .tv { font-family: var(--mono); text-align: right; padding-right: 24px; }
 .trace .tn { color: var(--faint); font-size: 11px; }
 
 /* 仿真曲线 */
-#curveBox { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-.chart { border: 1px solid var(--line); border-radius: 8px; padding: 16px 16px 10px; background: var(--panel); }
-.chart h3 { font-size: 11px; letter-spacing: .06em; color: var(--text); font-weight: 700; margin-bottom: 3px; }
-.chart p { font-size: 10.5px; color: var(--faint); margin-bottom: 6px; }
+#curveBox {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+  border: 1px solid var(--line);
+}
+.chart { min-width: 0; padding: 18px 18px 12px; background: var(--panel); }
+.chart + .chart { border-left: 1px solid var(--line); }
+.chart h3 { font-size: 11px; letter-spacing: .06em; color: var(--text); font-weight: 700; margin-bottom: 4px; }
+.chart p { font: 9.5px var(--mono); color: var(--faint); margin-bottom: 5px; }
 .chart svg { display: block; width: 100%; height: auto; overflow: visible; }
-.axis, .gridline { stroke: var(--line2); stroke-width: 1; }
-.gridline { opacity: .55; stroke-dasharray: 2 3; }
-.cline { stroke: var(--acc); stroke-width: 2; fill: none; }
+.axis { stroke: var(--sub); stroke-width: 1; opacity: .7; }
+.gridline { stroke: var(--line2); stroke-width: 1; opacity: .65; stroke-dasharray: 2 3; }
+.tick { stroke: var(--sub); stroke-width: 1; opacity: .55; }
+.current-guide { stroke: var(--acc); stroke-width: 1; stroke-dasharray: 2 3; opacity: .45; }
+.cline { stroke: var(--acc); stroke-width: 1.7; fill: none; }
 .cline.secondary { stroke: var(--active); stroke-dasharray: 4 3; }
 .cline.limit { stroke: var(--bad); stroke-dasharray: 5 3; }
 .cdot { fill: var(--acc); stroke: var(--panel); stroke-width: 1; }
 .cdot.secondary { fill: var(--active); }
 .cdot.unfit { fill: var(--bad); }
-.clabel { fill: var(--faint); font-size: 9px; font-family: var(--mono); }
-.clabelv { fill: var(--sub); font-size: 9px; font-family: var(--mono); }
-.chart-legend { display: flex; gap: 14px; color: var(--sub); font-size: 10px; margin: 3px 0 0; }
+.cdot.current { stroke: var(--text); stroke-width: 1.5; }
+.clabel { fill: var(--faint); font-size: 8.5px; font-family: var(--mono); }
+.axis-title { fill: var(--sub); font-size: 9px; font-family: var(--mono); }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--sub); font-size: 10px; margin: 4px 0 0; }
 .chart-legend i { width: 14px; height: 2px; display: inline-block; margin-right: 5px; vertical-align: middle; background: var(--acc); }
 .chart-legend i.secondary { background: var(--active); }
-.chart-legend i.limit { background: var(--bad); }
+.chart-legend i.limit, .chart-legend i.unfit { background: var(--bad); }
 
 /* ---------- 模式三：方案 ---------- */
 
@@ -404,7 +440,6 @@ footer {
   .view.on { display: block; }
   aside { position: static; width: auto; margin-bottom: 20px; padding: 0 0 20px; border-right: 0; border-bottom: 1px solid var(--line); }
   .hero { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .cols2 { grid-template-columns: 1fr; }
 }
 
 /* ---------- 自定义下拉 ---------- */
@@ -557,6 +592,7 @@ button:focus-visible, input:focus-visible, .cs-btn:focus-visible {
   .tabs button { flex: none; }
   .glossary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   #curveBox { grid-template-columns: 1fr; }
+  .chart + .chart { border-left: 0; border-top: 1px solid var(--line); }
   .planrow { min-width: 980px; }
   #planList { overflow-x: auto; padding-bottom: 4px; }
 }
@@ -574,8 +610,13 @@ button:focus-visible, input:focus-visible, .cs-btn:focus-visible {
   .hero { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; }
   .stat { padding: 14px; }
   .stat .v { font-size: 25px; }
-  .trace .trow { grid-template-columns: 90px 1fr; }
+  .method-flow { grid-template-columns: 1fr; }
+  .method-step { border-right: 0; border-bottom: 1px solid var(--line); }
+  .method-step:last-child { border-bottom: 0; }
+  .method-step:not(:last-child)::after { content: "↓"; right: 14px; top: auto; bottom: -8px; }
+  .trace .trow { grid-template-columns: 110px 1fr; }
   .trace .tn { grid-column: 1 / -1; padding-top: 4px; }
+  .trace .thead { grid-template-columns: 80px 100px 1fr; }
   .library-head { display: block; padding-top: 8px; }
   .library-head h2 { font-size: 25px; }
   .library-head input { margin-top: 16px; }

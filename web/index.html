@@ -92,7 +92,7 @@
       <div class="cs" id="p-hw"></div>
     </div>
     <div class="grp">
-      <label class="lab">数量 · CARDS <span class="mono val" id="p-n-v">4</span></label>
+      <label class="lab">数量 · CARDS <span class="lab-meta"><span class="sym">N<sub>GPU</sub></span><span class="mono val" id="p-n-v">4</span></span></label>
       <input type="range" id="p-n" min="1" max="8" step="1" value="4">
     </div>
     <div class="grp">
@@ -100,16 +100,16 @@
       <div class="cs" id="p-model"></div>
     </div>
     <div class="grp">
-      <label class="lab">量化 · QUANT</label>
+      <label class="lab">量化 · QUANT <span class="sym">q<sub>w</sub></span></label>
       <div class="cs" id="p-quant"></div>
       <p class="field-note" id="p-quant-note">基础权重可模拟不同部署量化；预量化检查点会自动锁定。</p>
     </div>
     <div class="grp">
-      <label class="lab">上下文 · CONTEXT</label>
+      <label class="lab">上下文 · CONTEXT <span class="sym">L<sub>ctx</sub></span></label>
       <div class="cs" id="p-ctx"></div>
     </div>
     <div class="grp">
-      <label class="lab">并发 · BATCH <span class="mono val" id="p-b-v">4</span></label>
+      <label class="lab">并发 · BATCH <span class="lab-meta"><span class="sym">B</span><span class="mono val" id="p-b-v">4</span></span></label>
       <input type="range" id="p-b" min="1" max="128" step="1" value="4">
     </div>
     <div class="grp">
@@ -121,17 +121,17 @@
       <div class="cs" id="p-spec"></div>
     </div>
     <div class="grp">
-      <label class="lab">KV 量化 · KV CACHE</label>
+      <label class="lab">KV 量化 · KV CACHE <span class="sym">q<sub>KV</sub></span></label>
       <div class="seg seg3" id="p-kvq">
         <button data-v="fp16" class="on">FP16</button><button data-v="fp8">FP8</button><button data-v="fp4">FP4*</button>
       </div>
     </div>
     <div class="grp">
-      <label class="lab">前缀缓存命中 · PREFIX HIT <span class="mono val" id="p-hit-v">0%</span></label>
+      <label class="lab">前缀缓存命中 · PREFIX HIT <span class="lab-meta"><span class="sym">h<sub>prefix</sub></span><span class="mono val" id="p-hit-v">0%</span></span></label>
       <input type="range" id="p-hit" min="0" max="90" step="10" value="0">
     </div>
     <div class="grp">
-      <label class="lab" for="p-outlen">平均输出 · OUT LEN <span class="dim2">token · 请求时延口径</span></label>
+      <label class="lab" for="p-outlen">平均输出 · OUT LEN <span class="lab-meta"><span class="sym">L<sub>out</sub></span><span class="dim2">token · 请求时延口径</span></span></label>
       <input type="number" id="p-outlen" value="512" min="16" step="16">
     </div>
     <details class="grp advanced">
@@ -142,18 +142,14 @@
   </aside>
   <div class="result">
     <div class="hero" id="perfHero"></div>
-    <div class="cols2">
-      <div>
-        <div class="seclab">显存分解 · MEMORY BREAKDOWN<span id="perfFitState"></span></div>
-        <div id="vramBar"></div>
-        <div class="seclab">部署仿真 · CONCURRENCY SWEEP<span>同一公式逐点重算</span></div>
-        <div id="curveBox"></div>
-      </div>
-      <div>
-        <div class="seclab">计算过程 · FORMULA TRACE</div>
-        <div class="trace" id="perfTrace"></div>
-      </div>
-    </div>
+    <div class="seclab">计算路径 · COMPUTATION PIPELINE<span>参数 → 容量 → roofline → 时延 → 吞吐</span></div>
+    <div class="method-flow" id="perfFlow"></div>
+    <div class="seclab">显存分解 · MEMORY BREAKDOWN<span id="perfFitState"></span></div>
+    <div id="vramBar"></div>
+    <div class="seclab">部署仿真 · CONCURRENCY SWEEP<span>同一公式逐点重算</span></div>
+    <div id="curveBox"></div>
+    <div class="seclab">计算过程 · FORMULA TRACE</div>
+    <div class="trace" id="perfTrace"></div>
   </div>
 </section>
 

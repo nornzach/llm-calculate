@@ -43,6 +43,8 @@ const STATIC_EN = new Map([
   ["带宽、算力、调度（多卡另含互联）均填写同口径实测值后标记 calibrated；否则是无统计置信区间的 analytical roofline。", "Marked calibrated only when bandwidth, compute, scheduling, and multi-card interconnect values share the same measured basis; otherwise this is an analytical roofline without confidence intervals."],
   ["显存分解 · MEMORY BREAKDOWN", "Memory Breakdown"],
   ["部署仿真 · CONCURRENCY SWEEP", "Concurrency Sweep"],
+  ["计算路径 · COMPUTATION PIPELINE", "Computation Pipeline"],
+  ["参数 → 容量 → roofline → 时延 → 吞吐", "parameters → capacity → roofline → latency → throughput"],
   ["同一公式逐点重算", "recomputed at every point"],
   ["计算过程 · FORMULA TRACE", "Formula Trace"],
   ["✎ 自定义假想模型…", "✎ Custom Model…"],
@@ -842,6 +844,17 @@ async function runPerf() {
   ];
   const used = segs.reduce((s, x) => s + x[1], 0);
   const colors = { vw: "var(--weight)", vkv: "var(--kv)", vfw: "var(--runtime)", vact: "var(--active)", vadp: "var(--adapter)", vsys: "var(--reserve)" };
+  const effectiveQuant = QUANTS.find(q => q.id === p.quant);
+  const bottleneckName = ({ compute: tr("compute", "算力"), memory: tr("memory bandwidth", "显存带宽"), offload: "KV offload" })[p.bottleneck] || p.bottleneck;
+  const flow = [
+    ["01", tr("Inputs · θ", "输入 · θ"), `N_GPU=${body.n} · B=${body.batch} · L_ctx=${body.ctx}`, `${m.name} · ${effectiveQuant?.name || p.quant}`],
+    ["02", tr("Memory · M", "显存 · M"), `M=${fmt.gb(used)} / ${fmt.gb(d.budget)}`, tr("estimated use / engine budget", "估算占用 / 引擎预算")],
+    ["03", tr(`Roofline · ${bottleneckName}`, `Roofline · ${bottleneckName}`), `t_step=${fmt.ms(p.tpot_ms)}`, "max(t_mem, t_compute) + t_comm"],
+    ["04", tr("Request latency · T", "请求时延 · T"), `T_req=${fmt.ms(p.req_ms)}`, "TTFT + (L_out − 1) × TPOT"],
+    ["05", tr("Service capacity · λ", "服务容量 · λ"), `λ=${fmt.rate(p.req_s)} req/s`, `TPM=${fmt.tpm(p.tpm_mixed)}`],
+  ];
+  $("#perfFlow").innerHTML = flow.map(([i, label, value, note]) =>
+    `<div class="method-step"><span class="method-index">${i}</span><span class="method-label">${label}</span><strong class="method-value">${value}</strong><small class="method-note">${note}</small></div>`).join("");
   $("#vramBar").innerHTML =
     `<div class="vbar">` +
     segs.map(([k, v, c]) => `<div class="${c}" style="width:${pct(v)}%" title="${k} ${fmt.gb(v)}"></div>`).join("") +
@@ -856,8 +869,8 @@ async function runPerf() {
     ? `<span style="color:var(--ok)">${tr(`Fits · engine budget ${fmt.gb(d.budget)} · ${(d.head_pct * 100).toFixed(0)}% headroom`, `可部署 · 引擎预算 ${fmt.gb(d.budget)} · 余量 ${(d.head_pct * 100).toFixed(0)}%`)}</span>`
     : `<span style="color:var(--bad)">${tr(`Does not fit · ${fmt.gb(used - cap)} above engine budget`, `装不下 · 超引擎预算 ${fmt.gb(used - cap)}`)}</span>`;
 
-  const effectiveQuant = QUANTS.find(q => q.id === p.quant);
   $("#perfTrace").innerHTML =
+    `<div class="trow thead"><span>${tr("Quantity", "量")}</span><span>${tr("Estimate", "估算值")}</span><span>${tr("Relation / assumption", "关系式 / 假设")}</span></div>` +
     `<div class="trow"><span class="tk">${tr("Deployment", "部署")}</span><span class="tv">${hardwareName(h)} × ${body.n}</span><span class="tn">${m.name} · ${effectiveQuant?.name || p.quant}${p.quant_locked ? tr(" · native checkpoint locked", " · 原生 checkpoint 锁定") : ""}${p.accel ? "" : tr(" · memory saving only; no acceleration", " · 该档仅省显存不加速")}${p.kv_supported ? "" : tr(" · selected KV format not applied", " · 所选 KV 格式未应用")}</span></div>` +
     p.trace.map(t => `<div class="trow"><span class="tk">${t.k}</span><span class="tv">${t.v}</span><span class="tn">${t.n}</span></div>`).join("") +
     `<div class="trow"><span class="tk">${tr("Maximum concurrency", "最大并发")}</span><span class="tv">${p.max_batch}</span><span class="tn">${tr("Capacity limit using the current shared-prefix, KV, and peak-activation assumptions", "当前共享前缀、KV 与激活峰值口径的容量上限")}</span></div>`;
@@ -866,47 +879,65 @@ async function runPerf() {
 }
 
 function drawCurve(curve, curB) {
-  const W = 430, H = 180, PL = 42, PB = 28, PT = 16, PR = 10;
+  const W = 520, H = 220, PL = 58, PB = 40, PT = 18, PR = 14;
   const n = curve.length;
   const x = i => PL + i * (W - PL - PR) / Math.max(1, n - 1);
-  const xLabels = curve.map((p, i) => `<text class="clabel" x="${x(i)}" y="${H - 8}" text-anchor="middle">${p.b}</text>`).join("");
-  const grid = y => [0, .5, 1].map(r => `<line class="${r ? "gridline" : "axis"}" x1="${PL}" y1="${y(r)}" x2="${W - PR}" y2="${y(r)}"/>`).join("");
+  const plotBottom = H - PB;
+  const selected = curve.findIndex(p => p.b === curB);
+  const labelEvery = Math.max(1, Math.ceil(n / 10));
+  const xTicks = curve.map((p, i) => {
+    if (i % labelEvery && i !== n - 1 && i !== selected) return "";
+    return `<line class="tick" x1="${x(i)}" y1="${plotBottom}" x2="${x(i)}" y2="${plotBottom + 4}"/><text class="clabel" x="${x(i)}" y="${plotBottom + 15}" text-anchor="middle">${p.b}</text>`;
+  }).join("");
+  const guide = selected < 0 ? "" : `<line class="current-guide" x1="${x(selected)}" y1="${PT}" x2="${x(selected)}" y2="${plotBottom}"/>`;
+  const axes = (y, max, format, title) => {
+    const yTicks = [0, .25, .5, .75, 1].map(r =>
+      `<line class="${r ? "gridline" : "axis"}" x1="${PL}" y1="${y(r)}" x2="${W - PR}" y2="${y(r)}"/>` +
+      `<text class="clabel" x="${PL - 8}" y="${y(r) + 3}" text-anchor="end">${format(max * r)}</text>`).join("");
+    return `${yTicks}<line class="axis" x1="${PL}" y1="${PT}" x2="${PL}" y2="${plotBottom}"/>${xTicks}` +
+      `<text class="axis-title" x="${(PL + W - PR) / 2}" y="${H - 4}" text-anchor="middle">${tr("Concurrency, B", "并发 B")}</text>` +
+      `<text class="axis-title" transform="translate(12 ${(PT + plotBottom) / 2}) rotate(-90)" text-anchor="middle">${title}</text>`;
+  };
 
   const maxTPS = Math.max(...curve.map(p => p.agg), 1);
-  const yTPS = ratio => H - PB - ratio * (H - PB - PT);
+  const yTPS = ratio => plotBottom - ratio * (plotBottom - PT);
   const tpsPath = key => curve.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${yTPS(p[key] / maxTPS).toFixed(1)}`).join("");
   const tpsDots = curve.map((p, i) => {
-    const hot = p.b === curB, cls = `cdot${p.fit ? "" : " unfit"}`;
-    return `<circle class="${cls}" cx="${x(i)}" cy="${yTPS(p.agg / maxTPS)}" r="${hot ? 4 : 2.5}"><title>${tr(`Concurrency ${p.b}: aggregate ${fmt.tps(p.agg)}, single stream ${fmt.tps(p.single)} tok/s${p.fit ? "" : ", over VRAM"}`, `并发 ${p.b}：聚合 ${fmt.tps(p.agg)}，单流 ${fmt.tps(p.single)} tok/s${p.fit ? "" : "，超显存"}`)}</title></circle>`;
+    const current = p.b === curB ? " current" : "";
+    const infeasible = p.fit ? "" : " unfit";
+    return `<circle class="cdot${current}${infeasible}" cx="${x(i)}" cy="${yTPS(p.agg / maxTPS)}" r="${current ? 4 : 2.5}"><title>${tr(`B=${p.b}: aggregate ${fmt.tps(p.agg)} tok/s${p.fit ? "" : ", over VRAM"}`, `B=${p.b}：聚合 ${fmt.tps(p.agg)} tok/s${p.fit ? "" : "，超显存"}`)}</title></circle>` +
+      `<circle class="cdot secondary${current}${infeasible}" cx="${x(i)}" cy="${yTPS(p.single / maxTPS)}" r="${current ? 3.5 : 2}"><title>${tr(`B=${p.b}: single stream ${fmt.tps(p.single)} tok/s`, `B=${p.b}：单流 ${fmt.tps(p.single)} tok/s`)}</title></circle>`;
   }).join("");
 
   const maxMem = Math.max(...curve.map(p => p.used), ...curve.map(p => p.cap), 1);
-  const yMem = ratio => H - PB - ratio * (H - PB - PT);
+  const yMem = ratio => plotBottom - ratio * (plotBottom - PT);
   const memPath = curve.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${yMem(p.used / maxMem).toFixed(1)}`).join("");
-  const memDots = curve.map((p, i) => `<circle class="cdot${p.fit ? "" : " unfit"}" cx="${x(i)}" cy="${yMem(p.used / maxMem)}" r="${p.b === curB ? 4 : 2.5}"><title>${tr(`Concurrency ${p.b}: ${fmt.gb(p.used)} used / ${fmt.gb(p.cap)} physical`, `并发 ${p.b}：占用 ${fmt.gb(p.used)} / 物理 ${fmt.gb(p.cap)}`)}</title></circle>`).join("");
+  const memDots = curve.map((p, i) => {
+    const current = p.b === curB ? " current" : "";
+    return `<circle class="cdot${current}${p.fit ? "" : " unfit"}" cx="${x(i)}" cy="${yMem(p.used / maxMem)}" r="${current ? 4 : 2.5}"><title>${tr(`B=${p.b}: ${fmt.gb(p.used)} used / ${fmt.gb(p.cap)} physical`, `B=${p.b}：占用 ${fmt.gb(p.used)} / 物理 ${fmt.gb(p.cap)}`)}</title></circle>`;
+  }).join("");
   const capY = yMem(curve[0].cap / maxMem);
+  const sweepMeta = tr(`deterministic analytical sweep · n=${n} · selected B=${curB}`, `确定性解析扫描 · n=${n} · 当前 B=${curB}`);
 
   $("#curveBox").innerHTML = `
-    <div class="chart">
-      <h3>${tr("DECODE TPS × CONCURRENCY", "DECODE TPS × 并发")}</h3><p>${tr("Orange: aggregate; blue: single stream; red points exceed VRAM.", "橙色聚合；蓝色单流；红点表示该并发超显存。")}</p>
+    <figure class="chart">
+      <h3>${tr("DECODE THROUGHPUT", "DECODE 吞吐")}</h3><p>${sweepMeta}</p>
       <svg role="img" aria-label="${tr("Aggregate and single-stream throughput by concurrency", "聚合与单流吞吐随并发变化")}" viewBox="0 0 ${W} ${H}">
-        ${grid(yTPS)}
-        <text class="clabel" x="${PL - 5}" y="${PT + 4}" text-anchor="end">${fmt.tps(maxTPS)}</text>
+        ${axes(yTPS, maxTPS, fmt.tps, tr("Throughput (tok s⁻¹)", "吞吐 (tok s⁻¹)"))}${guide}
         <path class="cline" d="${tpsPath("agg")}"/><path class="cline secondary" d="${tpsPath("single")}"/>
-        ${tpsDots}${xLabels}
+        ${tpsDots}
       </svg>
-      <div class="chart-legend"><span><i></i>${tr("Aggregate TPS", "聚合 TPS")}</span><span><i class="secondary"></i>${tr("Single-stream TPS", "单流 TPS")}</span></div>
-    </div>
-    <div class="chart">
-      <h3>${tr("VRAM × CONCURRENCY", "VRAM × 并发")}</h3><p>${tr("Total use includes system reserve; the red line is physical VRAM.", "总占用含系统预留；红线为物理显存。")}</p>
+      <figcaption class="chart-legend"><span><i></i>${tr("Aggregate", "聚合")}</span><span><i class="secondary"></i>${tr("Single stream", "单流")}</span><span><i class="unfit"></i>${tr("Infeasible", "不可部署")}</span></figcaption>
+    </figure>
+    <figure class="chart">
+      <h3>${tr("VRAM CAPACITY", "显存容量")}</h3><p>${sweepMeta}</p>
       <svg role="img" aria-label="${tr("VRAM use by concurrency", "显存占用随并发变化")}" viewBox="0 0 ${W} ${H}">
-        ${grid(yMem)}
-        <text class="clabel" x="${PL - 5}" y="${PT + 4}" text-anchor="end">${fmt.gb(maxMem)}</text>
+        ${axes(yMem, maxMem, v => v.toFixed(v >= 100 ? 0 : 1), tr("VRAM (GB)", "显存 (GB)"))}${guide}
         <path class="cline" d="${memPath}"/><line class="cline limit" x1="${PL}" y1="${capY}" x2="${W - PR}" y2="${capY}"/>
-        ${memDots}${xLabels}
+        ${memDots}
       </svg>
-      <div class="chart-legend"><span><i></i>${tr("Total used", "总占用")}</span><span><i class="limit"></i>${fmt.gb(curve[0].cap)} ${tr("physical limit", "物理上限")}</span></div>
-    </div>`;
+      <figcaption class="chart-legend"><span><i></i>${tr("Estimated use", "估算占用")}</span><span><i class="limit"></i>${fmt.gb(curve[0].cap)} ${tr("physical limit", "物理上限")}</span></figcaption>
+    </figure>`;
 }
 
 /* ---------- 模式三：怎么配 ---------- */
