@@ -835,6 +835,15 @@ function wire() {
   $("#g-q").oninput = renderGlossary;
   $$("#p-advanced input").forEach(el => { el.oninput = runPerf; });
   $$("#pl-advanced input").forEach(el => { el.oninput = runPlan; });
+  $$("[data-plan-close]").forEach(el => { el.onclick = closePlanDetail; });
+  document.addEventListener("keydown", e => {
+    if ($("#planDetailModal").hidden) return;
+    if (e.key === "Escape") closePlanDetail();
+    if (e.key === "Tab") {
+      e.preventDefault();
+      $(".plan-modal-close").focus();
+    }
+  });
 }
 
 async function post(url, body) {
@@ -1072,7 +1081,7 @@ function seg(id, onChange) {
 
 let customOn = false;
 let segArch, segKVT, segObj, segKvqF, segKvqP, segKvqPl, segPsize;
-let lastPlans = [], planPage = 0; // 「怎么配」最近一次结果，供客户端过滤/翻页
+let lastPlans = [], planPage = 0, lastPlanBody = null, planDetailRun = 0, planDetailTrigger = null;
 
 function customModel() {
   const moe = segArch.get() === "moe";
@@ -1193,6 +1202,7 @@ async function runPlan() {
     `<span class="mono">${stack}</span>` +
     `<span class="mono" style="color:var(--acc)">${OBJ[body.objective] ?? ""}</span>`;
 
+  lastPlanBody = body;
   lastPlans = plans || [];
   planPage = 0;
   renderPlans();
@@ -1230,7 +1240,7 @@ function renderPlans() {
     <span>${tr("Quantization", "量化")}</span><span>${tr("Single-stream TPS", "单流 TPS")}</span><span>${tr("Mixed Cluster TPM", "集群 TPM 混合")}</span><span>${tr("QPS / Load", "QPS / 负载")}</span><span>${tr("Cost", "成本")}</span></div>`;
   shown.forEach((p, i) => {
     const scale = p.replicas > 1 ? tr(`${p.replicas} replicas · ${p.n * p.replicas} cards`, `${p.replicas} 副本 · ${p.n * p.replicas} 卡`) : tr(`${p.n} cards`, `${p.n} 卡`);
-    html += `<div class="planrow ${base + i < 3 ? "top3" : ""}">
+    html += `<div class="planrow ${base + i < 3 ? "top3" : ""}" data-plan-detail="${i}" tabindex="0" role="button" aria-label="${tr(`Explain ${hardwareName(p.hw)} plan`, `查看 ${hardwareName(p.hw)} 方案详解`)}">
       <span class="rank">${String(base + i + 1).padStart(2, "0")}</span>
       <span class="phw">${hardwareName(p.hw)}${repMark(p.hw.conf)}${p.n > 1 ? `<span class="x">×${p.n}</span>` : ""}<div class="msub">${scale}</div></span>
       <span class="pstrat">${p.strategy}<span class="msub">μ ${formatTokens(p.mean_context)} · P99 ${formatTokens(p.p99_context)} · P99.9 ${formatTokens(p.p999_context)} · max ${formatTokens(p.max_context)}</span></span>
@@ -1245,6 +1255,16 @@ function renderPlans() {
     </div>`;
   });
   $("#planList").innerHTML = html;
+  $$("#planList [data-plan-detail]").forEach((row, i) => {
+    const open = () => openPlanDetail(shown[i], row);
+    row.onclick = open;
+    row.onkeydown = e => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        open();
+      }
+    };
+  });
   $("#pl-pager").innerHTML = pages > 1
     ? `<button class="minibtn" id="pg-prev" ${planPage === 0 ? "disabled" : ""}>‹ ${tr("Previous", "上一页")}</button>
        <span class="mono">${tr(`Page ${planPage + 1} / ${pages} · ${list.length} items`, `第 ${planPage + 1} / ${pages} 页 · 共 ${list.length} 条`)}</span>
@@ -1254,6 +1274,241 @@ function renderPlans() {
     $("#pg-prev").onclick = () => { planPage--; renderPlans(); };
     $("#pg-next").onclick = () => { planPage++; renderPlans(); };
   }
+}
+
+const escapeHTML = value => String(value ?? "").replace(/[&<>"']/g, c => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+}[c]));
+
+function detailCard(label, value, sub = "") {
+  return `<div class="detail-card"><span class="detail-label">${escapeHTML(label)}</span>` +
+    `<span class="detail-value">${escapeHTML(value)}</span>` +
+    (sub ? `<div class="detail-sub">${escapeHTML(sub)}</div>` : "") + "</div>";
+}
+
+function planAdvice(plan, perf, model, quant, body) {
+  const items = [];
+  const add = (level, title, text) => items.push({ level, title, text });
+  const native = fixedQuantID(model);
+  const required = quant?.need?.toUpperCase();
+
+  if (!perf.eng_ok) {
+    add("bad", tr("Engine and hardware do not match", "引擎与硬件不匹配"),
+      tr(`${perf.eng_name} does not list ${hardwareName(plan.hw)} as a native platform. Change the engine or verify the vendor plugin before deployment.`,
+        `${perf.eng_name} 未把 ${hardwareName(plan.hw)} 列为原生平台。部署前请更换引擎，或确认厂商插件和对应版本。`));
+  }
+  if (!perf.topology_ok) {
+    add("bad", tr("Parallel topology is invalid", "并行拓扑不可用"),
+      tr(`The requested topology (${perf.topology}) cannot be placed on ${plan.n} cards. Change the TP/PP/EP/CP values.`,
+        `当前并行拓扑（${perf.topology}）无法放进 ${plan.n} 张卡；需要调整 TP / PP / EP / CP。`));
+  }
+  if (native && required && !perf.accel) {
+    add("bad", tr(`${native.toUpperCase()} checkpoint lacks a matching hardware path`, `${native.toUpperCase()} 检查点缺少对应硬件能力`),
+      tr(`This checkpoint is locked to ${native.toUpperCase()}, but the card's accelerated precision list does not include ${required}. Do not assume it will run natively: the runtime may reject it or dequantize/fall back. Choose hardware with ${required}, or convert/re-quantize the checkpoint first.`,
+        `这个检查点被锁定为 ${native.toUpperCase()}，但该卡的硬件加速精度不含 ${required}。不要按“可原生运行”采购：运行时可能直接拒绝，也可能反量化/回退。应改选支持 ${required} 的卡，或先转换、重新量化检查点。`));
+  } else if (required && !perf.accel) {
+    add("warn", tr(`${required} is not accelerated on this card`, `该卡不加速 ${required}`),
+      tr(`${quant.name} can reduce estimated weight memory, but this card has no native ${required} compute path. The calculator does not apply the advertised low-precision compute multiplier. Prefer supported hardware if throughput matters.`,
+        `${quant.name} 仍可按低位权重估算显存，但该卡没有原生 ${required} 计算路径；计算器不会套用低精度算力倍数。吞吐重要时应换支持该精度的卡。`));
+  } else if (required) {
+    add("good", tr(`${required} hardware path is available`, `${required} 硬件路径可用`),
+      tr(`${hardwareName(plan.hw)} lists ${required} acceleration and the estimator uses that precision's dense peak.`,
+        `${hardwareName(plan.hw)} 标注支持 ${required} 加速，估算已使用对应精度的 dense 峰值。`));
+  }
+
+  if (body.kvq !== "fp16" && !perf.kv_supported) {
+    add("warn", tr("Selected KV-cache precision is unsupported", "所选 KV cache 精度不受支持"),
+      tr(`KV ${body.kvq.toUpperCase()} is not supported by this hardware/engine path. The estimator falls back to FP16 KV memory and read traffic; do not expect the selected KV saving.`,
+        `该硬件/引擎路径不支持 KV ${body.kvq.toUpperCase()}。估算已回退到 FP16 KV 的显存和读取流量，不要期待所选 KV 精度带来的节省。`));
+  }
+  if (body.spec !== "none" && !perf.spec_applied) {
+    add("warn", tr("Speculative decoding was not applied", "推测解码没有生效"),
+      tr(`${perf.spec_name} is incompatible with this model or missing required model metadata. Current throughput excludes its speedup.`,
+        `${perf.spec_name} 与该模型不兼容，或缺少模型所需元数据；当前吞吐没有计入它的加速。`));
+  }
+  if (!perf.fit) {
+    add("bad", tr("Tail memory exceeds physical memory", "尾部显存超过物理容量"),
+      tr(`P99.9 concurrent memory is ${fmt.gb(perf.mem.p999_total)} versus ${fmt.gb(perf.mem.cap)} physical memory. Reduce concurrency/context, lower KV precision on a supported path, or add cards.`,
+        `P99.9 并发显存为 ${fmt.gb(perf.mem.p999_total)}，物理显存只有 ${fmt.gb(perf.mem.cap)}。应降低并发/上下文、在受支持路径下降低 KV 精度，或增加卡数。`));
+  } else {
+    const head = (perf.mem.cap - perf.mem.p999_total) / perf.mem.cap;
+    add(head < .1 ? "warn" : "good", tr(head < .1 ? "Memory headroom is tight" : "Tail memory fits", head < .1 ? "显存余量偏紧" : "尾部显存可装下"),
+      tr(`P99.9 uses ${fmt.gb(perf.mem.p999_total)} of ${fmt.gb(perf.mem.cap)} per card, leaving ${(head * 100).toFixed(1)}% physical headroom.`,
+        `每卡 P99.9 使用 ${fmt.gb(perf.mem.p999_total)} / ${fmt.gb(perf.mem.cap)}，剩余物理显存 ${(head * 100).toFixed(1)}%。`));
+  }
+  if (model.ctx && plan.max_context > model.ctx) {
+    add("bad", tr("Workload exceeds the model context window", "工作负载超过模型上下文"),
+      tr(`The largest request is ${formatTokens(plan.max_context)} tokens, above the model's ${formatTokens(model.ctx)} limit. Shorten it or verify a supported context-extension method.`,
+        `最大请求为 ${formatTokens(plan.max_context)} token，超过模型 ${formatTokens(model.ctx)} 的上限。请缩短输入，或确认可用的上下文扩展方案。`));
+  }
+  if (plan.util_pct >= 80) {
+    add("warn", tr("Target load leaves little operating margin", "目标负载缺少运行余量"),
+      tr(`The target consumes ${plan.util_pct.toFixed(1)}% of modeled capacity. Production bursts, fragmentation, and tail latency can erase this margin; add a replica or lower the admitted load.`,
+        `目标负载占模型容量 ${plan.util_pct.toFixed(1)}%。生产流量突发、显存碎片和尾延迟会吃掉余量；建议增加副本或降低准入负载。`));
+  }
+  const buckets = perf.workload?.buckets || [];
+  const tail = buckets.reduce((a, b) => b.context > (a?.context || 0) ? b : a, null);
+  if (tail && tail.occupancy > tail.share * 3 && tail.occupancy > .1) {
+    add("warn", tr("Rare long requests dominate residency", "少量长请求占据了大量在途资源"),
+      tr(`${(tail.share * 100).toFixed(1)}% of arrivals at ${formatTokens(tail.context)} input tokens become ${(tail.occupancy * 100).toFixed(1)}% of in-flight occupancy because they stay much longer. Isolate or cap this traffic if short-request latency matters.`,
+        `${formatTokens(tail.context)} 输入只占到达请求的 ${(tail.share * 100).toFixed(1)}%，但因驻留时间更长，占在途资源 ${(tail.occupancy * 100).toFixed(1)}%。若短请求延迟重要，建议隔离或限制这类流量。`));
+  }
+  if (plan.replicas === 1) {
+    add("warn", tr("One replica is a single failure domain", "单副本存在单点故障"),
+      tr("This plan meets capacity with one replica, but a process, host, or card failure removes all service. Use at least two replicas when availability matters.",
+        "这套方案用一个副本即可达标，但进程、主机或任一卡故障都会让服务整体不可用。对可用性有要求时至少部署两个副本。"));
+  }
+  add("info", tr("Benchmark before purchase or SLA commitment", "采购或承诺 SLA 前必须实测"),
+    tr(`This is a first-order ${perf.accuracy} roofline, not a benchmark. Re-run the exact checkpoint, engine version, quantization kernel, request distribution, and concurrency; then enter measured calibration values.`,
+      `这是 ${perf.accuracy} 一阶 roofline，不是基准测试。请用完全相同的检查点、引擎版本、量化 kernel、请求分布和并发实测，再把测量值填入高级校准。`));
+  return items;
+}
+
+function renderPlanDetail(plan, perf) {
+  const body = lastPlanBody;
+  const model = body.custom || MODELS.find(m => m.id === body.model) || {};
+  const quant = QUANTS.find(q => q.id === perf.quant) || { name: plan.qname };
+  const advice = planAdvice(plan, perf, model, quant, body);
+  const hasBad = advice.some(a => a.level === "bad");
+  const hasWarn = advice.some(a => a.level === "warn");
+  const verdictClass = hasBad ? "bad" : hasWarn ? "warn" : "";
+  const verdict = hasBad ? tr("Do not deploy as-is", "不建议直接部署") : hasWarn ? tr("Feasible with checks", "可行，但需先核对") : tr("Feasible", "可行");
+  const totalCards = plan.n * plan.replicas;
+  const meanTokens = (perf.workload?.mean_context || 0) + (perf.workload?.mean_output || 0);
+  const workload = perf.workload?.buckets || [];
+  const d = perf.mem;
+
+  const compatibility = [
+    detailCard(tr("Checkpoint precision", "检查点精度"), fixedQuantID(model) ? `${fixedQuantID(model).toUpperCase()} · ${tr("locked", "锁定")}` : tr("Base / convertible", "基础权重 / 可转换"), fixedQuantID(model) ? tr("Planner cannot change the stored format", "规划器不能改写预量化格式") : tr("Planner may evaluate another deployment quantization", "规划器可评估其他部署量化")),
+    detailCard(tr("Weight compute path", "权重计算路径"), perf.accel ? tr("Hardware accelerated", "硬件加速") : tr("No native acceleration", "无原生加速"), `${quant.name || plan.qname} · ${plan.hw.prec.map(x => x.toUpperCase()).join(" / ")}`),
+    detailCard(tr("Inference engine", "推理引擎"), perf.eng_name, perf.eng_ok ? tr("Native hardware path listed", "已列出原生硬件路径") : tr("Plugin/version verification required", "需核对插件和版本")),
+    detailCard(tr("KV cache", "KV cache"), body.kvq.toUpperCase(), perf.kv_supported ? tr("Selected precision applied", "所选精度已生效") : tr("Falls back to FP16 accounting", "按 FP16 回退计算")),
+    detailCard(tr("Parallel topology", "并行拓扑"), perf.topology, perf.topology_ok ? tr("Fits card count", "与卡数匹配") : tr("Does not fit card count", "与卡数不匹配")),
+    detailCard(tr("Speculative decoding", "推测解码"), perf.spec_name, body.spec === "none" ? tr("Disabled", "未启用") : perf.spec_applied ? tr("Speedup applied", "已计入加速") : tr("Not applied", "未生效")),
+  ].join("");
+
+  const memoryRows = [
+    [tr("Weights", "模型权重"), d.weights, tr("Quantized weights after TP/PP/EP sharding", "量化后按 TP / PP / EP 分片")],
+    ["KV cache", d.kv, tr("Occupancy-weighted requests, selected or fallback KV precision", "按请求驻留占比加权；使用所选或回退 KV 精度")],
+    [tr("Runtime", "运行时"), d.fw, tr("Engine/framework resident memory", "引擎/框架常驻显存")],
+    [tr("Activations", "激活值"), d.act, tr("Prefill/decode working tensors", "prefill / decode 工作张量")],
+    [tr("Adapter / draft", "适配器 / 草稿模型"), d.adapter, tr("LoRA, speculative model, and related additions", "LoRA、推测解码草稿模型等附加占用")],
+    [tr("System reserve", "系统预留"), d.sys, tr("Physical memory not assigned to the engine budget", "物理显存中未分配给引擎预算的部分")],
+  ];
+  const memoryHTML = memoryRows.map(([name, value, note]) =>
+    `<tr><td>${escapeHTML(name)}</td><td class="n">${escapeHTML(fmt.gb(value))}</td><td>${escapeHTML(note)}</td></tr>`).join("");
+  const workloadHTML = workload.map((b, i) =>
+    `<tr><td class="n">${i + 1}</td><td class="n">${escapeHTML(formatTokens(b.context))}</td><td class="n">${escapeHTML(formatTokens(b.output))}</td>` +
+    `<td class="n">${(b.share * 100).toFixed(2)}%</td><td class="n">${(b.occupancy * 100).toFixed(2)}%</td>` +
+    `<td class="n">${escapeHTML(fmt.tps(b.single_tps))}</td><td class="n">${escapeHTML(fmt.ms(b.ttft_ms))}</td>` +
+    `<td class="n">${escapeHTML(fmt.ms(b.req_ms))}</td><td class="n">${escapeHTML(fmt.gb(b.batch_memory))}</td></tr>`).join("");
+  const traceHTML = (perf.trace || []).map(row =>
+    `<tr><td>${escapeHTML(row.k)}</td><td class="formula">${escapeHTML(row.v)}</td><td>${escapeHTML(row.n)}</td></tr>`).join("");
+
+  $("#planDetailBody").innerHTML = `
+    <div class="detail-hero">
+      <div class="detail-verdict ${verdictClass}"><span class="detail-label">${tr("Beginner verdict", "小白结论")}</span><span class="detail-value">${verdict}</span><div class="detail-sub">${escapeHTML(model.name || body.model)} · ${escapeHTML(plan.qname)}</div></div>
+      <div><span class="detail-label">${tr("Deployment shape", "部署规模")}</span><span class="detail-value">${plan.n} × ${plan.replicas} = ${totalCards}</span><div class="detail-sub">${tr("cards/replica × replicas = total cards", "每副本卡数 × 副本数 = 总卡数")}</div></div>
+      <div><span class="detail-label">${tr("Single stream μ / P95", "单流 μ / P95")}</span><span class="detail-value">${fmt.tps(plan.single_tps)} / ${fmt.tps(plan.p95_single_tps)}</span><div class="detail-sub">output tok/s · TPOT ${fmt.ms(plan.tpot_ms)}</div></div>
+      <div><span class="detail-label">${tr("Cluster mixed capacity", "集群混合容量")}</span><span class="detail-value">${fmt.tpm(plan.tpm)}</span><div class="detail-sub">input + output tok/min · ${tr("target", "目标")} ${fmt.tpm(body.tpm)}</div></div>
+    </div>
+
+    <section class="detail-section"><h3>${tr("What you should do", "你应该怎么做")}</h3>
+      <div class="advice-list">${advice.map(a => `<div class="advice ${a.level}"><strong>${escapeHTML(a.title)}</strong>${escapeHTML(a.text)}</div>`).join("")}</div>
+    </section>
+
+    <section class="detail-section"><h3>${tr("How the planner reached this result", "规划器如何得到这套方案")}</h3>
+      <p class="detail-section-intro">${tr("The decision runs in this order. A later step cannot repair a failure in an earlier one.", "按以下顺序判断；前一步不成立，后面的高吞吐数字也不能让方案变得可部署。")}</p>
+      <div class="detail-grid">
+        ${detailCard("1 · " + tr("Compatibility", "兼容性"), tr("Checkpoint → engine → hardware", "检查点 → 引擎 → 硬件"), tr("Check locked quantization, compute precision, KV path, and topology first", "先检查锁定量化、计算精度、KV 路径和并行拓扑"))}
+        ${detailCard("2 · " + tr("Memory", "显存"), "weights + KV + runtime + activation", tr("Both mean occupancy and P99.9 concurrent tail must fit", "平均驻留与 P99.9 并发尾部都要检查"))}
+        ${detailCard("3 · " + tr("Performance", "性能"), "max(memory time, compute time) + overhead", tr("Prefill and decode are calculated separately, then combined by the workload", "prefill 与 decode 分开估算，再按工作负载合并"))}
+        ${detailCard("4 · " + tr("Sizing", "容量规划"), "target demand ÷ replica capacity", tr("Round up replicas; queue estimates use M/M/c only when enabled", "副本数向上取整；启用排队时才使用 M/M/c"))}
+      </div>
+    </section>
+
+    <section class="detail-section"><h3>${tr("Compatibility checklist", "兼容性清单")}</h3><div class="detail-grid">${compatibility}</div></section>
+
+    <section class="detail-section"><h3>${tr("Memory derivation · per card", "显存推导 · 每卡")}</h3>
+      <div class="tblwrap"><table class="detail-table"><thead><tr><th>${tr("Component", "组成")}</th><th class="n">${tr("Memory", "显存")}</th><th>${tr("Meaning", "含义")}</th></tr></thead><tbody>${memoryHTML}
+        <tr><td><strong>${tr("Mean occupied total", "平均驻留总量")}</strong></td><td class="n"><strong>${fmt.gb(d.total)}</strong></td><td>${tr("Weighted by how long each request remains in flight", "按每类请求的在途驻留时间加权")}</td></tr>
+        <tr><td><strong>P99.9 ${tr("concurrent total", "并发总量")}</strong></td><td class="n"><strong>${fmt.gb(d.p999_total)}</strong></td><td>${tr("Tail guard used for the plan's fit decision", "方案判断能否部署时使用的尾部保护值")}</td></tr>
+        <tr><td>${tr("Engine budget / physical", "引擎预算 / 物理显存")}</td><td class="n">${fmt.gb(d.budget)} / ${fmt.gb(d.cap)}</td><td>${tr("The P99.9 guard must not exceed physical memory", "P99.9 保护值不能超过物理显存")}</td></tr>
+      </tbody></table></div>
+    </section>
+
+    <section class="detail-section"><h3>${tr("Throughput and latency · one replica", "吞吐与时延 · 单副本")}</h3>
+      <div class="detail-grid">
+        ${detailCard(tr("Prefill input rate", "Prefill 输入速度"), `${fmt.tpm(perf.pre_tps * 60)} tok/min`, tr("Input-stage speed; not the same metric as mixed TPM", "输入阶段速度；与混合 TPM 不是同一个指标"))}
+        ${detailCard(tr("Decode output rate", "Decode 输出速度"), `${fmt.tpm(perf.tpm)} tok/min`, `${fmt.tps(perf.agg_tps)} output tok/s`)}
+        ${detailCard(tr("Mixed service rate", "混合处理速度"), `${fmt.tpm(perf.tpm_mixed)} tok/min`, tr("Completed input + output tokens under this workload", "该工作负载下完成的输入 + 输出 token"))}
+        ${detailCard(tr("Request throughput", "请求吞吐"), `${fmt.rate(perf.req_s)} req/s`, `${plan.max_conc} ${tr("concurrent requests per replica", "并发请求/副本")}`)}
+        ${detailCard("TTFT", fmt.ms(perf.ttft_ms), `${tr("P95", "P95")} ${fmt.ms(perf.workload?.p95_ttft_ms || 0)} · ${tr("first token", "首 token")}`)}
+        ${detailCard(tr("Request latency", "请求时延"), fmt.ms(perf.req_ms), `P95 ${fmt.ms(perf.workload?.p95_req_ms || 0)} · P99 ${fmt.ms(perf.workload?.p99_req_ms || 0)}`)}
+      </div>
+      <div class="detail-callout">${escapeHTML(tr(
+        `Metric warning: “2M TPM” is ambiguous. Prefill/input TPM, decode/output TPM, and mixed input+output TPM are different counters. This plan ranks by mixed TPM: ${fmt.tpm(perf.tpm_mixed)} per replica × ${plan.replicas} replicas = ${fmt.tpm(plan.tpm)} cluster capacity.`,
+        `指标提醒：“200 万 TPM”并不唯一。Prefill/输入 TPM、Decode/输出 TPM、输入+输出混合 TPM 是三种不同口径。本方案按混合 TPM 排名：每副本 ${fmt.tpm(perf.tpm_mixed)} × ${plan.replicas} 副本 = 集群容量 ${fmt.tpm(plan.tpm)}。`
+      ))}</div>
+    </section>
+
+    <section class="detail-section"><h3>${tr("Target sizing and queueing", "目标容量与排队")}</h3>
+      <div class="tblwrap"><table class="detail-table"><tbody>
+        <tr><td>${tr("Mean tokens/request", "平均 token/请求")}</td><td class="formula">${formatTokens(perf.workload?.mean_context || 0)} input + ${formatTokens(perf.workload?.mean_output || 0)} output = ${formatTokens(meanTokens)}</td><td>${tr("Arrival-share weighted", "按请求到达占比加权")}</td></tr>
+        <tr><td>${tr("Target arrival rate", "目标到达率")}</td><td class="formula">${fmt.tpm(body.tpm)} ÷ ${formatTokens(meanTokens)} ÷ 60 = ${fmt.rate(plan.arrival_qps)} req/s</td><td>${tr("Converts target mixed TPM into requests", "把目标混合 TPM 换算为请求数")}</td></tr>
+        <tr><td>${tr("Cluster service capacity", "集群服务能力")}</td><td class="formula">${fmt.rate(perf.req_s)} × ${plan.replicas} = ${fmt.rate(plan.capacity_qps)} req/s</td><td>${tr("Per-replica capacity × replicas", "每副本能力 × 副本数")}</td></tr>
+        <tr><td>${tr("Modeled utilization", "模型利用率")}</td><td class="formula">${fmt.rate(plan.arrival_qps)} ÷ ${fmt.rate(plan.capacity_qps)} = ${plan.util_pct.toFixed(1)}%</td><td>${tr("Lower leaves more burst and latency margin", "越低越能承受突发并保留时延余量")}</td></tr>
+        <tr><td>${tr("Queue model", "排队模型")}</td><td class="formula">${escapeHTML(plan.queue_model)} · avg ${fmt.ms(plan.wait_avg_ms)} · P95 ${fmt.ms(plan.wait_p95_ms)}</td><td>${tr("M/M/c is a simplified estimate, not a production tail guarantee", "M/M/c 只是简化估算，不是生产尾延迟保证")}</td></tr>
+      </tbody></table></div>
+    </section>
+
+    <section class="detail-section"><h3>${tr("Workload buckets", "工作负载分桶")}</h3>
+      <p class="detail-section-intro">${tr("Arrival share is how often requests appear. Occupancy share is how much in-flight time/resource they occupy; long requests can be rare but dominate occupancy.", "到达占比表示请求出现频率；驻留占比表示它占用在途时间/资源的比例。长请求即使很少，也可能主导驻留。")}</p>
+      <div class="tblwrap"><table class="detail-table"><thead><tr><th class="n">#</th><th class="n">Input</th><th class="n">Output</th><th class="n">${tr("Arrival", "到达")}</th><th class="n">${tr("Occupancy", "驻留")}</th><th class="n">${tr("Single TPS", "单流 TPS")}</th><th class="n">TTFT</th><th class="n">${tr("Request", "请求时延")}</th><th class="n">${tr("Batch memory", "批次显存")}</th></tr></thead><tbody>${workloadHTML}</tbody></table></div>
+    </section>
+
+    <section class="detail-section"><h3>${tr("Calculation ledger", "完整计算账本")}</h3>
+      <p class="detail-section-intro">${tr("These are the actual intermediate values produced by the same calculator path used by the planner.", "以下是规划器同一计算路径实际产出的中间值，不是另写的一套说明。")}</p>
+      <div class="tblwrap"><table class="detail-table"><thead><tr><th>${tr("Step", "步骤")}</th><th>${tr("Value / formula", "数值 / 公式")}</th><th>${tr("Explanation", "说明")}</th></tr></thead><tbody>${traceHTML}</tbody></table></div>
+      ${plan.warn ? `<div class="detail-callout"><strong>${tr("Calculator warning", "计算器原始警告")}：</strong> ${escapeHTML(plan.warn)}</div>` : ""}
+      <div class="detail-callout">${tr("Not modeled: continuous-batching trajectories, kernel fusion, hierarchical network contention, cache eviction, and production tail-latency distributions.", "未建模：continuous batching 轨迹、kernel fusion、分层网络拥塞、cache 驱逐和生产尾延迟分布。")}</div>
+    </section>`;
+}
+
+async function openPlanDetail(plan, trigger) {
+  if (!lastPlanBody) return;
+  const run = ++planDetailRun;
+  planDetailTrigger = trigger;
+  const modal = $("#planDetailModal");
+  $("#planDetailTitle").textContent = tr(`${hardwareName(plan.hw)} plan explained`, `${hardwareName(plan.hw)} 方案详解`);
+  $("#planDetailBody").innerHTML = `<div class="detail-loading">${tr("Calculating the exact per-replica trace…", "正在计算该方案的逐项明细…")}</div>`;
+  modal.hidden = false;
+  document.body.classList.add("modal-open");
+  $(".plan-modal-close").focus();
+  const body = lastPlanBody;
+  try {
+    const data = await post("/api/perf", {
+      hw: plan.hw.id, n: plan.n, model: body.model, custom: body.custom,
+      quant: plan.quant, workload: body.workload, batch: plan.max_conc,
+      eng: body.eng, spec: body.spec, kvq: body.kvq, advanced: body.advanced, lang,
+    });
+    if (run !== planDetailRun) return;
+    if (!data?.perf) throw new Error(data?.error || tr("No detail returned", "接口未返回明细"));
+    renderPlanDetail(plan, data.perf);
+  } catch (err) {
+    if (run === planDetailRun) {
+      $("#planDetailBody").innerHTML = `<div class="empty">${escapeHTML(tr(`Unable to load detail: ${err.message}`, `无法加载明细：${err.message}`))}</div>`;
+    }
+  }
+}
+
+function closePlanDetail() {
+  const modal = $("#planDetailModal");
+  if (modal.hidden) return;
+  ++planDetailRun;
+  modal.hidden = true;
+  document.body.classList.remove("modal-open");
+  if (planDetailTrigger?.isConnected) planDetailTrigger.focus();
 }
 
 /* ---------- 硬件库 / 模型库 / 速查 ---------- */

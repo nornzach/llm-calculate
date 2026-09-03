@@ -433,6 +433,65 @@ input[type=range]::-moz-range-thumb {
 }
 .planhead { padding: 10px 16px; border: 0; border-bottom: 1px solid var(--line); background: var(--panel2); }
 .planhead span { font-size: 10px; letter-spacing: .08em; color: var(--faint); font-weight: 700; text-transform: uppercase; }
+.planrow[data-plan-detail] { cursor: pointer; }
+.planrow[data-plan-detail]:focus-visible { outline: 2px solid color-mix(in srgb, var(--acc) 55%, transparent); outline-offset: -2px; }
+
+/* ---------- 方案解释弹窗 ---------- */
+.plan-modal[hidden] { display: none; }
+.plan-modal {
+  position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center;
+  padding: 24px;
+}
+.plan-modal-backdrop { position: absolute; inset: 0; background: rgba(5, 10, 18, .72); backdrop-filter: blur(5px); }
+.plan-modal-panel {
+  position: relative; display: flex; flex-direction: column;
+  width: min(1120px, 100%); max-height: calc(100vh - 48px);
+  overflow: hidden; border: 1px solid var(--line2); border-radius: 12px;
+  background: var(--bg); box-shadow: 0 28px 90px rgba(0, 0, 0, .38);
+}
+.plan-modal-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 20px;
+  padding: 18px 22px; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.plan-modal-head h2 { margin: 3px 0 0; font-size: 22px; text-wrap: balance; }
+.plan-modal-close {
+  flex: none; width: 36px; height: 36px; padding: 0; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--panel2); color: var(--text); font-size: 24px; line-height: 1;
+}
+.plan-modal-body { overflow: auto; padding: 22px; }
+.detail-loading { min-height: 220px; display: grid; place-items: center; color: var(--sub); }
+.detail-hero { display: grid; grid-template-columns: 1.4fr repeat(3, 1fr); gap: 1px; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--line); }
+.detail-hero > div { min-width: 0; padding: 16px; background: var(--panel); }
+.detail-hero .detail-verdict { border-top: 3px solid var(--ok); }
+.detail-hero .detail-verdict.warn { border-color: var(--warn); }
+.detail-hero .detail-verdict.bad { border-color: var(--bad); }
+.detail-label { display: block; margin-bottom: 6px; color: var(--faint); font: 700 9px/1.2 var(--mono); letter-spacing: .08em; text-transform: uppercase; }
+.detail-value { display: block; font: 700 18px/1.2 var(--mono); overflow-wrap: anywhere; }
+.detail-verdict .detail-value { font-family: var(--sans); }
+.detail-sub { margin-top: 6px; color: var(--sub); font-size: 11px; line-height: 1.5; }
+.detail-section { margin-top: 24px; }
+.detail-section h3 { margin: 0 0 10px; font-size: 15px; }
+.detail-section-intro { margin: -4px 0 12px; color: var(--sub); font-size: 12px; line-height: 1.6; }
+.detail-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.detail-card { padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.detail-card .detail-value { font-size: 14px; }
+.advice-list { display: grid; gap: 9px; }
+.advice {
+  padding: 13px 15px; border-left: 3px solid var(--acc); border-radius: 0 7px 7px 0;
+  background: var(--panel); font-size: 12px; line-height: 1.65;
+}
+.advice strong { display: block; margin-bottom: 2px; font-size: 13px; }
+.advice.good { border-color: var(--ok); }
+.advice.warn { border-color: var(--warn); }
+.advice.bad { border-color: var(--bad); }
+.detail-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.detail-table th, .detail-table td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.detail-table th { color: var(--faint); font-size: 9px; letter-spacing: .07em; text-transform: uppercase; }
+.detail-table td.n, .detail-table th.n { text-align: right; font-family: var(--mono); white-space: nowrap; }
+.detail-table tr:last-child td { border-bottom: 0; }
+.detail-table .formula { font-family: var(--mono); color: var(--sub); }
+.detail-callout { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 7px; color: var(--sub); font-size: 11px; line-height: 1.65; }
+body.modal-open { overflow: hidden; }
 
 .empty { padding: 60px 0; text-align: center; color: var(--faint); font-size: 12.5px; }
 
@@ -620,7 +679,7 @@ footer {
 :root[lang="zh-CN"] .term-effect::before { content: "本系统："; color: var(--sub); font-weight: 600; }
 :root[lang="en"] .term-effect::before { content: "Calculator: "; color: var(--sub); font-weight: 600; }
 
-button:focus-visible, input:focus-visible, .cs-btn:focus-visible {
+button:focus-visible, input:focus-visible, .cs-btn:focus-visible, .planrow:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--acc) 55%, transparent);
   outline-offset: 2px;
 }
@@ -633,6 +692,7 @@ button:focus-visible, input:focus-visible, .cs-btn:focus-visible {
   .chart + .chart { border-left: 0; border-top: 1px solid var(--line); }
   .planrow { min-width: 980px; }
   #planList { overflow-x: auto; padding-bottom: 4px; }
+  .detail-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 680px) {
@@ -661,4 +721,8 @@ button:focus-visible, input:focus-visible, .cs-btn:focus-visible {
   .glossary-grid { grid-template-columns: 1fr; }
   .filterbar { flex-wrap: wrap; }
   footer { min-height: 52px; padding: 12px 14px; gap: 14px; flex-wrap: wrap; }
+  .plan-modal { padding: 0; }
+  .plan-modal-panel { width: 100%; height: 100%; max-height: none; border: 0; border-radius: 0; }
+  .plan-modal-head, .plan-modal-body { padding: 16px; }
+  .detail-hero, .detail-grid { grid-template-columns: 1fr; }
 }

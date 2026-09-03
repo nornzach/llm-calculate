@@ -186,6 +186,7 @@ type perfReq struct {
 	HW       string                `json:"hw"`
 	N        int                   `json:"n"`
 	Model    string                `json:"model"`
+	Custom   *calc.Model           `json:"custom"`
 	Quant    string                `json:"quant"`
 	Workload []calc.WorkloadBucket `json:"workload"`
 	Batch    int                   `json:"batch"`
@@ -472,10 +473,20 @@ func main() {
 			return
 		}
 		h := findHW(req.HW)
-		m := findModel(req.Model)
-		if h == nil || m == nil {
-			writeErr(w, 404, "unknown hardware or model")
+		if h == nil {
+			writeErr(w, 404, "unknown hardware")
 			return
+		}
+		var m calc.Model
+		if req.Custom != nil {
+			m = sanitizeCustom(req.Custom, req.Lang)
+		} else {
+			found := findModel(req.Model)
+			if found == nil {
+				writeErr(w, 404, "unknown model")
+				return
+			}
+			m = *found
 		}
 		if h.Svc {
 			writeErr(w, 422, "hardware has no local roofline inputs")
@@ -499,7 +510,7 @@ func main() {
 		o := req.Advanced
 		o.Engine, o.Spec, o.KVQuant = req.Eng, req.Spec, req.KVQ
 		o.Lang = req.Lang
-		p := calc.ThroughputWorkload(*h, *m, q, workload, batch, n, o)
+		p := calc.ThroughputWorkload(*h, m, q, workload, batch, n, o)
 		// 所有点复用同一计算函数；额外插入当前并发，避免图表与主指标口径分叉。
 		type pt struct {
 			B        int     `json:"b"`
@@ -515,7 +526,7 @@ func main() {
 		batches = slices.Compact(batches)
 		curve := make([]pt, 0, len(batches))
 		for _, b := range batches {
-			pp := calc.ThroughputWorkload(*h, *m, q, workload, b, n, o)
+			pp := calc.ThroughputWorkload(*h, m, q, workload, b, n, o)
 			curve = append(curve, pt{B: b, Agg: pp.AggTPS, Single: pp.SingleTPS, Used: pp.Mem.P999Total, MeanUsed: pp.Mem.Total, Cap: pp.Mem.Cap, Fit: pp.Fit})
 		}
 		writeJSON(w, map[string]any{"perf": p, "curve": curve})

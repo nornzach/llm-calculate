@@ -333,6 +333,17 @@
 
 </main>
 
+<div class="plan-modal" id="planDetailModal" hidden>
+  <div class="plan-modal-backdrop" data-plan-close></div>
+  <section class="plan-modal-panel" role="dialog" aria-modal="true" aria-labelledby="planDetailTitle">
+    <header class="plan-modal-head">
+      <div><span class="eyebrow">PLAN EXPLAINER</span><h2 id="planDetailTitle"></h2></div>
+      <button type="button" class="plan-modal-close" data-plan-close aria-label="关闭">×</button>
+    </header>
+    <div class="plan-modal-body" id="planDetailBody"></div>
+  </section>
+</div>
+
 <footer>
   <span>一阶 roofline 与静态容量仿真；未建模 continuous batching 轨迹、kernel fusion、分层网络拥塞、cache 驱逐和生产尾延迟分布。采购或 SLA 前必须按目标 checkpoint、引擎和真实流量校准。</span>
   <span class="mono" id="footMeta"></span>
