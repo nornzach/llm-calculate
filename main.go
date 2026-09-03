@@ -351,18 +351,52 @@ func sanitizeWorkload(workload []calc.WorkloadBucket) ([]calc.WorkloadBucket, er
 	}
 	return workload, nil
 }
+func inlineIndex() ([]byte, error) {
+	index, err := embedded.ReadFile("web/index.html")
+	if err != nil {
+		return nil, err
+	}
+	css, err := embedded.ReadFile("web/app.css")
+	if err != nil {
+		return nil, err
+	}
+	js, err := embedded.ReadFile("web/app.js")
+	if err != nil {
+		return nil, err
+	}
+
+	html := string(index)
+	const cssMarker, jsMarker = "<!-- inline:app.css -->", "<!-- inline:app.js -->"
+	if !strings.Contains(html, cssMarker) || !strings.Contains(html, jsMarker) {
+		return nil, fmt.Errorf("web index is missing inline asset markers")
+	}
+	html = strings.Replace(html, cssMarker, "<style>\n"+string(css)+"\n</style>", 1)
+	html = strings.Replace(html, jsMarker, "<script>\n"+string(js)+"\n</script>", 1)
+	return []byte(html), nil
+}
 
 func main() {
 	addr := flag.String("addr", ":8317", "listen address")
 	flag.Parse()
 	mustLoad()
 
+	indexHTML, err := inlineIndex()
+	if err != nil {
+		log.Fatal(err)
+	}
 	webFS, err := fs.Sub(embedded, "web")
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	mux := http.NewServeMux()
+	serveIndex := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write(indexHTML)
+	}
+	mux.HandleFunc("GET /{$}", serveIndex)
+	mux.HandleFunc("GET /index.html", serveIndex)
 	mux.Handle("/", http.FileServer(http.FS(webFS)))
 
 	mux.HandleFunc("GET /api/hardware", func(w http.ResponseWriter, r *http.Request) {

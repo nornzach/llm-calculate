@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"llmcalc/calc"
@@ -97,6 +98,24 @@ func TestSanitizeWorkloadRejectsInvalidBuckets(t *testing.T) {
 	for _, workload := range invalid {
 		if _, err := sanitizeWorkload(workload); err == nil {
 			t.Errorf("invalid workload accepted: %+v", workload)
+		}
+	}
+}
+
+func TestInlineIndexEmbedsFrontendAssets(t *testing.T) {
+	index, err := inlineIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(index)
+	for _, required := range []string{"<style>", ".workload-editor", "<script>", "function workloadEditor"} {
+		if !strings.Contains(html, required) {
+			t.Errorf("inlined index is missing %q", required)
+		}
+	}
+	for _, external := range []string{"inline:app.css", "inline:app.js", `href="app.css`, `src="app.js`} {
+		if strings.Contains(html, external) {
+			t.Errorf("inlined index still depends on %q", external)
 		}
 	}
 }
