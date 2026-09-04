@@ -854,11 +854,10 @@ async function boot() {
   CS["pl-spec"] = cselect($("#pl-spec"), specGroups(), { search: false, onChange: runPlan });
 
   CS["rec-eng"].set("auto", true); CS["rec-spec"].set("none", true);
-  CS["rec-model"].set("deepseek-r1", true); CS["rec-hw"].set("rtx4090", true);
+  CS["map-model"].set("qwen--qwen3.8-27b", true); CS["map-preset"].set("balanced", true);
   CS["rec-qonly"].set("", true); CS["rec-preset"].set("balanced", true);
   CS["f-hw"].set("rtx4090", true); CS["f-ctx"].set("8192", true);
   CS["p-hw"].set("rtx4090", true); CS["p-model"].set("llama-3.1-70b", true);
-  CS["map-model"].set("deepseek-v3.1", true); CS["map-preset"].set("balanced", true);
   CS["p-quant"].set("q4km", true);
   CS["pl-model"].set("deepseek-r1", true);
   CS["pl-qonly"].set("", true); CS["hw-vendor"].set("", true);
@@ -906,6 +905,7 @@ function wire() {
       fn();
     };
   };
+  wireMapTip();
   bind("#f-n", runFit); bind("#f-b", runFit);
   bind("#p-n", runPerf); bind("#p-b", runPerf);
   bind("#pl-tpm", runPlan);
@@ -1508,6 +1508,29 @@ function mapHeatCtx() {
   const mean = w.reduce((s, x) => s + x.context * x.share, 0) / w.reduce((s, x) => s + x.share, 0);
   return [4096, 8192, 16384, 32768, 65536, 131072, 262144, 1048576].reduce((a, b) => Math.abs(b - mean) < Math.abs(a - mean) ? b : a);
 }
+
+// 即时悬浮提示：替代原生 title 的 1s 延迟；事件委托一次绑定整个地图视图
+function wireMapTip() {
+  const tip = document.createElement("div");
+  tip.id = "mapTip"; tip.hidden = true;
+  document.body.appendChild(tip);
+  const host = $("#v-map");
+  host.addEventListener("mouseover", e => {
+    const t = e.target.closest("[data-tip]");
+    if (!t) return;
+    tip.textContent = t.dataset.tip;
+    tip.hidden = false;
+  });
+  host.addEventListener("mousemove", e => {
+    if (tip.hidden) return;
+    const x = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 10);
+    const y = Math.min(e.clientY + 16, innerHeight - tip.offsetHeight - 10);
+    tip.style.transform = `translate(${x}px, ${y}px)`;
+  });
+  host.addEventListener("mouseout", e => {
+    if (e.target.closest("[data-tip]")) tip.hidden = true;
+  });
+}
 function mapConc() { return Math.max(1, Math.min(256, +$("#map-conc").value || 16)); }
 
 function runMap() {
@@ -1563,7 +1586,6 @@ function renderMapScatter(data, body) {
     xTicks.map(v =>
       `<line class="tick" x1="${X(v)}" y1="${H - PB}" x2="${X(v)}" y2="${H - PB + 4}"/>` +
       `<text class="clabel" x="${X(v)}" y="${H - PB + 15}" text-anchor="middle">${fmt.cny(v)}</text>`).join("") +
-    `<line class="axis" x1="${PL}" y1="${PT}" x2="${PL}" y2="${H - PB}"/>` +
     `<line class="axis" x1="${PL}" y1="${H - PB}" x2="${W - PR}" y2="${H - PB}"/>` +
     `<text class="axis-title" x="${(PL + W - PR) / 2}" y="${H - 6}" text-anchor="middle">${tr("Monthly cost (CNY, log)", "月成本（元，对数）")}</text>` +
     `<text class="axis-title" transform="translate(12 ${(PT + H - PB) / 2}) rotate(-90)" text-anchor="middle">P95 TOS · tok/s</text>`;
@@ -1574,7 +1596,7 @@ function renderMapScatter(data, body) {
     const r = 4.5 + 6 * Math.sqrt(p.plan.tpm / maxTPM);
     const tip = `${hardwareName(p.plan.hw)} ×${p.plan.n}${p.plan.replicas > 1 ? " ×" + p.plan.replicas + "R" : ""} · ${p.plan.qname}\n` +
       `${fmt.cny(p.plan.monthly)}/${tr("mo", "月")} · P95 ${fmt.tps(p.plan.p95_single_tps)} tok/s · ${fmt.tpm(p.plan.tpm)} tok/min`;
-    return `<circle class="mdot${pareto.has(paretoKey(p)) ? " pareto" : ""}" data-i="${i}" cx="${X(p.plan.monthly).toFixed(1)}" cy="${Y(p.plan.p95_single_tps).toFixed(1)}" r="${r.toFixed(1)}" fill="${MAP_CLS_COLOR[p.plan.hw.cls] || "var(--faint)"}"><title>${escapeHTML(tip)}</title></circle>`;
+    return `<circle class="mdot${pareto.has(paretoKey(p)) ? " pareto" : ""}" data-i="${i}" data-tip="${escapeHTML(tip)}" cx="${X(p.plan.monthly).toFixed(1)}" cy="${Y(p.plan.p95_single_tps).toFixed(1)}" r="${r.toFixed(1)}" fill="${MAP_CLS_COLOR[p.plan.hw.cls] || "var(--faint)"}"></circle>`;
   }).join("");
   box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${tr("Cost versus speed scatter", "成本速度散点图")}">${axes}${line}${dots}</svg>`;
 
@@ -1628,7 +1650,7 @@ function renderMapLandscape() {
     const r = fetched ? 1.7 : 3 + 2.4 * Math.log10(m.params);
     const op = m.conf === "official" ? .85 : m.conf === "reported" ? .5 : .13;
     const tip = `${m.name} · ${m.org}\n${m.params}B${m.moe ? ` / ${m.active}B act` : ""} · ${formatTokens(m.ctx)} · ${m.conf}`;
-    return `<circle class="mdot${m.id === sel ? " sel" : ""}" data-id="${m.id}" cx="${X(m).toFixed(1)}" cy="${Y(m).toFixed(1)}" r="${r.toFixed(1)}" fill="${orgColor(m.org)}" opacity="${op}"><title>${escapeHTML(tip)}</title></circle>`;
+    return `<circle class="mdot${m.id === sel ? " sel" : ""}" data-id="${m.id}" data-tip="${escapeHTML(tip)}" cx="${X(m).toFixed(1)}" cy="${Y(m).toFixed(1)}" r="${r.toFixed(1)}" fill="${orgColor(m.org)}" opacity="${op}"></circle>`;
   }).join("");
   $("#mapLandscape").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${tr("Model landscape", "模型版图")}">${axes}${dots}</svg>`;
   $("#mapLandscapeLegend").innerHTML =
@@ -1651,9 +1673,21 @@ async function runMapHeat() {
   renderMapHeat(cols, resps, ctx, batch);
 }
 
+// 每个参数档位取最新一个模型：新模型优先，官方来源优先，矩阵自然形成 FP16→4-bit 梯度。
+function mapHeatRows() {
+  const tiers = [[0, 12], [12, 24], [24, 45], [45, 90], [90, 160], [160, 260], [260, 360], [360, 500], [500, 800], [800, 2600]];
+  const cand = MODELS.filter(m => m.params > 0 && m.ctx > 0);
+  const picked = [];
+  for (const [lo, hi] of tiers) {
+    const best = cand.filter(m => m.params > lo && m.params <= hi && !picked.includes(m))
+      .sort((a, b) => (b.year - a.year) || ((b.conf === "official") - (a.conf === "official")) || b.params - a.params)[0];
+    if (best) picked.push(best);
+  }
+  return picked.sort((a, b) => b.params - a.params);
+}
+
 function renderMapHeat(cols, resps, ctx, batch) {
-  const rows = MODELS.filter(m => (m.conf === "official" || m.conf === "reported") && m.params > 0)
-    .sort((a, b) => b.params - a.params).slice(0, 14);
+  const rows = mapHeatRows();
   const mainQ = QUANTS.filter(q => q.main);
   const byModel = resps.map(list => new Map((list || []).map(r => [r.model.id, r])));
   const head = `<thead><tr><th class="mname">${tr("Model", "模型")}</th>${cols.map(h =>
@@ -1669,9 +1703,9 @@ function renderMapHeat(cols, resps, ctx, batch) {
       if (!best) return `<td><span class="hm no">—</span></td>`;
       const tier = best.q.bytes >= 1.9 ? "t16" : best.q.bytes >= 0.9 ? "t8" : "t4";
       const tip = `${m.name} × ${hardwareName(h)}\n${best.q.name} · ${fmt.tps(best.c.tps)} tok/s${best.c.accel ? "" : " · no-acc"}`;
-      return `<td><span class="hm ${tier}${best.c.fit === 1 ? " edge" : ""}" title="${escapeHTML(tip)}">${best.q.id.toUpperCase().slice(0, 5)}</span></td>`;
+      return `<td><span class="hm ${tier}${best.c.fit === 1 ? " edge" : ""}" data-tip="${escapeHTML(tip)}">${best.q.id.toUpperCase().slice(0, 5)}</span></td>`;
     }).join("");
-    return `<tr><td class="mname">${m.name}${repMark(m.conf)}<span class="msub">${m.params}B</span></td>${cells}</tr>`;
+    return `<tr><td class="mname">${m.name}${repMark(m.conf)}<span class="msub">${m.params}B · ${m.year}</span></td>${cells}</tr>`;
   }).join("");
   $("#mapHeat").innerHTML = head + "<tbody>" + body + "</tbody>";
   $("#mapHeatMeta").textContent = `${tr("Context", "上下文")} ${formatTokens(ctx)} · ${tr("conc", "并发")} ${batch} · KV FP16 · ${tr("single card", "单卡")}`;

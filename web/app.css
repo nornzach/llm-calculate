@@ -727,6 +727,15 @@ button:focus-visible, input:focus-visible, .cs-btn:focus-visible, .planrow:focus
   .mapbar { grid-template-columns: 1fr 1fr; }
 }
 
+/* 悬浮提示（即时，不等原生 title 延迟） */
+#mapTip {
+  position: fixed; left: 0; top: 0; z-index: 300; pointer-events: none;
+  max-width: 340px; padding: 8px 10px; border-radius: 7px;
+  background: var(--pop); border: 1px solid var(--line2);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, .18);
+  color: var(--text); font: 11px/1.55 var(--mono); white-space: pre-line;
+}
+
 @media (max-width: 900px) {
   .tabs { overflow-x: auto; padding-inline: 14px; }
   .tabs button { flex: none; }
