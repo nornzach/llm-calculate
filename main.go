@@ -210,6 +210,18 @@ type planReq struct {
 	Lang     string    `json:"lang"`
 }
 
+type recReq struct {
+	Model    string                `json:"model"`
+	Custom   *calc.Model           `json:"custom"`
+	Workload []calc.WorkloadBucket `json:"workload"`
+	calc.RecommendOpts
+	Eng      string    `json:"eng"`
+	Spec     string    `json:"spec"`
+	KVQ      string    `json:"kvq"`
+	Advanced calc.Opts `json:"advanced"`
+	Lang     string    `json:"lang"`
+}
+
 // clampF64 限制浮点范围（0 值给默认）。
 func clampF64(v, lo, hi, def float64) float64 {
 	if v < lo {
@@ -571,8 +583,54 @@ func main() {
 		}
 		o := req.Advanced
 		o.Engine, o.Spec, o.KVQuant = req.Eng, req.Spec, req.KVQ
+
 		o.Lang = req.Lang
 		writeJSON(w, calc.Planner(hws, m, req.PlanOpts, workload, conc, o))
+	})
+
+	mux.HandleFunc("POST /api/recommend", func(w http.ResponseWriter, r *http.Request) {
+		var req recReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		if !validStack(req.Eng, req.Spec, req.KVQ) {
+			writeErr(w, 400, "unknown engine, speculative method, or KV format")
+			return
+		}
+		if req.QuantOnly != "" {
+			if _, ok := calc.LookupQuant(req.QuantOnly); !ok {
+				writeErr(w, 400, "unknown quantization")
+				return
+			}
+		}
+		var m calc.Model
+		if req.Direction != "card" {
+			if req.Custom != nil {
+				m = sanitizeCustom(req.Custom, req.Lang)
+			} else {
+				found := findModel(req.Model)
+				if found == nil {
+					writeErr(w, 404, "unknown model")
+					return
+				}
+				m = *found
+			}
+		}
+		workload, err := sanitizeWorkload(req.Workload)
+		if err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		req.Conc = clamp(req.Conc, 1, 256, 16)
+		if err := validatePlanOptions(calc.PlanOpts{TargetTPM: req.TargetTPM, MinTOS: req.MinTOS, Objective: "cost", Queue: req.Queue, MaxQ: req.MaxQ}, req.Conc); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		o := req.Advanced
+		o.Engine, o.Spec, o.KVQuant = req.Eng, req.Spec, req.KVQ
+		o.Lang = req.Lang
+		writeJSON(w, calc.Recommend(hws, models, m, workload, req.RecommendOpts, o))
 	})
 
 	// 简单日志

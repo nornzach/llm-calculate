@@ -201,9 +201,9 @@ func TestSpecGain(t *testing.T) {
 		t.Errorf("eagle3 高并发场景应允许反噬，得 %.2f", e32)
 	}
 	base := Throughput(hw4090, qwen7b, QuantByID("int4"), 4096, 1, 1, Opts{})
-	uncalibrated := Throughput(hw4090, qwen7b, QuantByID("int4"), 4096, 1, 1, Opts{Spec: "eagle3"})
-	if uncalibrated.SingleTPS != base.SingleTPS || uncalibrated.SpecApplied {
-		t.Errorf("未校准推测解码不得套默认倍率: %.1f vs %.1f", uncalibrated.SingleTPS, base.SingleTPS)
+	preset := Throughput(hw4090, qwen7b, QuantByID("int4"), 4096, 1, 1, Opts{Spec: "eagle3"})
+	if preset.SingleTPS <= base.SingleTPS || !preset.SpecApplied {
+		t.Errorf("选中档位应套论文口径预设增益: %.1f vs %.1f", preset.SingleTPS, base.SingleTPS)
 	}
 	calibrated := Throughput(hw4090, qwen7b, QuantByID("int4"), 4096, 1, 1, Opts{Spec: "eagle3", SpecTau: 2.8, SpecOvh: 0.15})
 	if calibrated.SingleTPS <= base.SingleTPS || !calibrated.SpecApplied {
@@ -488,9 +488,9 @@ func TestMTPRequiresMetadataAndCalibration(t *testing.T) {
 	}
 	m := qwen7b
 	m.MTP = true
-	uncalibrated := Throughput(h100, m, QuantByID("fp16"), 4096, 1, 1, Opts{Spec: "mtp"})
-	if uncalibrated.SingleTPS != base.SingleTPS {
-		t.Errorf("有 MTP 但无实测 τ/开销时不应套倍率")
+	preset := Throughput(h100, m, QuantByID("fp16"), 4096, 1, 1, Opts{Spec: "mtp"})
+	if preset.SingleTPS <= base.SingleTPS || !preset.SpecApplied {
+		t.Errorf("有 MTP 元数据时档位预设 τ/开销应生效: %.1f vs %.1f", preset.SingleTPS, base.SingleTPS)
 	}
 	on := Throughput(h100, m, QuantByID("fp16"), 4096, 1, 1, Opts{Spec: "mtp", SpecTau: 1.9, SpecOvh: 0.06})
 	if on.SingleTPS <= base.SingleTPS || !on.SpecApplied {
@@ -791,6 +791,37 @@ func TestPlannerExtremeTargetReturnsEmptyArray(t *testing.T) {
 		singleWorkload(4096, 128), 4, Opts{})
 	if plans == nil || len(plans) != 0 {
 		t.Fatalf("unreachable target must return a non-nil empty result: %+v", plans)
+	}
+}
+
+func TestRecommendModelObjectivePairs(t *testing.T) {
+	workload := []WorkloadBucket{{Context: 4096, Output: 128, Share: 0.9}, {Context: 100000, Output: 512, Share: 0.1}}
+	got := Recommend([]HW{hw4090, h100, h200}, []Model{llama8b}, llama8b, workload,
+		RecommendOpts{Direction: "model", Objectives: "cost,tos", TargetTPM: 6000, MinTOS: 20, Conc: 8, Limit: 8},
+		Opts{})
+	if len(got.Picks) == 0 {
+		t.Fatal("model recommendation should produce at least one prescription")
+	}
+	if len(got.Pareto) == 0 || len(got.Pareto) > len(got.Picks) {
+		t.Fatalf("pareto frontier should be non-empty and no larger than ranked picks: %d/%d", len(got.Pareto), len(got.Picks))
+	}
+	for _, p := range got.Picks {
+		if p.Plan.TPM < 6000 || p.Plan.P95SingleTPS < 20 {
+			t.Fatalf("prescription violates hard constraints: %+v", p)
+		}
+		if p.Reason == "" || p.Advice == "" {
+			t.Fatalf("prescription should include deterministic explanation and advice: %+v", p)
+		}
+	}
+}
+
+func TestRecommendCardSkipsUnsupportedCheckpointPrecision(t *testing.T) {
+	lockedFP8 := Model{ID: "locked-fp8", Name: "Locked FP8", Params: 8, Active: 8, Layers: 32, Hidden: 4096, KVT: "gqa", KVH: 8, Dim: 128, Ctx: 131072, NativeQuant: "fp8"}
+	got := Recommend([]HW{m3ultra}, []Model{lockedFP8}, lockedFP8, singleWorkload(4096, 128),
+		RecommendOpts{Direction: "card", HW: "m3u", Cards: 1, Objectives: "tpm", Conc: 4, Limit: 5},
+		Opts{})
+	if len(got.Picks) != 0 {
+		t.Fatalf("locked FP8 checkpoint should not be recommended on Apple-only FP16 hardware: %+v", got.Picks)
 	}
 }
 

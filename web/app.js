@@ -107,6 +107,24 @@ const STATIC_EN = new Map([
   ["浏览模型结构、上下文、KV 规模、原生量化格式与数据来源。", "Browse model architecture, context, KV footprint, native quantization, and data sources."],
   ["单卡容量速查", "Single-card Capacity Guide"],
   ["按相同预留口径快速比较不同硬件的大致模型容量上限。", "Compare approximate model capacity across hardware using the same reserve assumptions."],
+  ["我有模型", "I have a model"],
+  ["我有硬件", "I have hardware"],
+  ["处方方向 · DIRECTION", "Prescription Direction"],
+  ["目标取舍 · PRIORITIES", "Objective Priorities"],
+  ["最多两项", "up to two"],
+  ["最低成本", "Lowest Cost"],
+  ["最高 TOS", "Highest TOS"],
+  ["最高 TPM", "Highest TPM"],
+  ["最高可用", "Highest Availability"],
+  ["工作负载模板 · WORKLOAD PRESET", "Workload Preset"],
+  ["卡数 · CARDS", "Cards"],
+  ["目标吞吐 · TARGET TPM", "Target Throughput"],
+  ["单流下限 · MIN TOS", "Minimum Single-stream TPS"],
+  ["允许排队 · QUEUE", "Allow Queueing"],
+  ["排队后单副本最大并发", "Maximum Queued Concurrency"],
+  ["推荐完全来自确定性规则：兼容性、显存、roofline、目标取舍与 Pareto 排序；不调用 AI。处方会给出硬件、量化、框架、并发和分桶建议，并用完整计算账本解释原因。", "Recommendations come from deterministic rules: compatibility, memory, roofline, objective tradeoffs, and Pareto ranking. No AI is called. Each prescription explains hardware, quantization, framework, concurrency, and bucketing with the full calculation ledger."],
+  ["筛选方案…", "Filter prescriptions…"],
+  ["校准值应用于所有候选；只在同一部署栈、模型和负载口径下填写。", "Calibration values apply to every candidate; enter them only for the same stack, model, and workload."],
 ]);
 
 const ATTR_EN = new Map([
@@ -147,10 +165,12 @@ function applyLanguage() {
   }
 }
 
+
+
 let HW = [], MODELS = [], QUANTS = [], ENGINES = [], SPECS = [];
 let modelPage = 0;
 let workloadP, workloadPl;
-let fitRun = 0, perfRun = 0, planRun = 0;
+let fitRun = 0, perfRun = 0, planRun = 0, recRun = 0;
 const CS = {}; // 自定义下拉注册表
 const fixedQuantID = m => m && m.native_quant && m.native_quant !== "fp16" && QUANTS.some(q => q.id === m.native_quant) ? m.native_quant : "";
 
@@ -551,6 +571,13 @@ const LONG_TAIL_WORKLOAD = [
   { context: 512000, output: 512, share: 3.06, prefix_hit: 0 },
   { context: 1048576, output: 512, share: 0.10, prefix_hit: 0 },
 ];
+const REC_PRESETS = {
+  balanced: [{ context: 8192, output: 512, share: 100, prefix_hit: 0 }],
+  short: [{ context: 4096, output: 256, share: 80, prefix_hit: 0 }, { context: 16384, output: 1024, share: 20, prefix_hit: 0 }],
+  long: LONG_TAIL_WORKLOAD,
+};
+const OBJECTIVE_LABEL = { cost: tr("Lowest Cost", "最低成本"), tos: tr("Highest TOS", "最高 TOS"), tpm: tr("Highest TPM", "最高 TPM"), avail: tr("Highest Availability", "最高可用") };
+let recWorkloads = REC_PRESETS.balanced.map(x => ({ ...x }));
 
 const formatTokens = v => v >= 1048576 ? `${(v / 1048576).toFixed(v % 1048576 ? 1 : 0)}M` :
   v >= 1024 ? `${(v / 1024).toFixed(v % 1024 ? 1 : 0)}K` : `${Math.round(v)}`;
@@ -600,13 +627,7 @@ function workloadEditor(el, initial, onChange) {
           <label class="workload-field">${tr("Prefix hit (%)", "前缀命中 (%)")}<input type="number" data-field="prefix_hit" value="${r.prefix_hit}" min="0" max="90" step="1"></label>
         </div>
       </div>`).join("") +
-      `<div class="workload-actions"><button type="button" data-action="add" ${rows.length >= 8 ? "disabled" : ""}>+ ${tr("Bucket", "分桶")}</button><button type="button" data-action="tail">${tr("Long-tail example", "长尾示例")}</button></div>` +
-      `<p class="workload-note">${tr("Shares describe arriving requests. Memory occupancy is reweighted by each bucket's request latency; capacity uses a P99.9 guard.", "占比表示到达请求。并发显存会按各桶请求时延重加权驻留占比，并使用 P99.9 保护值。")}</p>`;
-    updateSummary();
-  };
-  const notify = () => {
-    clearTimeout(timer);
-    timer = setTimeout(() => { if (valid()) onChange(); }, 180);
+      `<div class="workload-actions"><button type="button" data-action="add" ${rows.length >= 8 ? "disabled" : ""}>+ ${tr("Bucket", "分桶")}</button><button type="button" data-action="tail">${tr("Long-tail example", "长尾示例")}</button></div>`;
   };
   el.oninput = e => {
     const input = e.target.closest("input[data-field]");
@@ -633,6 +654,11 @@ function workloadEditor(el, initial, onChange) {
       context: Math.round(r.context), output: Math.round(r.output),
       share: r.share / 100, prefix_hit: r.prefix_hit / 100,
     })) : null,
+    set: next => {
+      rows = next.map(x => ({ ...x }));
+      render();
+      notify();
+    },
   };
 }
 
@@ -760,10 +786,54 @@ async function boot() {
   CS["pl-model"] = cselect($("#pl-model"), modelGroups(), { onChange: () => { syncModelQuant("pl-model", "pl-qonly", "pl-quant-note"); runPlan(); } });
   workloadPl = workloadEditor($("#pl-workload"), [{ context: 8192, output: 512, share: 100, prefix_hit: 0 }], runPlan);
   CS["pl-qonly"] = cselect($("#pl-qonly"), quantGroups(true), { search: false, onChange: runPlan });
+  CS["rec-model"] = cselect($("#rec-model"), modelGroups(), { onChange: runRecommend });
+  CS["rec-hw"] = cselect($("#rec-hw"), hwGroups(), { onChange: runRecommend });
+  CS["rec-qonly"] = cselect($("#rec-qonly"), quantGroups(true), { search: false, onChange: runRecommend });
+  CS["rec-preset"] = cselect($("#rec-preset"), [{ label: "", items: [
+    { v: "balanced", n: tr("Balanced 8K/512", "均衡 8K/512"), m: tr("default deployment mix", "默认部署混合") },
+    { v: "short", n: tr("Short prompts", "短提示"), m: tr("chat/agent common case", "聊天/智能体常见") },
+    { v: "long", n: tr("Long tail", "长尾"), m: tr("100K–1M tail example", "100K–1M 长尾示例") },
+  ]}], { search: false, onChange: () => {
+    recWorkloads = REC_PRESETS[CS["rec-preset"].get()].map(x => ({ ...x }));
+    workloadP.set?.(recWorkloads); workloadPl.set?.(recWorkloads);
+    runPerf(); runPlan(); runRecommend();
+  }});
   CS["hw-vendor"] = cselect($("#hw-vendor"), [{ label: "", items: [{ v: "", n: tr("All vendors", "全部厂商") }, ...Object.keys(VENDOR).map(v => ({ v, n: vendorName(v) }))] }], { search: false, onChange: renderHWTable });
   const planFilter = () => { planPage = 0; renderPlans(); };
   CS["pl-vendor"] = cselect($("#pl-vendor"), [{ label: "", items: [{ v: "", n: tr("All vendors", "全部厂商") }, ...Object.keys(VENDOR).map(v => ({ v, n: vendorName(v) }))] }], { search: false, onChange: planFilter });
   CS["pl-cls"] = cselect($("#pl-cls"), [{ label: "", items: [{ v: "", n: tr("All classes", "全部类别") }, ...Object.keys(CLS).map(v => ({ v, n: localized(CLS, v) }))] }], { search: false, onChange: planFilter });
+  CS["rec-eng"] = cselect($("#rec-eng"), [{ label: "", items: ENGINES.map(e => ({ v: e.id, n: engineName(e), m: engineNote(e) })) }], { search: false, onChange: runRecommend });
+  CS["rec-spec"] = cselect($("#rec-spec"), [{ label: "", items: SPECS.map(s => ({ v: s.id, n: specName(s), m: specNote(s) })) }], { search: false, onChange: runRecommend });
+  const recDir = () => $("#rec-dir button.on")?.dataset.v || "model";
+  const syncRecDir = () => {
+    const card = recDir() === "card";
+    $("#rec-model-wrap").style.display = card ? "none" : "";
+    $("#rec-hw-wrap").style.display = card ? "" : "none";
+    $("#rec-cards").disabled = !card;
+    $("#rec-tpm").disabled = card;
+    $("#rec-tos").disabled = card;
+    $("#rec-queue").disabled = card;
+    $("#rec-maxq").disabled = card;
+  };
+  $("#rec-dir").addEventListener("click", e => {
+    const b = e.target.closest("button[data-v]");
+    if (!b) return;
+    $$("#rec-dir button").forEach(x => x.classList.toggle("on", x === b));
+    syncRecDir();
+    runRecommend();
+  });
+  $("#rec-q").oninput = renderRecommend;
+  $("#rec-queue").onchange = () => {
+    $("#rec-queue-opts").style.display = $("#rec-queue").checked ? "" : "none";
+    runRecommend();
+  };
+  $("#rec-maxq").oninput = runRecommend;
+  $("#rec-obj").addEventListener("change", runRecommend);
+  ["#rec-tpm", "#rec-tos", "#rec-cards"].forEach(id => { $(id).oninput = runRecommend; });
+  mountAdvanced("rec", false);
+  syncRecDir();
+  seg("#rec-kvq", runRecommend);
+
 
   // 推理框架 / 推测解码（三页各一份实例）
   const engGroups = () => [{ label: "", items: ENGINES.map(e => ({ v: e.id, n: engineName(e), m: engineNote(e) })) }];
@@ -775,7 +845,9 @@ async function boot() {
   CS["pl-eng"] = cselect($("#pl-eng"), engGroups(), { search: false, onChange: runPlan });
   CS["pl-spec"] = cselect($("#pl-spec"), specGroups(), { search: false, onChange: runPlan });
 
-  // 默认值
+  CS["rec-eng"].set("auto", true); CS["rec-spec"].set("none", true);
+  CS["rec-model"].set("deepseek-r1", true); CS["rec-hw"].set("rtx4090", true);
+  CS["rec-qonly"].set("", true); CS["rec-preset"].set("balanced", true);
   CS["f-hw"].set("rtx4090", true); CS["f-ctx"].set("8192", true);
   CS["p-hw"].set("rtx4090", true); CS["p-model"].set("llama-3.1-70b", true);
   CS["p-quant"].set("q4km", true);
@@ -802,7 +874,7 @@ async function boot() {
 
   wire();
   wireCustom();
-  runFit(); runPerf(); runPlan();
+  runFit(); runPerf(); runPlan(); runRecommend();
   renderHWTable(); renderModelTable(); renderQuickTable(); renderGlossary();
 }
 
@@ -1286,6 +1358,130 @@ function detailCard(label, value, sub = "") {
     (sub ? `<div class="detail-sub">${escapeHTML(sub)}</div>` : "") + "</div>";
 }
 
+let recResults = [], recBody = null, recPage = 0;
+
+function objectivesSelected() {
+  return $$("#rec-obj input:checked").map(x => x.value).slice(0, 2);
+}
+
+function recommendationWorkload() {
+  return recWorkloads.map(x => ({ context: Math.round(x.context), output: Math.round(x.output), share: x.share / 100, prefix_hit: x.prefix_hit / 100 }));
+}
+
+function recommendationLabel(p) {
+	const h = p.plan.hw;
+	const spec = p.plan.spec_name && p.plan.spec_name !== tr("Off", "关闭") ? ` · ${p.plan.spec_name}` : "";
+	return `${h.name}${repMark(h.conf)} · ${p.plan.qname}${spec}`;
+}
+
+// aria-label 等属性位置必须用纯文本（repMark 含双引号会截断属性）。
+function recommendationText(p) {
+	return recommendationLabel(p).replace(/<[^>]*>/g, "").replace(/"/g, "'");
+}
+
+function renderRecommendLine(body, result) {
+  const dir = body.direction === "card" ? tr("I have hardware", "我有硬件") : tr("I have a model", "我有模型");
+  const objectives = (result?.objectives || []).map(o => OBJECTIVE_LABEL[o] || o).join(" + ");
+  $("#rec-line").innerHTML =
+    `<span class="dv-name">${dir}</span>` +
+    `<span class="mono">${tr("Target", "目标")} ${body.direction === "model" ? fmt.tpm(body.tpm) : tr("fixed card", "固定卡数")}</span>` +
+    `<span class="mono">${tr("Objectives", "取舍")} ${objectives || tr("lowest cost", "最低成本")}</span>` +
+    `<span class="mono">${result?.limit || 0} ${tr("prescriptions", "个处方")}</span>`;
+}
+
+function renderRecommend() {
+  const list = recResults.filter(p => !$("#rec-q").value || recommendationText(p).toLowerCase().includes($("#rec-q").value.toLowerCase()));
+  if (!list.length) {
+    $("#recList").innerHTML = `<div class="empty">${tr("No prescription fits the current constraints.", "当前约束下没有可推荐处方。")}</div>`;
+    $("#rec-pager").innerHTML = "";
+    return;
+  }
+  const ps = 8;
+  const pages = Math.ceil(list.length / ps);
+  if (recPage >= pages) recPage = pages - 1;
+  const base = recPage * ps;
+  const shown = list.slice(base, base + ps);
+  let html = `<div class="planrow planhead">
+    <span>#</span><span>${tr("Prescription", "处方")}</span><span>${tr("Model / Quant", "模型 / 量化")}</span>
+    <span>${tr("Concurrency", "并发")}</span><span>${tr("TPM", "TPM")}</span><span>${tr("Latency", "时延")}</span><span>${tr("Cost", "成本")}</span><span>${tr("Why", "原因")}</span></div>`;
+  shown.forEach((p, i) => {
+    const plan = p.plan;
+    const h = plan.hw;
+    const score = (p.score * 100).toFixed(1);
+    html += `<div class="planrow rec ${base + i < 3 ? "top3" : ""}" data-rec-detail="${i}" tabindex="0" role="button" aria-label="${tr(`Inspect ${recommendationText(p)}`, `查看 ${recommendationText(p)} 处方详解`)}">
+      <span class="rank">${String(base + i + 1).padStart(2, "0")}</span>
+      <span class="phw">${hardwareName(h)}${repMark(h.conf)}<div class="msub">${tr("Cards", "卡数")} ${plan.n}${plan.replicas > 1 ? tr(` × ${plan.replicas} replicas`, ` × ${plan.replicas} 副本`) : ""} · ${tr("TP", "TP")} ${plan.n}</div></span>
+      <span class="pstrat">${escapeHTML(p.model_name)}<span class="msub">${escapeHTML(plan.qname)}${p.quant_locked ? ` · ${tr("locked", "锁定")}` : ""}</span></span>
+      <span><span class="pk">${tr("CONC", "并发")}</span><span class="pv">${plan.max_conc}</span><div class="msub">${tr("engine", "引擎")} ${escapeHTML(plan.eng_name || "")}</div></span>
+      <span><span class="pk">TPM</span><span class="pv">${fmt.tpm(plan.tpm)}</span><div class="msub">${tr("per replica", "每副本")} ${fmt.tpm(p.per_replica_tpm)}</div></span>
+      <span><span class="pk">P95 ${tr("single", "单流")}</span><span class="pv">${fmt.tps(plan.p95_single_tps)}</span><div class="msub">TTFT ${fmt.ms(plan.ttft_ms)} · P95 ${fmt.ms(plan.p95_req_ms)}</div></span>
+      <span><span class="pk">COST</span><span class="pv">${plan.monthly ? fmt.cny(plan.monthly) : tr("Contact", "面议")}</span><div class="msub">${tr("score", "得分")} ${score}</div></span>
+      <span><span class="pk">${tr("WHY", "原因")}</span><span class="pv" style="font-family:var(--sans);font-size:12px;line-height:1.5">${escapeHTML(p.reason)}</span></span>
+      ${p.advice ? `<div class="warn">▸ ${escapeHTML(p.advice)}</div>` : ""}
+    </div>`;
+  });
+  $("#recList").innerHTML = html;
+  $("#rec-pager").innerHTML = pages > 1
+    ? `<button class="minibtn" id="rec-prev" ${recPage === 0 ? "disabled" : ""}>‹ ${tr("Previous", "上一页")}</button>
+       <span class="mono">${tr(`Page ${recPage + 1} / ${pages} · ${list.length} items`, `第 ${recPage + 1} / ${pages} 页 · 共 ${list.length} 条`)}</span>
+       <button class="minibtn" id="rec-next" ${recPage >= pages - 1 ? "disabled" : ""}>${tr("Next", "下一页")} ›</button>`
+    : `<span class="mono dim2">${tr(`${list.length} items`, `共 ${list.length} 条`)}</span>`;
+  $$("#recList [data-rec-detail]").forEach((row, i) => {
+    row.onclick = () => openPlanDetail(shown[i].plan, row, {
+      direction: recBody.direction === "card" ? "card" : "model",
+      model: recBody.model,
+      custom: recBody.custom,
+      objectives: recBody.objectives,
+      workload: recBody.workload,
+      engine: shown[i].engine_id,
+      spec: shown[i].spec,
+      kvq: shown[i].kvq,
+      cards: recBody.cards,
+      tpm: recBody.tpm,
+      advanced: recBody.advanced,
+      rec: shown[i],
+    });
+    row.onkeydown = e => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        row.onclick();
+      }
+    };
+  });
+  if (pages > 1) {
+    $("#rec-prev").onclick = () => { recPage--; renderRecommend(); };
+    $("#rec-next").onclick = () => { recPage++; renderRecommend(); };
+  }
+}
+
+async function runRecommend() {
+  const run = ++recRun;
+  if (!CS["rec-model"] || !CS["rec-hw"]) return;
+  const direction = $("#rec-dir button.on")?.dataset.v || "model";
+  const body = {
+    direction,
+    model: CS["rec-model"].get(),
+    hw: CS["rec-hw"].get(),
+    objectives: objectivesSelected().join(","),
+    tpm: +$("#rec-tpm").value, tos: +$("#rec-tos").value,
+    quant_only: CS["rec-qonly"].get() || "",
+    workload: recommendationWorkload(),
+    conc: 1,
+    queue: $("#rec-queue").checked, maxq: +$("#rec-maxq").value,
+    eng: CS["rec-eng"].get(), spec: CS["rec-spec"].get(), kvq: $("#rec-kvq button.on")?.dataset.v || "fp16",
+    advanced: advancedOpts("rec"), lang,
+  };
+  if (direction === "model" && customOn) body.custom = customModel();
+  const data = await post("/api/recommend", body);
+  if (run !== recRun) return;
+  recBody = body;
+  recResults = data?.picks || [];
+  recPage = 0;
+  renderRecommendLine(body, data);
+  renderRecommend();
+}
+
+
 function planAdvice(plan, perf, model, quant, body) {
   const items = [];
   const add = (level, title, text) => items.push({ level, title, text });
@@ -1364,9 +1560,9 @@ function planAdvice(plan, perf, model, quant, body) {
   return items;
 }
 
-function renderPlanDetail(plan, perf) {
-  const body = lastPlanBody;
-  const model = body.custom || MODELS.find(m => m.id === body.model) || {};
+function renderPlanDetail(plan, perf, override = null) {
+  const body = override || lastPlanBody;
+  const model = body.custom || MODELS.find(m => m.id === (override?.model ?? body.model)) || {};
   const quant = QUANTS.find(q => q.id === perf.quant) || { name: plan.qname };
   const advice = planAdvice(plan, perf, model, quant, body);
   const hasBad = advice.some(a => a.level === "bad");
@@ -1406,11 +1602,21 @@ function renderPlanDetail(plan, perf) {
     `<tr><td>${escapeHTML(row.k)}</td><td class="formula">${escapeHTML(row.v)}</td><td>${escapeHTML(row.n)}</td></tr>`).join("");
 
   $("#planDetailBody").innerHTML = `
+    ${override?.rec ? `<section class="detail-section"><h3>${tr("Prescription rationale", "处方理由")}</h3>
+      <div class="detail-grid">
+        ${detailCard(tr("Recommendation score", "推荐得分"), (override.rec.score * 100).toFixed(1), override.rec.objective_key || tr("pareto", "多目标"))}
+        ${detailCard(tr("Objective wins", "目标胜场"), String(override.rec.objective_wins ?? 0), tr("within candidate set", "候选集内"))}
+        ${detailCard(tr("Cards", "卡数"), String(plan.n), plan.replicas > 1 ? tr(`${plan.replicas} replicas`, `${plan.replicas} 副本`) : tr("single replica", "单副本"))}
+        ${detailCard(tr("Max concurrency", "最大并发"), String(plan.max_conc), tr("derived from memory and latency budget", "由显存与时延预算推导"))}
+      </div>
+      <div class="detail-callout"><strong>${tr("Reason", "原因")}：</strong>${escapeHTML(override.rec.reason)}</div>
+      ${override.rec.advice ? `<div class="detail-callout"><strong>${tr("Advice", "建议")}：</strong>${escapeHTML(override.rec.advice)}</div>` : ""}
+    </section>` : ""}
     <div class="detail-hero">
       <div class="detail-verdict ${verdictClass}"><span class="detail-label">${tr("Beginner verdict", "小白结论")}</span><span class="detail-value">${verdict}</span><div class="detail-sub">${escapeHTML(model.name || body.model)} · ${escapeHTML(plan.qname)}</div></div>
       <div><span class="detail-label">${tr("Deployment shape", "部署规模")}</span><span class="detail-value">${plan.n} × ${plan.replicas} = ${totalCards}</span><div class="detail-sub">${tr("cards/replica × replicas = total cards", "每副本卡数 × 副本数 = 总卡数")}</div></div>
       <div><span class="detail-label">${tr("Single stream μ / P95", "单流 μ / P95")}</span><span class="detail-value">${fmt.tps(plan.single_tps)} / ${fmt.tps(plan.p95_single_tps)}</span><div class="detail-sub">output tok/s · TPOT ${fmt.ms(plan.tpot_ms)}</div></div>
-      <div><span class="detail-label">${tr("Cluster mixed capacity", "集群混合容量")}</span><span class="detail-value">${fmt.tpm(plan.tpm)}</span><div class="detail-sub">input + output tok/min · ${tr("target", "目标")} ${fmt.tpm(body.tpm)}</div></div>
+      <div><span class="detail-label">${tr("Cluster mixed capacity", "集群混合容量")}</span><span class="detail-value">${fmt.tpm(plan.tpm)}</span><div class="detail-sub">input + output tok/min · ${tr("target", "目标")} ${fmt.tpm(override?.tpm ?? body.tpm)}</div></div>
     </div>
 
     <section class="detail-section"><h3>${tr("What you should do", "你应该怎么做")}</h3>
@@ -1475,8 +1681,9 @@ function renderPlanDetail(plan, perf) {
     </section>`;
 }
 
-async function openPlanDetail(plan, trigger) {
-  if (!lastPlanBody) return;
+
+async function openPlanDetail(plan, trigger, override = null) {
+  if (!override && !lastPlanBody) return;
   const run = ++planDetailRun;
   planDetailTrigger = trigger;
   const modal = $("#planDetailModal");
@@ -1485,16 +1692,16 @@ async function openPlanDetail(plan, trigger) {
   modal.hidden = false;
   document.body.classList.add("modal-open");
   $(".plan-modal-close").focus();
-  const body = lastPlanBody;
+  const body = override || lastPlanBody;
   try {
     const data = await post("/api/perf", {
-      hw: plan.hw.id, n: plan.n, model: body.model, custom: body.custom,
-      quant: plan.quant, workload: body.workload, batch: plan.max_conc,
-      eng: body.eng, spec: body.spec, kvq: body.kvq, advanced: body.advanced, lang,
+      hw: plan.hw.id, n: plan.n, model: override?.model ?? body.model, custom: override?.custom ?? body.custom,
+      quant: plan.quant, workload: override?.workload ?? body.workload, batch: plan.max_conc,
+      eng: override?.engine ?? body.eng, spec: override?.spec ?? body.spec, kvq: override?.kvq ?? body.kvq, advanced: override?.advanced ?? body.advanced, lang,
     });
     if (run !== planDetailRun) return;
     if (!data?.perf) throw new Error(data?.error || tr("No detail returned", "接口未返回明细"));
-    renderPlanDetail(plan, data.perf);
+    renderPlanDetail(plan, data.perf, override);
   } catch (err) {
     if (run === planDetailRun) {
       $("#planDetailBody").innerHTML = `<div class="empty">${escapeHTML(tr(`Unable to load detail: ${err.message}`, `无法加载明细：${err.message}`))}</div>`;
@@ -1627,5 +1834,6 @@ function positioning(r) {
   if (r.max_int4 >= 12) return tr("Quantized 7B–14B models", "7B–14B 量化");
   return tr("Small models / edge", "小模型 / 边缘");
 }
+
 
 boot();

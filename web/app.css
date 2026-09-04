@@ -417,6 +417,7 @@ input[type=range]::-moz-range-thumb {
   padding: 16px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0;
   background: var(--panel); transition: background .15s;
 }
+.planrow.rec { grid-template-columns: 42px 1.2fr 1fr .65fr .75fr .95fr .75fr 1.15fr; }
 .planrow:last-child { border-bottom: 0; }
 .planrow:not(.planhead):hover { background: var(--hover); }
 .planrow .rank { font-family: var(--mono); font-size: 20px; color: var(--faint); }
@@ -433,8 +434,8 @@ input[type=range]::-moz-range-thumb {
 }
 .planhead { padding: 10px 16px; border: 0; border-bottom: 1px solid var(--line); background: var(--panel2); }
 .planhead span { font-size: 10px; letter-spacing: .08em; color: var(--faint); font-weight: 700; text-transform: uppercase; }
-.planrow[data-plan-detail] { cursor: pointer; }
-.planrow[data-plan-detail]:focus-visible { outline: 2px solid color-mix(in srgb, var(--acc) 55%, transparent); outline-offset: -2px; }
+.planrow[data-plan-detail], .planrow[data-rec-detail] { cursor: pointer; }
+.planrow[data-plan-detail]:focus-visible, .planrow[data-rec-detail]:focus-visible { outline: 2px solid color-mix(in srgb, var(--acc) 55%, transparent); outline-offset: -2px; }
 
 /* ---------- 方案解释弹窗 ---------- */
 .plan-modal[hidden] { display: none; }

@@ -894,6 +894,7 @@ type Perf struct {
 	DecodeComputeMs float64        `json:"decode_compute_ms"` // 每 decode step 的算力 roof
 	CommMs          float64        `json:"comm_ms"`           // 每 decode step 的 TP collective
 	ScheduleMs      float64        `json:"schedule_ms"`       // 每 decode step 的调度场景值
+	LayerMs         float64        `json:"layer_ms"`          // 每 decode step 的多卡层固定开销
 	OffloadMs       float64        `json:"offload_ms"`
 	EncoderMs       float64        `json:"encoder_ms"`
 	PeakTF          float64        `json:"peak_tf"`
@@ -1034,13 +1035,60 @@ func specDescription(s SpecMethod, lang string) string {
 
 const pcieBW = 25.0 // 无互联时 PCIe4 x16 有效带宽 GB/s
 
+// linkLatencyMs 每个 collective 的小消息延迟下限(ms)。
+// 依据:NCCL 小消息 allreduce 实测延迟 NVLink ~10μs、PCIe ~25μs、
+// IB/RoCE ~20μs、以太网 ~40μs;batch=1 时通信量趋零,延迟主导步时。
+func linkLatencyMs(h HW) float64 {
+	switch h.Link.T {
+	case "nvlink", "xgmi":
+		return 0.010
+	case "hccs":
+		return 0.012
+	case "bridge":
+		return 0.015
+	case "ib", "neuronlink":
+		return 0.020
+	case "unified", "pcie":
+		return 0.025
+	case "ethernet":
+		return 0.040
+	}
+	return 0.030
+}
+
+// collectiveMs n 个 collective 的总耗时:每个取 max(流量时间, latMul×延迟下限)。
+func collectiveMs(h HW, trafficGB float64, n int, latMul float64, o Opts) float64 {
+	if n <= 0 {
+		return 0
+	}
+	per := math.Max(trafficGB/float64(n)/o.linkBW(h)*1000, latMul*linkLatencyMs(h))
+	return per * float64(n)
+}
+
+// layerFixedMs decode 每层 kernel 序列下限(GEMM/attention/路由/同步),
+// 仅多卡:单卡 launch 开销已被 CUDA graph 与引擎 StepMs 吸收。
+// 校准:SGLang R1 TP8 batch=1 实测 21ms/step(47.67 tok/s, verda);
+// Qwen3-235B 8×B200 实测 10.4ms/step(96.65 tok/s, SGLang 官方)。
+// 残差为引擎代际差异,档位目标 ±2×。
+func layerFixedMs(m Model, batch, cards int) float64 {
+	if cards <= 1 {
+		return 0
+	}
+	per := 0.02
+	if m.MoE {
+		per = 0.20 // MoE 分组 GEMM + 路由的 kernel 序列远长于 dense
+	}
+	return float64(m.Layers) * per * 8 / (8 + float64(batch))
+}
+
 func tpCommMs(h HW, m Model, tokens float64, t topology, o Opts) float64 {
 	if t.tp <= 1 {
 		return 0
 	}
-	// 每层 attention/MLP 各一次 AllReduce；ring 每次传 2*(TP-1)/TP 份 payload。
+	// 每层 attention/MLP 各一次 AllReduce;ring 每次传 2*(TP-1)/TP 份 payload。
 	ring := 2 * float64(t.tp-1) / float64(t.tp)
-	return 2 * ring * float64(m.Layers) * tokens * m.Hidden * 2 / 1e9 / o.linkBW(h) * 1000
+	traffic := 2 * ring * float64(m.Layers) * tokens * m.Hidden * 2 / 1e9
+	return collectiveMs(h, traffic, 2*m.Layers, 1, o)
 }
 
 func routerSkew(m Model, tokens float64, ep int, o Opts) float64 {
@@ -1060,10 +1108,11 @@ func epCommMs(h HW, m Model, tokens float64, t topology, o Opts) float64 {
 	if layers <= 0 {
 		layers = m.Layers
 	}
-	// 每个 MoE 层按 TopK 路由做 dispatch + combine All-to-All。
+	// 每个 MoE 层按 TopK 路由做 dispatch + combine All-to-All;
+	// all2all 小消息延迟约 2× allreduce(DeepEP 低延迟模式实测)。
 	routes := float64(max(1, m.TopK))
 	traffic := 2 * float64(t.ep-1) / float64(t.ep) * float64(layers) * tokens * routes * m.Hidden * 2 / 1e9
-	return traffic * routerSkew(m, tokens, t.ep, o) / o.linkBW(h) * 1000
+	return collectiveMs(h, traffic*routerSkew(m, tokens, t.ep, o), 2*layers, 2, o)
 }
 
 func cpCommMs(h HW, m Model, tokens float64, t topology, o Opts) float64 {
@@ -1071,7 +1120,7 @@ func cpCommMs(h HW, m Model, tokens float64, t topology, o Opts) float64 {
 		return 0
 	}
 	traffic := 2 * float64(t.cp-1) / float64(t.cp) * float64(m.kvLayers()) * tokens * m.Hidden * 2 / 1e9
-	return traffic / o.linkBW(h) * 1000
+	return collectiveMs(h, traffic, 2*m.kvLayers(), 1, o)
 }
 
 func ppCommMs(h HW, m Model, tokens float64, t topology, o Opts) float64 {
@@ -1079,7 +1128,7 @@ func ppCommMs(h HW, m Model, tokens float64, t topology, o Opts) float64 {
 		return 0
 	}
 	traffic := float64(t.pp-1) * tokens * m.Hidden * 2 / 1e9
-	return traffic / o.linkBW(h) * 1000
+	return collectiveMs(h, traffic, 2*(t.pp-1), 1, o)
 }
 
 func commMs(h HW, m Model, tokens float64, t topology, o Opts) float64 {
@@ -1177,7 +1226,8 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	if o.ScheduleMS > 0 {
 		tFixed = o.ScheduleMS
 	}
-	tStep := math.Max(tMem, tCompute) + tComm + tFixed
+	tLayer := layerFixedMs(m, batch, cards)
+	tStep := math.Max(tMem, tCompute) + tComm + tFixed + tLayer
 	p.Bottleneck = "memory"
 	if tCompute > tMem {
 		p.Bottleneck = "compute"
@@ -1187,7 +1237,7 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	p.DecodeMemMs = round2(tMem)
 	p.DecodeComputeMs = round2(tCompute)
 	p.CommMs = round2(tComm)
-	p.ScheduleMs = round2(tFixed)
+	p.LayerMs = round2(tLayer)
 	p.OffloadMs = round2(tOffload)
 
 	specScenario := spec
@@ -1199,8 +1249,8 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	}
 	g := specScenario.gain(batch)
 	modelSpecOK := spec.ID != "mtp" || m.MTP || m.MTPHeads > 0
-	specCalibrated := o.SpecTau > 0 && o.SpecOvh > 0
-	specOK := spec.ID == "none" || (modelSpecOK && specCalibrated)
+	// 档位自带论文口径的 τ/Ovh 预设,模型支持即生效;用户实测值优先覆盖。
+	specOK := spec.ID == "none" || modelSpecOK
 	if !specOK {
 		g = 1
 	}
@@ -1327,7 +1377,7 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 				fmt.Sprintf("%s; TP %.2f + EP %.2f + CP %.2f + PP %.2f ms", commNote(h, t, o), tpComm, epComm, cpComm, ppComm),
 				fmt.Sprintf("%s；TP %.2f + EP %.2f + CP %.2f + PP %.2f ms", commNote(h, t, o), tpComm, epComm, cpComm, ppComm))),
 		tr(localText(o.Lang, "Step time", "单步耗时"), fmt.Sprintf("%.2f ms", tStep),
-			localText(o.Lang, fmt.Sprintf("roofline + communication + %.2fms scheduling (%s)", tFixed, eng.Name), fmt.Sprintf("roofline + 通信 + 调度 %.2fms（%s）", tFixed, eng.Name))),
+			localText(o.Lang, fmt.Sprintf("roofline + communication + %.2fms per-layer kernels + %.2fms scheduling (%s)", tLayer, tFixed, eng.Name), fmt.Sprintf("roofline + 通信 + 层固定 %.2fms + 调度 %.2fms（%s）", tLayer, tFixed, eng.Name))),
 	}
 	if o.KVOffload > 0 {
 		p.Trace = append(p.Trace, tr("KV offload", fmt.Sprintf("%.2f ms/step", tOffload),
@@ -1339,8 +1389,8 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 		note := specNote(specScenario, batch, o.Lang)
 		if !modelSpecOK {
 			note = localText(o.Lang, "⚠ The model has no MTP-head metadata; acceleration is not applied", "⚠ 模型没有 MTP 头元数据，本次不应用加速")
-		} else if !specCalibrated {
-			note = localText(o.Lang, "⚠ Measured accepted tokens τ and draft/verify overhead are both required; acceleration is not applied", "⚠ 未同时填写实测接受 token τ 与 draft/verify 开销，本次不应用加速")
+		} else if o.SpecTau <= 0 || o.SpecOvh <= 0 {
+			note = localText(o.Lang, "Using the method's paper-grade τ/overhead preset; measured values can override", "使用档位论文口径 τ/开销预设，可填实测值覆盖")
 		}
 		p.Trace = append(p.Trace,
 			tr(localText(o.Lang, "Speculative decoding", "推测解码"), fmt.Sprintf("%s ×%.2f", specDisplay(spec, o.Lang), g), note),
@@ -1862,6 +1912,57 @@ type Plan struct {
 	Warn         string  `json:"warn,omitempty"`
 }
 
+// ---------- 确定性处方推荐 ----------
+
+// RecommendOpts 描述部署处方搜索的两个方向与目标组合。
+// 只使用同一计算器内部的确定性公式与剪枝规则，不调用外部 LLM。
+type RecommendOpts struct {
+	Direction  string  `json:"direction"`  // model | card
+	HW         string  `json:"hw"`         // direction=card 时的固定硬件
+	Cards      int     `json:"cards"`      // 已持有卡数（模型模式也可作为最大单副本卡数）
+	Objectives string  `json:"objectives"` // cost | tos | tpm | avail，逗号分隔最多两个
+	TargetTPM  float64 `json:"tpm"`
+	MinTOS     float64 `json:"tos"`
+	QuantOnly  string  `json:"quant_only"`
+	Queue      bool    `json:"queue"`
+	MaxQ       int     `json:"maxq"`
+	Conc       int     `json:"conc"`
+	Limit      int     `json:"limit"`
+}
+
+// Prescription 是一个可执行配置：某个量化×推理栈×拓扑×并发的最终结果。
+type Prescription struct {
+	Plan           Plan    `json:"plan"`
+	ModelID        string  `json:"model_id"`
+	ModelName      string  `json:"model_name"`
+	EngineID       string  `json:"engine_id"`
+	KVQuant        string  `json:"kvq"`
+	SpecID         string  `json:"spec"`
+	QuantLocked    bool    `json:"quant_locked"`
+	HWAccel        bool    `json:"hw_accel"`
+	EngineOK       bool    `json:"engine_ok"`
+	TopologyOK     bool    `json:"topology_ok"`
+	WorkPerReplica float64 `json:"per_replica_tpm"` // 单副本混合 TPM
+	Topology       string  `json:"topology"`
+	PeakTF         float64 `json:"peak_tf"`
+	Accuracy       string  `json:"accuracy"`
+	MemoryP999GB   float64 `json:"p999_gb"`
+	HeadroomPct    float64 `json:"headroom_pct"`
+	Score          float64 `json:"score"`
+	ObjectiveWins  int     `json:"objective_wins"`
+	Reason         string  `json:"reason"`
+	Advice         string  `json:"advice"`
+	Explain        string  `json:"explain"`
+}
+
+// RecommendResult 按用户选中的 1–2 个目标返回 Pareto/处方排序。
+type RecommendResult struct {
+	Objectives []string       `json:"objectives"`
+	Limit      int            `json:"limit"`
+	Pareto     []Prescription `json:"pareto"`
+	Picks      []Prescription `json:"picks"`
+}
+
 const maxReplicas = 64 // 防止离谱目标生成几百副本的方案
 
 func Planner(hws []HW, m Model, po PlanOpts, workload []WorkloadBucket, conc int, st Opts) []Plan {
@@ -2144,6 +2245,475 @@ func planBetter(objective string) func(a, b Plan) bool {
 func sortPlans(plans []Plan, objective string) {
 	better := planBetter(objective)
 	sort.SliceStable(plans, func(i, j int) bool { return better(plans[i], plans[j]) })
+}
+
+func parseRecommendObjectives(s string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, part := range strings.Split(strings.ToLower(s), ",") {
+		part = strings.TrimSpace(part)
+		if part == "" || seen[part] {
+			continue
+		}
+		switch part {
+		case "cost", "tos", "tpm", "avail":
+			out = append(out, part)
+			seen[part] = true
+		}
+	}
+	if len(out) > 2 {
+		out = out[:2]
+	}
+	if len(out) == 0 {
+		out = []string{"cost"}
+	}
+	return out
+}
+
+func recommendPlanningObjective(objectives []string) string {
+	if len(objectives) == 0 {
+		return "cost"
+	}
+	switch objectives[0] {
+	case "tpm":
+		return "latency"
+	case "avail":
+		return "avail"
+	default: // cost/tos 都以单流下限硬约束 + 成本排序最稳
+		return "cost"
+	}
+}
+
+func planMonthly(p Plan) float64 {
+	if p.Monthly <= 0 {
+		return 1e12
+	}
+	return p.Monthly
+}
+
+func rankPrescriptions(items []Prescription, objectives []string) {
+	// 每个目标先按候选集合做 0..1 归一，再平均；目标越多，分数越稳健。
+	if len(items) == 0 {
+		return
+	}
+	costVals := make([]float64, len(items))
+	tosVals := make([]float64, len(items))
+	tpmVals := make([]float64, len(items))
+	availVals := make([]float64, len(items))
+	for i := range items {
+		costVals[i] = planMonthly(items[i].Plan)
+		tosVals[i] = items[i].Plan.P95SingleTPS
+		tpmVals[i] = items[i].Plan.TPM
+		availVals[i] = availScoreOf(items[i].Plan)
+	}
+	for i := range items {
+		score := 0.0
+		for _, obj := range objectives {
+			switch obj {
+			case "cost":
+				score += normalizeLower(costVals, planMonthly(items[i].Plan))
+			case "tos":
+				score += normalizeHigher(tosVals, items[i].Plan.P95SingleTPS)
+			case "tpm":
+				score += normalizeHigher(tpmVals, items[i].Plan.TPM)
+			case "avail":
+				score += normalizeHigher(availVals, availScoreOf(items[i].Plan))
+			}
+		}
+		if len(objectives) > 0 {
+			score /= float64(len(objectives))
+		}
+		if items[i].Plan.Warn != "" {
+			score *= 0.72
+		}
+		if items[i].Plan.MemoryP999 > 0 && items[i].HeadroomPct < 0.05 {
+			score *= 0.65
+		}
+		items[i].Score = round4(score)
+		wins := 0
+		for _, obj := range objectives {
+			best := true
+			for j := range items {
+				if j == i {
+					continue
+				}
+				if prescriptionMetric(items[j], obj) > prescriptionMetric(items[i], obj) {
+					best = false
+					break
+				}
+			}
+			if best {
+				wins++
+			}
+		}
+		items[i].ObjectiveWins = wins
+	}
+}
+
+func normalizeLower(vals []float64, v float64) float64 {
+	minv := math.Inf(1)
+	for _, x := range vals {
+		if x < minv {
+			minv = x
+		}
+	}
+	if math.IsInf(minv, 0) || math.IsNaN(minv) || minv <= 0 {
+		return 0
+	}
+	return minv / v
+}
+
+func normalizeHigher(vals []float64, v float64) float64 {
+	maxv := 0.0
+	for _, x := range vals {
+		if x > maxv {
+			maxv = x
+		}
+	}
+	if maxv <= 0 {
+		return 0
+	}
+	return v / maxv
+}
+
+func prescriptionAdvice(p Prescription, st Opts, lang string) string {
+	var a []string
+	if !p.EngineOK {
+		a = append(a, localText(lang, "Engine compatibility is weak", "引擎兼容性较弱"))
+	}
+	if !p.HWAccel && !p.QuantLocked {
+		a = append(a, localText(lang, "This card does not accelerate the selected weight precision; use it for memory savings, not compute speed", "该卡不加速所选权重精度；它主要省显存，不提速"))
+	}
+	if st.KVQuant != "fp16" && !st.kvSupported(p.Plan.HW, resolveEngine(st.Engine, p.Plan.HW, QuantByID(p.Plan.Quant))) {
+		a = append(a, localText(lang, "Selected KV format falls back to FP16 accounting; re-check support before buying", "所选 KV 格式按 FP16 回退；采购前务必确认支持"))
+	}
+	if p.Plan.Replicas == 1 {
+		a = append(a, localText(lang, "Single replica means one failure takes the service down", "单副本意味着一个故障就会让服务不可用"))
+	}
+	if p.Plan.UtilPct >= 80 {
+		a = append(a, localText(lang, "Target load is close to capacity; leave burst and tail latency headroom", "目标负载已接近容量，需为突发和尾延迟留余量"))
+	}
+	if p.Plan.MemoryP999 > 0 && p.HeadroomPct < 0.1 {
+		a = append(a, localText(lang, "Memory margin is tight; lower concurrency or KV precision on a supported path", "显存余量偏紧；建议降并发，或在受支持路径下降 KV 精度"))
+	}
+	if len(a) == 0 {
+		a = append(a, localText(lang, "This preset is internally consistent; still validate with a matching benchmark before SLA or procurement", "该处方在规则内自洽；采购或承诺 SLA 前仍需用同口径基准压测"))
+	}
+	a = append(a, localText(lang,
+		fmt.Sprintf("KV %s is included in the estimate when supported", strings.ToUpper(p.KVQuant)),
+		fmt.Sprintf("KV %s 在支持时已计入估算", strings.ToUpper(p.KVQuant))))
+	return strings.Join(a, "；")
+}
+
+func prescriptionFromPlan(p Plan, st Opts, lang string) Prescription {
+	return Prescription{
+		Plan:           p,
+		EngineID:       st.Engine,
+		KVQuant:        st.KVQuant,
+		SpecID:         st.Spec,
+		QuantLocked:    false,
+		HWAccel:        false,
+		EngineOK:       true,
+		TopologyOK:     true,
+		WorkPerReplica: p.TPM / float64(max(1, p.Replicas)),
+		Accuracy:       "analytical",
+		MemoryP999GB:   round1(p.MemoryP999),
+	}
+}
+
+func prescriptionReason(p Prescription, objectives []string, lang string) string {
+	parts := []string{
+		localText(lang,
+			fmt.Sprintf("Pick %s: %s + %s, %s, TP%d × %d replicas", p.Plan.HW.Name, p.Plan.QName, p.Plan.EngName, p.Plan.Strategy, p.Plan.N, p.Plan.Replicas),
+			fmt.Sprintf("推荐 %s：%s + %s，%s，TP%d × %d 副本", p.Plan.HW.Name, p.Plan.QName, p.Plan.EngName, p.Plan.Strategy, p.Plan.N, p.Plan.Replicas)),
+		localText(lang,
+			fmt.Sprintf("total cards %d, per-replica concurrency %d, mixed capacity %.1f tok/min", p.Plan.N*p.Plan.Replicas, p.Plan.MaxConc, p.Plan.TPM),
+			fmt.Sprintf("总卡 %d 张、单副本并发 %d、混合容量 %.1f tok/min", p.Plan.N*p.Plan.Replicas, p.Plan.MaxConc, p.Plan.TPM)),
+	}
+	for _, obj := range objectives {
+		switch obj {
+		case "cost":
+			parts = append(parts, localText(lang, fmt.Sprintf("cost-first (monthly %.1f CNY)", planMonthly(p.Plan)), fmt.Sprintf("成本优先（月租 %.1f 元）", planMonthly(p.Plan))))
+		case "tos":
+			parts = append(parts, localText(lang, fmt.Sprintf("latency-first (P95 %.1f tok/s)", p.Plan.P95SingleTPS), fmt.Sprintf("单流优先（P95 %.1f tok/s）", p.Plan.P95SingleTPS)))
+		case "tpm":
+			parts = append(parts, localText(lang, fmt.Sprintf("throughput-first (%.1f tok/min)", p.Plan.TPM), fmt.Sprintf("吞吐优先（%.1f tok/min）", p.Plan.TPM)))
+		case "avail":
+			parts = append(parts, localText(lang, "availability-first (replica redundancy + enterprise class)", "可用性优先（副本冗余 + 企业级硬件）"))
+		}
+	}
+	if p.HWAccel {
+		parts = append(parts, localText(lang, fmt.Sprintf("%s is hardware-accelerated on this card", p.Plan.QName), fmt.Sprintf("%s 在该卡有原生加速", p.Plan.QName)))
+	} else if p.QuantLocked {
+		parts = append(parts, localText(lang, fmt.Sprintf("%s is a locked format; this card is treated as compatible/fallback", p.Plan.QName), fmt.Sprintf("%s 是锁定格式，该卡按兼容/回退口径计算", p.Plan.QName)))
+	}
+	return strings.Join(parts, "；")
+}
+
+func fillPrescriptionPerf(pres *Prescription, pf Perf) {
+	pres.QuantLocked = pres.QuantLocked || pf.QuantLocked
+	pres.HWAccel = pf.Accel
+	pres.EngineOK = pf.EngOK
+	pres.TopologyOK = pf.TopologyOK
+	pres.Topology = pf.Topology
+	pres.PeakTF = round1(pf.PeakTF)
+	pres.Accuracy = pf.Accuracy
+	pres.MemoryP999GB = round1(pf.Mem.P999Total)
+	if pf.Mem.Cap > 0 {
+		pres.HeadroomPct = round4(math.Max(0, (pf.Mem.Cap-pf.Mem.P999Total)/pf.Mem.Cap))
+	}
+}
+
+// recommendForModel 从模型出发，枚举硬件×量化×副本，返回处方而非“模型可装哪里”。
+func recommendForModel(hws []HW, m Model, workload []WorkloadBucket, opts RecommendOpts, st Opts) []Prescription {
+	objectives := parseRecommendObjectives(opts.Objectives)
+	po := PlanOpts{
+		TargetTPM: opts.TargetTPM,
+		MinTOS:    opts.MinTOS,
+		Objective: recommendPlanningObjective(objectives),
+		Queue:     opts.Queue,
+		MaxQ:      opts.MaxQ,
+		QuantOnly: opts.QuantOnly,
+	}
+	if po.TargetTPM <= 0 {
+		po.TargetTPM = 6000
+	}
+	if po.MaxQ <= 0 {
+		po.MaxQ = 256
+	}
+	if opts.Cards <= 0 {
+		opts.Cards = 1
+	}
+
+	var out []Prescription
+	for _, h := range hws {
+		if h.Svc {
+			continue
+		}
+		if locked := QuantByID(m.FixedQuantID()); locked.ID != "" && !h.Accel(locked) {
+			continue // 预量化检查点需要硬件原生路径，不能用“省显存”掩盖不兼容
+		}
+		// 先按现有 Planner 求一个合规集合，再补处方所需的 Perf 细节。
+		plans := Planner([]HW{h}, m, po, workload, max(1, opts.Conc), st)
+		for _, p := range plans {
+			pf := ThroughputWorkload(h, m, QuantByID(p.Quant), workload, p.MaxConc, p.N, st)
+			if !pf.Fit || pf.Workload == nil {
+				continue
+			}
+			pres := prescriptionFromPlan(p, st, st.Lang)
+			pres.ModelID = m.ID
+			pres.ModelName = m.Name
+			pres.QuantLocked = m.FixedQuantID() != ""
+			fillPrescriptionPerf(&pres, pf)
+			pres.Reason = prescriptionReason(pres, objectives, st.Lang)
+			pres.Advice = prescriptionAdvice(pres, st, st.Lang)
+			out = append(out, pres)
+		}
+	}
+	return out
+}
+
+// recommendForCard 从硬件出发，枚举模型×量化×栈，返回可部署的处方集合。
+func recommendForCard(models []Model, h HW, workload []WorkloadBucket, opts RecommendOpts, st Opts) []Prescription {
+	_ = parseRecommendObjectives(opts.Objectives)
+	if opts.Cards <= 0 {
+		opts.Cards = 1
+	}
+	var out []Prescription
+	for _, m := range models {
+		if m.Conf != "official" {
+			continue // 卡片模式只推荐人工收录的官方模型，避免采集仓库噪声
+		}
+		if fixed := QuantByID(m.FixedQuantID()); fixed.ID != "" && !h.Accel(fixed) {
+			continue // 预量化检查点需要硬件原生路径，不能用“省显存”掩盖不兼容
+		}
+		quants := Quants
+		if fixed := m.FixedQuantID(); fixed != "" {
+			quants = []Quant{QuantByID(fixed)}
+		} else if opts.QuantOnly != "" {
+			quants = nil
+			for _, q := range Quants {
+				if q.ID == opts.QuantOnly {
+					quants = append(quants, q)
+				}
+			}
+			if len(quants) == 0 {
+				quants = Quants
+			}
+		}
+		for _, q := range quants {
+			eng := resolveEngine(st.Engine, h, q)
+			if !eng.EngineOK(h) {
+				continue
+			}
+			pf := ThroughputWorkload(h, m, q, workload, max(1, opts.Conc), opts.Cards, st)
+			if !pf.Fit || pf.Workload == nil {
+				continue
+			}
+			p := Plan{
+				HW: h, N: opts.Cards, Replicas: 1,
+				Quant: q.ID, QName: q.Name,
+				EngName: engineDisplay(eng, st.Lang), SpecName: specDisplay(SpecByID(st.Spec), st.Lang),
+				Single: pf.SingleTPS, Agg: pf.AggTPS, TPM: round1(pf.TPMMixed),
+				CapacityQPS: round4(1 / math.Max(pf.reqSec, 1e-9)), ArrivalQPS: 0,
+				MaxConc: opts.Conc, UtilPct: 0,
+				QueueModel: "none",
+				TTFTms:     pf.TTFTms, TPOTms: pf.TPOTms,
+				P95SingleTPS: pf.Workload.P95SingleTPS, TTFTP95ms: pf.Workload.P95TTFTms,
+				ReqP95ms: pf.Workload.P95ReqMs, ReqP99ms: pf.Workload.P99ReqMs,
+				MeanContext: pf.Workload.MeanContext, P99Context: pf.Workload.P99Context,
+				P999Context: pf.Workload.P999Context, MaxContext: pf.Workload.MaxContext,
+				MemoryP999: pf.Mem.P999Total,
+				CostCNY:    h.CNY * float64(opts.Cards),
+			}
+			elec := h.TDP * float64(opts.Cards) * 0.6 * 24 * 30 / 1000 * 0.8
+			if p.CostCNY > 0 {
+				p.Monthly = p.CostCNY/36 + elec
+				if pf.TPMMixed > 0 {
+					p.PerMtok = p.Monthly / (pf.TPMMixed * 60 * 24 * 30 / 1e6)
+				}
+			}
+			p.Warn = warnOf(h, m, q, pf, st.Lang)
+			pres := prescriptionFromPlan(p, st, st.Lang)
+			pres.ModelID = m.ID
+			pres.ModelName = m.Name
+			pres.QuantLocked = m.FixedQuantID() != ""
+			fillPrescriptionPerf(&pres, pf)
+			pres.Reason = prescriptionReason(pres, parseRecommendObjectives(opts.Objectives), st.Lang)
+			pres.Advice = prescriptionAdvice(pres, st, st.Lang)
+			out = append(out, pres)
+		}
+	}
+	return out
+}
+
+func dedupePrescriptions(items []Prescription) []Prescription {
+	seen := map[string]int{}
+	out := items[:0]
+	for _, p := range items {
+		key := p.ModelID + "|" + p.Plan.HW.ID + "|" + p.Plan.Quant + "|" + p.Plan.EngName + "|" + p.Plan.SpecName
+		if i, ok := seen[key]; ok {
+			if p.Plan.TPM > out[i].Plan.TPM || (p.Plan.TPM == out[i].Plan.TPM && planCost(p.Plan) < planCost(out[i].Plan)) {
+				out[i] = p
+			}
+			continue
+		}
+		seen[key] = len(out)
+		out = append(out, p)
+	}
+	return out
+}
+
+// Recommend 生成确定性处方。direction=model 表示“这个模型怎么配”，direction=card 表示“这张卡能部署什么”。
+func Recommend(hws []HW, models []Model, m Model, workload []WorkloadBucket, opts RecommendOpts, st Opts) RecommendResult {
+	objectives := parseRecommendObjectives(opts.Objectives)
+	workload = normalizeWorkload(workload)
+	if len(workload) == 0 {
+		return RecommendResult{Objectives: objectives, Limit: opts.Limit}
+	}
+
+	var items []Prescription
+	if opts.Direction == "card" {
+		if opts.Cards <= 0 {
+			opts.Cards = 1
+		}
+		for _, h := range hws {
+			if h.ID == opts.HW {
+				items = recommendForCard(models, h, workload, opts, st)
+				break
+			}
+		}
+	} else {
+		items = recommendForModel(hws, m, workload, opts, st)
+	}
+	if len(items) == 0 {
+		return RecommendResult{Objectives: objectives, Limit: opts.Limit}
+	}
+
+	items = dedupePrescriptions(items)
+	rankPrescriptions(items, objectives)
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].Score != items[j].Score {
+			return items[i].Score > items[j].Score
+		}
+		if items[i].Plan.TPM != items[j].Plan.TPM {
+			return items[i].Plan.TPM > items[j].Plan.TPM
+		}
+		if planCost(items[i].Plan) != planCost(items[j].Plan) {
+			return planCost(items[i].Plan) < planCost(items[j].Plan)
+		}
+		if items[i].Plan.P95SingleTPS != items[j].Plan.P95SingleTPS {
+			return items[i].Plan.P95SingleTPS > items[j].Plan.P95SingleTPS
+		}
+		if items[i].Plan.HW.ID != items[j].Plan.HW.ID {
+			return items[i].Plan.HW.ID < items[j].Plan.HW.ID
+		}
+		return items[i].Plan.Quant < items[j].Plan.Quant
+	})
+
+	// Pareto：保留在任一目标下不可支配的方案，避免“单一答案”误导。
+	pareto := make([]Prescription, 0, len(items))
+	for i, a := range items {
+		dominated := false
+		for j, b := range items {
+			if i == j {
+				continue
+			}
+			betterOrEqual := true
+			strict := false
+			for _, obj := range objectives {
+				av, bv := prescriptionMetric(a, obj), prescriptionMetric(b, obj)
+				if bv > av+1e-12 {
+					strict = true
+				}
+				if av > bv+1e-12 {
+					betterOrEqual = false
+					break
+				}
+			}
+			if betterOrEqual && strict {
+				dominated = true
+				break
+			}
+		}
+		if !dominated {
+			pareto = append(pareto, a)
+		}
+	}
+	if len(pareto) == 0 {
+		pareto = items
+	}
+
+	// 输出上限只影响展示，不影响内部搜索。
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 12
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	if len(pareto) > limit {
+		pareto = pareto[:limit]
+	}
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return RecommendResult{Objectives: objectives, Limit: limit, Pareto: pareto, Picks: items}
+}
+
+func prescriptionMetric(p Prescription, objective string) float64 {
+	switch objective {
+	case "cost":
+		return -planCost(p.Plan)
+	case "tos":
+		return p.Plan.P95SingleTPS
+	case "tpm":
+		return p.Plan.TPM
+	case "avail":
+		return availScoreOf(p.Plan)
+	default:
+		return 0
+	}
 }
 
 func joinWarn(a, b string) string {

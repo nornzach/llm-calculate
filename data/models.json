@@ -373,7 +373,9 @@
   "ctx": 131072,
   "moe": true,
   "conf": "official",
-  "notes": "MoE 32 专家激活 4，MXFP4 原生"
+  "notes": "MoE 32 专家激活 4，MXFP4 原生",
+  "experts": 32,
+  "topk": 4
  },
  {
   "id": "mistral-small-24b",
@@ -440,7 +442,9 @@
   "ctx": 131072,
   "moe": true,
   "conf": "official",
-  "notes": "MoE 128 专家激活 8，本地高 TPS 甜点"
+  "notes": "MoE 128 专家激活 8，本地高 TPS 甜点",
+  "experts": 128,
+  "topk": 8
  },
  {
   "id": "qwen2.5-32b",
@@ -520,7 +524,9 @@
   "dim": 128,
   "ctx": 32768,
   "moe": true,
-  "conf": "official"
+  "conf": "official",
+  "experts": 8,
+  "topk": 2
  },
  {
   "id": "llama-3.1-70b",
@@ -601,7 +607,11 @@
   "ctx": 131072,
   "moe": true,
   "conf": "reported",
-  "notes": "MoE，结构参数为公开报道口径"
+  "notes": "MoE，结构参数为公开报道口径",
+  "experts": 128,
+  "topk": 8,
+  "shared_experts": 1,
+  "moe_layers": 45
  },
  {
   "id": "llama-4-scout",
@@ -618,7 +628,9 @@
   "ctx": 1048576,
   "moe": true,
   "conf": "reported",
-  "notes": "16 专家激活 1，原生 1M 上下文"
+  "notes": "16 专家激活 1，原生 1M 上下文",
+  "experts": 16,
+  "topk": 1
  },
  {
   "id": "gpt-oss-120b",
@@ -635,7 +647,9 @@
   "ctx": 131072,
   "moe": true,
   "conf": "official",
-  "notes": "MoE 128 专家激活 4，单卡 80G 可跑"
+  "notes": "MoE 128 专家激活 4，单卡 80G 可跑",
+  "experts": 128,
+  "topk": 4
  },
  {
   "id": "mixtral-8x22b",
@@ -651,7 +665,9 @@
   "dim": 128,
   "ctx": 65536,
   "moe": true,
-  "conf": "official"
+  "conf": "official",
+  "experts": 8,
+  "topk": 2
  },
  {
   "id": "deepseek-v2",
@@ -669,7 +685,11 @@
   "ctx": 131072,
   "moe": true,
   "conf": "official",
-  "notes": "MLA：KV 压缩一个数量级"
+  "notes": "MLA：KV 压缩一个数量级",
+  "experts": 160,
+  "topk": 6,
+  "shared_experts": 2,
+  "moe_layers": 59
  },
  {
   "id": "qwen3-235b-a22b",
@@ -685,7 +705,9 @@
   "dim": 128,
   "ctx": 131072,
   "moe": true,
-  "conf": "official"
+  "conf": "official",
+  "experts": 128,
+  "topk": 8
  },
  {
   "id": "glm-4.5",
@@ -701,7 +723,11 @@
   "dim": 128,
   "ctx": 131072,
   "moe": true,
-  "conf": "reported"
+  "conf": "reported",
+  "experts": 160,
+  "topk": 8,
+  "shared_experts": 1,
+  "moe_layers": 89
  },
  {
   "id": "llama-4-maverick",
@@ -718,7 +744,9 @@
   "ctx": 1048576,
   "moe": true,
   "conf": "reported",
-  "notes": "128 专家激活 1"
+  "notes": "128 专家激活 1",
+  "experts": 128,
+  "topk": 1
  },
  {
   "id": "llama-3.1-405b",
@@ -751,7 +779,9 @@
   "ctx": 1048576,
   "moe": true,
   "conf": "reported",
-  "notes": "Lightning Attention 混合"
+  "notes": "Lightning Attention 混合",
+  "experts": 32,
+  "topk": 2
  },
  {
   "id": "qwen3-coder-480b",
@@ -767,7 +797,9 @@
   "dim": 128,
   "ctx": 262144,
   "moe": true,
-  "conf": "official"
+  "conf": "official",
+  "experts": 160,
+  "topk": 8
  },
  {
   "id": "deepseek-v3.1",
@@ -888,7 +920,11 @@
   "ctx": 204800,
   "moe": true,
   "conf": "reported",
-  "notes": "结构沿用 4.5 公开口径"
+  "notes": "结构沿用 4.5 公开口径",
+  "experts": 160,
+  "topk": 8,
+  "shared_experts": 1,
+  "moe_layers": 89
  },
  {
   "id": "minimax-m2",
@@ -905,7 +941,9 @@
   "ctx": 204800,
   "moe": true,
   "conf": "reported",
-  "notes": "结构参数待核实"
+  "notes": "结构参数待核实",
+  "experts": 256,
+  "topk": 8
  },
  {
   "id": "qwen3-next-80b-a3b",
@@ -943,7 +981,9 @@
   "ctx": 262144,
   "moe": true,
   "conf": "reported",
-  "notes": "多模态，视觉编码器额外占显存"
+  "notes": "多模态，视觉编码器额外占显存",
+  "experts": 128,
+  "topk": 8
  },
  {
   "id": "hunyuan-a13b",
@@ -960,7 +1000,10 @@
   "ctx": 262144,
   "moe": true,
   "conf": "reported",
-  "notes": "结构参数待核实"
+  "notes": "结构参数待核实",
+  "experts": 64,
+  "topk": 8,
+  "shared_experts": 1
  },
  {
   "id": "ernie-4.5-300b",
@@ -977,7 +1020,9 @@
   "ctx": 131072,
   "moe": true,
   "conf": "reported",
-  "notes": "结构参数待核实"
+  "notes": "结构参数待核实",
+  "experts": 64,
+  "topk": 8
  },
  {
   "id": "ling-1t",
@@ -994,7 +1039,11 @@
   "ctx": 131072,
   "moe": true,
   "conf": "reported",
-  "notes": "蚂蚁百灵，结构参数待核实"
+  "notes": "蚂蚁百灵，结构参数待核实",
+  "experts": 256,
+  "topk": 8,
+  "shared_experts": 1,
+  "moe_layers": 76
  },
  {
   "id": "step-3",
@@ -1011,7 +1060,10 @@
   "ctx": 65536,
   "moe": true,
   "conf": "reported",
-  "notes": "MFA 注意力，结构参数待核实"
+  "notes": "MFA 注意力，结构参数待核实",
+  "experts": 48,
+  "topk": 3,
+  "moe_layers": 56
  },
  {
   "id": "magistral-small",

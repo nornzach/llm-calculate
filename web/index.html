@@ -26,7 +26,8 @@
 <nav class="tabs" id="tabs">
   <button data-v="fit" class="on">能装什么<small>FEASIBILITY</small></button>
   <button data-v="perf">能跑多快<small>THROUGHPUT</small></button>
-  <button data-v="plan">怎么配<small>PLANNER</small></button>
+  <button data-v="rec">怎么配<small>PRESCRIBE</small></button>
+  <button data-v="plan">方案库<small>PLANNER</small></button>
   <span class="tsep"></span>
   <button data-v="hw">硬件库<small>HARDWARE</small></button>
   <button data-v="models">模型库<small>MODELS</small></button>
@@ -84,7 +85,95 @@
   </div>
 </section>
 
-<!-- ============ 模式 2 ============ -->
+<!-- ============ 模式 2：推荐处方 ============ -->
+<section class="view" id="v-rec">
+  <aside>
+    <div class="grp">
+      <label class="lab">处方方向 · DIRECTION</label>
+      <div class="seg seg2" id="rec-dir">
+        <button data-v="model" class="on">我有模型</button><button data-v="card">我有硬件</button>
+      </div>
+    </div>
+    <div class="grp" id="rec-model-wrap">
+      <label class="lab">模型 · MODEL</label>
+      <div class="cs" id="rec-model"></div>
+    </div>
+    <div class="grp" id="rec-hw-wrap" style="display:none">
+      <label class="lab">硬件 · HARDWARE</label>
+      <div class="cs" id="rec-hw"></div>
+    </div>
+    <div class="grp">
+      <label class="lab">目标取舍 · PRIORITIES <span class="dim2">最多两项</span></label>
+      <div class="cgrid" id="rec-obj">
+        <label><input type="checkbox" value="cost" checked>最低成本</label>
+        <label><input type="checkbox" value="tos">最高 TOS</label>
+        <label><input type="checkbox" value="tpm">最高 TPM</label>
+        <label><input type="checkbox" value="avail">最高可用</label>
+      </div>
+      <p class="field-note">选两个目标会返回 Pareto 处方，不再强行给一个“唯一答案”。</p>
+    </div>
+    <div class="grp">
+      <label class="lab">量化范围 · QUANT</label>
+      <div class="cs" id="rec-qonly"></div>
+      <p class="field-note" id="rec-quant-note">基础权重枚举量化方案；预量化检查点只使用自身格式。</p>
+    </div>
+    <div class="grp">
+      <label class="lab">工作负载模板 · WORKLOAD PRESET</label>
+      <div class="cs" id="rec-preset"></div>
+    </div>
+    <div class="grp">
+      <label class="lab" for="rec-cards">卡数 · CARDS</label>
+      <input type="number" id="rec-cards" value="1" min="1" max="8">
+    </div>
+    <div class="grp">
+      <label class="lab" for="rec-tpm">目标吞吐 · TARGET TPM</label>
+      <input type="number" id="rec-tpm" value="6000" min="60" step="100">
+    </div>
+    <div class="grp">
+      <label class="lab" for="rec-tos">单流下限 · MIN TOS</label>
+      <input type="number" id="rec-tos" value="0" min="0" step="1">
+    </div>
+    <div class="grp">
+      <label class="lab">推理框架 · ENGINE</label>
+      <div class="cs" id="rec-eng"></div>
+    </div>
+    <div class="grp">
+      <label class="lab">推测解码 · SPECULATIVE</label>
+      <div class="cs" id="rec-spec"></div>
+    </div>
+    <div class="grp">
+      <label class="lab">KV 量化 · KV CACHE</label>
+      <div class="seg seg3" id="rec-kvq">
+        <button data-v="fp16" class="on">FP16</button><button data-v="fp8">FP8</button><button data-v="fp4">FP4*</button>
+      </div>
+    </div>
+    <div class="grp">
+      <label class="lab">允许排队 · QUEUE
+        <span class="switch"><input type="checkbox" id="rec-queue"><i></i></span>
+      </label>
+      <div id="rec-queue-opts" style="display:none; margin-top:10px">
+        <label class="lab sub" for="rec-maxq">排队后单副本最大并发</label>
+        <input type="number" id="rec-maxq" value="256" min="1" max="2048">
+      </div>
+    </div>
+    <details class="grp advanced">
+      <summary>高级参数 · CALIBRATION <span>0 = 自动/解析值</span></summary>
+      <div class="cgrid advgrid" id="rec-advanced"></div>
+      <p class="hint">校准值应用于所有候选；只在同一部署栈、模型和负载口径下填写。</p>
+    </details>
+    <p class="hint">推荐完全来自确定性规则：兼容性、显存、roofline、目标取舍与 Pareto 排序；不调用 AI。处方会给出硬件、量化、框架、并发和分桶建议，并用完整计算账本解释原因。</p>
+  </aside>
+  <div class="result">
+    <div class="devline" id="rec-line"></div>
+    <div class="filterbar" id="rec-filter">
+      <input type="text" id="rec-q" placeholder="筛选方案…">
+    </div>
+    <div id="recList"></div>
+    <div class="pager" id="rec-pager"></div>
+  </div>
+</section>
+
+<!-- ============ 模式 3：吞吐 ============ -->
 <section class="view" id="v-perf">
   <aside>
     <div class="grp">
@@ -147,7 +236,7 @@
   </div>
 </section>
 
-<!-- ============ 模式 3 ============ -->
+<!-- ============ 模式 4：方案 ============ -->
 <section class="view" id="v-plan">
   <aside>
     <div class="grp">
