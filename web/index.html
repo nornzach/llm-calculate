@@ -24,7 +24,8 @@
 </header>
 
 <nav class="tabs" id="tabs">
-  <button data-v="fit" class="on">能装什么<small>FEASIBILITY</small></button>
+  <button data-v="map" class="on">地图<small>MAP</small></button>
+  <button data-v="fit">能装什么<small>FEASIBILITY</small></button>
   <button data-v="perf">能跑多快<small>THROUGHPUT</small></button>
   <button data-v="rec">怎么配<small>PRESCRIBE</small></button>
   <button data-v="plan">方案库<small>PLANNER</small></button>
@@ -37,8 +38,40 @@
 
 <main>
 
+<!-- ============ 首页：部署地图 ============ -->
+<section class="view on" id="v-map">
+  <div class="mapwrap">
+    <div class="mapbar">
+      <div class="cs" id="map-model"></div>
+      <div class="cs" id="map-preset"></div>
+      <label class="mapfield"><span>TPM</span><input type="number" id="map-tpm" value="6000" min="0" step="1000"></label>
+      <label class="mapfield"><span>并发</span><input type="number" id="map-conc" value="16" min="1" max="256"></label>
+    </div>
+    <div class="mapgrid">
+      <div class="chart mapcard">
+        <h3 id="mapScatterTitle">成本 × 单流速度</h3>
+        <p id="mapScatterMeta"></p>
+        <div id="mapScatter"></div>
+        <div class="chart-legend" id="mapScatterLegend"></div>
+      </div>
+      <div class="chart mapcard">
+        <h3 id="mapLandscapeTitle">模型版图</h3>
+        <p id="mapLandscapeMeta"></p>
+        <div id="mapLandscape"></div>
+        <div class="chart-legend" id="mapLandscapeLegend"></div>
+      </div>
+    </div>
+    <div class="chart mapcard">
+      <h3 id="mapHeatTitle">可部署矩阵</h3>
+      <p id="mapHeatMeta"></p>
+      <div class="tblwrap"><table class="tbl heat" id="mapHeat"></table></div>
+      <div class="chart-legend" id="mapHeatLegend"></div>
+    </div>
+  </div>
+</section>
+
 <!-- ============ 模式 1 ============ -->
-<section class="view on" id="v-fit">
+<section class="view" id="v-fit">
   <aside>
     <div class="grp">
       <label class="lab">硬件 · HARDWARE</label>

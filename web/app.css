@@ -685,6 +685,48 @@ button:focus-visible, input:focus-visible, .cs-btn:focus-visible, .planrow:focus
   outline-offset: 2px;
 }
 
+/* ---------- 首页：部署地图 ---------- */
+.mapwrap { flex: 1; min-width: 0; }
+.mapbar {
+  display: grid; grid-template-columns: minmax(220px, 1.2fr) minmax(170px, .8fr) 110px 110px;
+  gap: 10px; margin-bottom: 16px; align-items: end;
+}
+.mapfield span { display: block; font-size: 9px; letter-spacing: .08em; color: var(--faint); font-weight: 700; text-transform: uppercase; margin-bottom: 4px; }
+.mapfield input { min-height: 42px; }
+.mapgrid { display: grid; grid-template-columns: 3fr 2fr; gap: 14px; }
+.mapcard {
+  border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+  padding: 14px 16px 12px; margin-bottom: 14px;
+}
+.mapcard h3 { display: flex; justify-content: space-between; align-items: baseline; }
+.mapcard h3 .tag { margin-left: 8px; }
+.mapcard > p { min-height: 14px; }
+
+/* 散点/版图 SVG */
+.mdot { stroke: var(--panel); stroke-width: .8; cursor: pointer; }
+.mdot:hover { stroke: var(--text); stroke-width: 1.6; }
+.mdot.pareto { stroke: var(--text); stroke-width: 1.4; }
+.mdot.sel { stroke: var(--acc); stroke-width: 2; }
+.pline { fill: none; stroke: var(--text); stroke-width: 1.2; stroke-dasharray: 1 3; opacity: .55; }
+
+/* 可部署热图 */
+.heat { min-width: 980px; }
+.heat td, .heat th { text-align: center; padding: 7px 8px; }
+.heat td.mname, .heat th.mname { text-align: left; }
+.hm { display: inline-block; min-width: 44px; padding: 2px 6px; border-radius: 4px;
+  font: 650 10px var(--mono); letter-spacing: .02em; }
+.hm.t16 { background: color-mix(in srgb, var(--ok) 26%, var(--panel)); color: var(--ok); }
+.hm.t8  { background: color-mix(in srgb, var(--ok) 13%, var(--panel)); color: var(--ok); }
+.hm.t4  { background: color-mix(in srgb, var(--warn) 16%, var(--panel)); color: var(--warn); }
+.hm.edge { outline: 1px dashed color-mix(in srgb, var(--warn) 65%, transparent); outline-offset: -1px; }
+.hm.no { color: var(--no); background: transparent; min-width: 0; }
+.hm.na { color: var(--faint); background: transparent; min-width: 0; font-size: 9px; }
+
+@media (max-width: 1100px) {
+  .mapgrid { grid-template-columns: 1fr; }
+  .mapbar { grid-template-columns: 1fr 1fr; }
+}
+
 @media (max-width: 900px) {
   .tabs { overflow-x: auto; padding-inline: 14px; }
   .tabs button { flex: none; }

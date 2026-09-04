@@ -125,6 +125,11 @@ const STATIC_EN = new Map([
   ["推荐完全来自确定性规则：兼容性、显存、roofline、目标取舍与 Pareto 排序；不调用 AI。处方会给出硬件、量化、框架、并发和分桶建议，并用完整计算账本解释原因。", "Recommendations come from deterministic rules: compatibility, memory, roofline, objective tradeoffs, and Pareto ranking. No AI is called. Each prescription explains hardware, quantization, framework, concurrency, and bucketing with the full calculation ledger."],
   ["筛选方案…", "Filter prescriptions…"],
   ["校准值应用于所有候选；只在同一部署栈、模型和负载口径下填写。", "Calibration values apply to every candidate; enter them only for the same stack, model, and workload."],
+  ["地图", "Map"],
+  ["成本 × 单流速度", "Cost × Single-stream Speed"],
+  ["模型版图", "Model Landscape"],
+  ["可部署矩阵", "Deployability Matrix"],
+  ["并发", "Concurrency"],
 ]);
 
 const ATTR_EN = new Map([
@@ -571,13 +576,18 @@ const LONG_TAIL_WORKLOAD = [
   { context: 512000, output: 512, share: 3.06, prefix_hit: 0 },
   { context: 1048576, output: 512, share: 0.10, prefix_hit: 0 },
 ];
+const OBJECTIVE_LABEL = { cost: tr("Lowest Cost", "最低成本"), tos: tr("Highest TOS", "最高 TOS"), tpm: tr("Highest TPM", "最高 TPM"), avail: tr("Highest Availability", "最高可用") };
 const REC_PRESETS = {
   balanced: [{ context: 8192, output: 512, share: 100, prefix_hit: 0 }],
   short: [{ context: 4096, output: 256, share: 80, prefix_hit: 0 }, { context: 16384, output: 1024, share: 20, prefix_hit: 0 }],
   long: LONG_TAIL_WORKLOAD,
 };
-const OBJECTIVE_LABEL = { cost: tr("Lowest Cost", "最低成本"), tos: tr("Highest TOS", "最高 TOS"), tpm: tr("Highest TPM", "最高 TPM"), avail: tr("Highest Availability", "最高可用") };
 let recWorkloads = REC_PRESETS.balanced.map(x => ({ ...x }));
+const presetGroups = () => [{ label: "", items: [
+  { v: "balanced", n: tr("Balanced 8K/512", "均衡 8K/512"), m: tr("default deployment mix", "默认部署混合") },
+  { v: "short", n: tr("Short prompts", "短提示"), m: tr("chat/agent common case", "聊天/智能体常见") },
+  { v: "long", n: tr("Long tail", "长尾"), m: tr("100K–1M tail example", "100K–1M 长尾示例") },
+]}];
 
 const formatTokens = v => v >= 1048576 ? `${(v / 1048576).toFixed(v % 1048576 ? 1 : 0)}M` :
   v >= 1024 ? `${(v / 1024).toFixed(v % 1024 ? 1 : 0)}K` : `${Math.round(v)}`;
@@ -789,15 +799,13 @@ async function boot() {
   CS["rec-model"] = cselect($("#rec-model"), modelGroups(), { onChange: runRecommend });
   CS["rec-hw"] = cselect($("#rec-hw"), hwGroups(), { onChange: runRecommend });
   CS["rec-qonly"] = cselect($("#rec-qonly"), quantGroups(true), { search: false, onChange: runRecommend });
-  CS["rec-preset"] = cselect($("#rec-preset"), [{ label: "", items: [
-    { v: "balanced", n: tr("Balanced 8K/512", "均衡 8K/512"), m: tr("default deployment mix", "默认部署混合") },
-    { v: "short", n: tr("Short prompts", "短提示"), m: tr("chat/agent common case", "聊天/智能体常见") },
-    { v: "long", n: tr("Long tail", "长尾"), m: tr("100K–1M tail example", "100K–1M 长尾示例") },
-  ]}], { search: false, onChange: () => {
+  CS["rec-preset"] = cselect($("#rec-preset"), presetGroups(), { search: false, onChange: () => {
     recWorkloads = REC_PRESETS[CS["rec-preset"].get()].map(x => ({ ...x }));
     workloadP.set?.(recWorkloads); workloadPl.set?.(recWorkloads);
     runPerf(); runPlan(); runRecommend();
   }});
+  CS["map-model"] = cselect($("#map-model"), modelGroups(), { onChange: runMap });
+  CS["map-preset"] = cselect($("#map-preset"), presetGroups(), { search: false, onChange: runMap });
   CS["hw-vendor"] = cselect($("#hw-vendor"), [{ label: "", items: [{ v: "", n: tr("All vendors", "全部厂商") }, ...Object.keys(VENDOR).map(v => ({ v, n: vendorName(v) }))] }], { search: false, onChange: renderHWTable });
   const planFilter = () => { planPage = 0; renderPlans(); };
   CS["pl-vendor"] = cselect($("#pl-vendor"), [{ label: "", items: [{ v: "", n: tr("All vendors", "全部厂商") }, ...Object.keys(VENDOR).map(v => ({ v, n: vendorName(v) }))] }], { search: false, onChange: planFilter });
@@ -850,6 +858,7 @@ async function boot() {
   CS["rec-qonly"].set("", true); CS["rec-preset"].set("balanced", true);
   CS["f-hw"].set("rtx4090", true); CS["f-ctx"].set("8192", true);
   CS["p-hw"].set("rtx4090", true); CS["p-model"].set("llama-3.1-70b", true);
+  CS["map-model"].set("deepseek-v3.1", true); CS["map-preset"].set("balanced", true);
   CS["p-quant"].set("q4km", true);
   CS["pl-model"].set("deepseek-r1", true);
   CS["pl-qonly"].set("", true); CS["hw-vendor"].set("", true);
@@ -874,7 +883,7 @@ async function boot() {
 
   wire();
   wireCustom();
-  runFit(); runPerf(); runPlan(); runRecommend();
+  runMap(); runFit(); runPerf(); runPlan(); runRecommend();
   renderHWTable(); renderModelTable(); renderQuickTable(); renderGlossary();
 }
 
@@ -901,6 +910,7 @@ function wire() {
   bind("#p-n", runPerf); bind("#p-b", runPerf);
   bind("#pl-tpm", runPlan);
   bind("#pl-c", () => { syncQueueCap(); runPlan(); });
+  $("#map-tpm").oninput = $("#map-conc").oninput = runMap;
   $("#hw-q").oninput = renderHWTable;
   $("#f-q").oninput = () => { fitPage = 0; renderFitRows(); };
   $("#m-q").oninput = () => { modelPage = 0; renderModelTable(); };
@@ -1482,6 +1492,193 @@ async function runRecommend() {
 }
 
 
+
+/* ---------- 首页：部署地图 ---------- */
+
+let mapScatterRun = 0, mapHeatRun = 0;
+const MAP_HEAT_HW = ["rtx5090", "rtx4090", "rtx-6000-pro", "a100-80", "h100-sxm", "h200", "b200", "mi300x", "apple-m3ultra", "ascend-910b"];
+const MAP_CLS_COLOR = { consumer: "var(--weight)", workstation: "var(--active)", datacenter: "var(--acc)", supernode: "var(--adapter)", unified_soc: "var(--runtime)", edge: "var(--faint)" };
+const MAP_ORG_PALETTE = ["var(--acc)", "var(--kv)", "var(--weight)", "var(--active)", "var(--adapter)", "var(--ok)", "var(--bad)", "var(--runtime)"];
+
+function mapWorkload() {
+  return (REC_PRESETS[CS["map-preset"]?.get()] || REC_PRESETS.balanced).map(x => ({ context: x.context, output: x.output, share: x.share / 100, prefix_hit: (x.prefix_hit || 0) / 100 }));
+}
+function mapHeatCtx() {
+  const w = REC_PRESETS[CS["map-preset"]?.get()] || REC_PRESETS.balanced;
+  const mean = w.reduce((s, x) => s + x.context * x.share, 0) / w.reduce((s, x) => s + x.share, 0);
+  return [4096, 8192, 16384, 32768, 65536, 131072, 262144, 1048576].reduce((a, b) => Math.abs(b - mean) < Math.abs(a - mean) ? b : a);
+}
+function mapConc() { return Math.max(1, Math.min(256, +$("#map-conc").value || 16)); }
+
+function runMap() {
+  if (!CS["map-model"]) return;
+  renderMapLandscape();
+  runMapScatter();
+  runMapHeat();
+}
+
+// 成本 × 单流速度散点：数据来自 /api/recommend 的确定性处方（picks + pareto）
+async function runMapScatter() {
+  const run = ++mapScatterRun;
+  const body = {
+    direction: "model", model: CS["map-model"].get(), objectives: "cost,tos",
+    tpm: +$("#map-tpm").value || 6000, tos: 0, quant_only: "",
+    workload: mapWorkload(), conc: mapConc(),
+    queue: false, maxq: 0, eng: "auto", spec: "none", kvq: "fp16",
+    advanced: {}, lang, limit: 30,
+  };
+  const data = await post("/api/recommend", body);
+  if (run !== mapScatterRun) return;
+  renderMapScatter(data, body);
+}
+
+function renderMapScatter(data, body) {
+  const box = $("#mapScatter"), legend = $("#mapScatterLegend");
+  const picks = (data?.picks || []).filter(p => p.plan.monthly > 0 && p.plan.p95_single_tps > 0);
+  const m = MODELS.find(x => x.id === body.model);
+  $("#mapScatterMeta").textContent = `${m ? m.name : body.model} · ${tr("conc", "并发")} ${body.conc} · ${tr("target", "目标")} ${fmt.tpm(body.tpm)} tok/min`;
+  if (!picks.length) {
+    box.innerHTML = `<div class="empty">${tr("No prescription fits the current constraints.", "当前约束下没有可推荐处方。")}</div>`;
+    legend.innerHTML = "";
+    return;
+  }
+  const W = 680, H = 380, PL = 66, PR = 18, PT = 16, PB = 42;
+  const logs = picks.map(p => Math.log10(p.plan.monthly));
+  const xMin = Math.floor(Math.min(...logs) * 2) / 2, xMax = Math.ceil(Math.max(...logs) * 2) / 2;
+  const yMax = Math.max(...picks.map(p => p.plan.p95_single_tps)) * 1.1;
+  const X = v => PL + (Math.log10(v) - xMin) / (xMax - xMin || 1) * (W - PL - PR);
+  const Y = v => (H - PB) - v / yMax * (H - PB - PT);
+  const paretoKey = p => [p.model_id, p.plan.hw.id, p.plan.quant, p.plan.n, p.plan.replicas].join("|");
+  const pareto = new Set((data.pareto || []).map(paretoKey));
+  const frontier = (data.pareto || []).filter(p => p.plan.monthly > 0 && p.plan.p95_single_tps > 0)
+    .sort((a, b) => a.plan.monthly - b.plan.monthly);
+  const maxTPM = Math.max(...picks.map(p => p.plan.tpm), 1);
+
+  const xTicks = [];
+  for (let k = Math.ceil(xMin); k <= Math.floor(xMax); k++) xTicks.push(Math.pow(10, k));
+  const axes =
+    [0, .25, .5, .75, 1].map(r =>
+      `<line class="${r ? "gridline" : "axis"}" x1="${PL}" y1="${Y(yMax * r)}" x2="${W - PR}" y2="${Y(yMax * r)}"/>` +
+      `<text class="clabel" x="${PL - 8}" y="${Y(yMax * r) + 3}" text-anchor="end">${r ? fmt.tps(yMax * r) : "0"}</text>`).join("") +
+    xTicks.map(v =>
+      `<line class="tick" x1="${X(v)}" y1="${H - PB}" x2="${X(v)}" y2="${H - PB + 4}"/>` +
+      `<text class="clabel" x="${X(v)}" y="${H - PB + 15}" text-anchor="middle">${fmt.cny(v)}</text>`).join("") +
+    `<line class="axis" x1="${PL}" y1="${PT}" x2="${PL}" y2="${H - PB}"/>` +
+    `<line class="axis" x1="${PL}" y1="${H - PB}" x2="${W - PR}" y2="${H - PB}"/>` +
+    `<text class="axis-title" x="${(PL + W - PR) / 2}" y="${H - 6}" text-anchor="middle">${tr("Monthly cost (CNY, log)", "月成本（元，对数）")}</text>` +
+    `<text class="axis-title" transform="translate(12 ${(PT + H - PB) / 2}) rotate(-90)" text-anchor="middle">P95 TOS · tok/s</text>`;
+
+  const line = frontier.length > 1
+    ? `<path class="pline" d="${frontier.map((p, i) => `${i ? "L" : "M"}${X(p.plan.monthly).toFixed(1)},${Y(p.plan.p95_single_tps).toFixed(1)}`).join("")}"/>` : "";
+  const dots = picks.map((p, i) => {
+    const r = 4.5 + 6 * Math.sqrt(p.plan.tpm / maxTPM);
+    const tip = `${hardwareName(p.plan.hw)} ×${p.plan.n}${p.plan.replicas > 1 ? " ×" + p.plan.replicas + "R" : ""} · ${p.plan.qname}\n` +
+      `${fmt.cny(p.plan.monthly)}/${tr("mo", "月")} · P95 ${fmt.tps(p.plan.p95_single_tps)} tok/s · ${fmt.tpm(p.plan.tpm)} tok/min`;
+    return `<circle class="mdot${pareto.has(paretoKey(p)) ? " pareto" : ""}" data-i="${i}" cx="${X(p.plan.monthly).toFixed(1)}" cy="${Y(p.plan.p95_single_tps).toFixed(1)}" r="${r.toFixed(1)}" fill="${MAP_CLS_COLOR[p.plan.hw.cls] || "var(--faint)"}"><title>${escapeHTML(tip)}</title></circle>`;
+  }).join("");
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${tr("Cost versus speed scatter", "成本速度散点图")}">${axes}${line}${dots}</svg>`;
+
+  const clsSeen = [...new Set(picks.map(p => p.plan.hw.cls))];
+  legend.innerHTML =
+    clsSeen.map(c => `<span><i style="background:${MAP_CLS_COLOR[c] || "var(--faint)"};height:8px;border-radius:50%"></i>${localized(CLS, c)}</span>`).join("") +
+    `<span><i style="background:transparent;border-top:1px dashed var(--text);height:0"></i>Pareto</span>` +
+    `<span class="dim2">${tr("dot size = mixed TPM", "点大小 = 混合 TPM")}</span>`;
+
+  $$("#mapScatter .mdot").forEach(el => el.onclick = () => {
+    const p = picks[+el.dataset.i];
+    openPlanDetail(p.plan, el, {
+      direction: "model", model: body.model, objectives: ["cost", "tos"], workload: body.workload,
+      engine: p.engine_id, spec: p.spec, kvq: p.kvq, tpm: body.tpm, advanced: {}, rec: p,
+    });
+  });
+}
+
+// 模型版图：纯客户端，激活参数 × 上下文；点击选择模型驱动散点图
+function renderMapLandscape() {
+  const sel = CS["map-model"]?.get();
+  const pts = MODELS.filter(m => m.params > 0 && m.ctx > 0 && (m.conf !== "fetched" || m.params >= 8));
+  const counts = {};
+  pts.forEach(m => { if (m.conf !== "fetched") counts[m.org] = (counts[m.org] || 0) + 1; });
+  const topOrgs = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, MAP_ORG_PALETTE.length).map(x => x[0]);
+  const orgColor = org => { const i = topOrgs.indexOf(org); return i < 0 ? "var(--faint)" : MAP_ORG_PALETTE[i]; };
+  $("#mapLandscapeMeta").textContent = `${pts.length} ${tr("models · click to select", "个模型 · 点击选择")}`;
+
+  const W = 520, H = 380, PL = 52, PR = 14, PT = 16, PB = 42;
+  const act = m => m.active || m.params;
+  const xMax = Math.ceil(Math.log10(Math.max(...pts.map(act))) * 10) / 10;
+  const xMin = -0.1, yMin = Math.log10(2048), yMax = Math.log10(4e6);
+  const X = v => PL + (Math.log10(act(v)) - xMin) / (xMax - xMin) * (W - PL - PR);
+  const Y = v => (H - PB) - (Math.log10(v.ctx) - yMin) / (yMax - yMin) * (H - PB - PT);
+  const axes =
+    [1, 10, 100, 1000].filter(v => Math.log10(v) <= xMax).map(v =>
+      `<line class="gridline" x1="${X({ params: v })}" y1="${PT}" x2="${X({ params: v })}" y2="${H - PB}"/>` +
+      `<text class="clabel" x="${X({ params: v })}" y="${H - PB + 15}" text-anchor="middle">${v >= 1000 ? "1T" : v + "B"}</text>`).join("") +
+    [4096, 32768, 262144, 1048576].map(v =>
+      `<line class="gridline" x1="${PL}" y1="${Y({ ctx: v })}" x2="${W - PR}" y2="${Y({ ctx: v })}"/>` +
+      `<text class="clabel" x="${PL - 6}" y="${Y({ ctx: v }) + 3}" text-anchor="end">${formatTokens(v)}</text>`).join("") +
+    `<line class="axis" x1="${PL}" y1="${PT}" x2="${PL}" y2="${H - PB}"/>` +
+    `<line class="axis" x1="${PL}" y1="${H - PB}" x2="${W - PR}" y2="${H - PB}"/>` +
+    `<text class="axis-title" x="${(PL + W - PR) / 2}" y="${H - 6}" text-anchor="middle">${tr("Active params (log)", "激活参数（对数）")}</text>` +
+    `<text class="axis-title" transform="translate(12 ${(PT + H - PB) / 2}) rotate(-90)" text-anchor="middle">${tr("Context (log)", "上下文（对数）")}</text>`;
+
+  const order = { fetched: 0, reported: 1, official: 2 };
+  const sorted = [...pts].sort((a, b) => (order[a.conf] ?? 0) - (order[b.conf] ?? 0) || (a.id === sel ? 1 : 0) - (b.id === sel ? 1 : 0));
+  const dots = sorted.map(m => {
+    const fetched = m.conf === "fetched";
+    const r = fetched ? 1.7 : 3 + 2.4 * Math.log10(m.params);
+    const op = m.conf === "official" ? .85 : m.conf === "reported" ? .5 : .13;
+    const tip = `${m.name} · ${m.org}\n${m.params}B${m.moe ? ` / ${m.active}B act` : ""} · ${formatTokens(m.ctx)} · ${m.conf}`;
+    return `<circle class="mdot${m.id === sel ? " sel" : ""}" data-id="${m.id}" cx="${X(m).toFixed(1)}" cy="${Y(m).toFixed(1)}" r="${r.toFixed(1)}" fill="${orgColor(m.org)}" opacity="${op}"><title>${escapeHTML(tip)}</title></circle>`;
+  }).join("");
+  $("#mapLandscape").innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${tr("Model landscape", "模型版图")}">${axes}${dots}</svg>`;
+  $("#mapLandscapeLegend").innerHTML =
+    topOrgs.slice(0, 5).map(o => `<span><i style="background:${orgColor(o)};height:8px;border-radius:50%"></i>${o}</span>`).join("") +
+    `<span class="dim2">${tr("size = params · faded = auto-parsed", "大小 = 参数 · 淡色 = 自动解析")}</span>`;
+  $$("#mapLandscape .mdot").forEach(el => el.onclick = () => {
+    CS["map-model"].set(el.dataset.id, true);
+    runMap();
+  });
+}
+
+// 可部署热图：代表性硬件 × 旗舰模型，数据来自 /api/fit 的逐格真实计算
+async function runMapHeat() {
+  const run = ++mapHeatRun;
+  const cols = MAP_HEAT_HW.map(id => HW.find(h => h.id === id)).filter(Boolean);
+  if (!cols.length) return;
+  const ctx = mapHeatCtx(), batch = mapConc();
+  const resps = await Promise.all(cols.map(h => post("/api/fit", { hw: h.id, n: 1, ctx, batch, eng: "auto", spec: "none", kvq: "fp16", lang })));
+  if (run !== mapHeatRun) return;
+  renderMapHeat(cols, resps, ctx, batch);
+}
+
+function renderMapHeat(cols, resps, ctx, batch) {
+  const rows = MODELS.filter(m => (m.conf === "official" || m.conf === "reported") && m.params > 0)
+    .sort((a, b) => b.params - a.params).slice(0, 14);
+  const mainQ = QUANTS.filter(q => q.main);
+  const byModel = resps.map(list => new Map((list || []).map(r => [r.model.id, r])));
+  const head = `<thead><tr><th class="mname">${tr("Model", "模型")}</th>${cols.map(h =>
+    `<th title="${h.vram}G · ${h.bw.toLocaleString()} GB/s">${hardwareName(h)}</th>`).join("")}</tr></thead>`;
+  const body = rows.map(m => {
+    const cells = cols.map((h, ci) => {
+      const r = byModel[ci].get(m.id);
+      let best = null;
+      r?.cells.forEach((c, i) => {
+        if (!c.applicable || !c.fit) return;
+        if (!best || c.fit > best.c.fit || (c.fit === best.c.fit && mainQ[i].bytes > best.q.bytes)) best = { q: mainQ[i], c };
+      });
+      if (!best) return `<td><span class="hm no">—</span></td>`;
+      const tier = best.q.bytes >= 1.9 ? "t16" : best.q.bytes >= 0.9 ? "t8" : "t4";
+      const tip = `${m.name} × ${hardwareName(h)}\n${best.q.name} · ${fmt.tps(best.c.tps)} tok/s${best.c.accel ? "" : " · no-acc"}`;
+      return `<td><span class="hm ${tier}${best.c.fit === 1 ? " edge" : ""}" title="${escapeHTML(tip)}">${best.q.id.toUpperCase().slice(0, 5)}</span></td>`;
+    }).join("");
+    return `<tr><td class="mname">${m.name}${repMark(m.conf)}<span class="msub">${m.params}B</span></td>${cells}</tr>`;
+  }).join("");
+  $("#mapHeat").innerHTML = head + "<tbody>" + body + "</tbody>";
+  $("#mapHeatMeta").textContent = `${tr("Context", "上下文")} ${formatTokens(ctx)} · ${tr("conc", "并发")} ${batch} · KV FP16 · ${tr("single card", "单卡")}`;
+  $("#mapHeatLegend").innerHTML =
+    `<span><span class="hm t16">FP16</span></span><span><span class="hm t8">FP8</span></span><span><span class="hm t4">4-bit</span></span>` +
+    `<span><span class="hm t4 edge">4-bit</span> ${tr("low headroom", "显存贴边")}</span><span><span class="hm no">—</span> ${tr("does not fit", "装不下")}</span>`;
+}
 function planAdvice(plan, perf, model, quant, body) {
   const items = [];
   const add = (level, title, text) => items.push({ level, title, text });
