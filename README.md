@@ -189,6 +189,10 @@ node --check web/app.js
 └── AUDIT_REPORT.md       # 公式、数据来源和精度边界审计
 ```
 
+## 许可证
+
+本项目采用 [MIT License](LICENSE) 授权，可自由使用、复制、修改、发布、分发、再授权及商用，但须保留原版权与许可声明。版权所有者：Zach。
+
 ## 精度边界与资料
 
 详细公式、回归契约、已知缺口及 NVIDIA、AMD、Hugging Face、vLLM、SGLang 等一手资料见 [AUDIT_REPORT.md](AUDIT_REPORT.md)。
