@@ -12,6 +12,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -26,7 +27,7 @@ var (
 	models []calc.Model
 )
 
-func mustLoad() {
+func mustLoad(dataDir string) {
 	b, err := embedded.ReadFile("data/hardware.json")
 	if err != nil {
 		log.Fatal(err)
@@ -63,16 +64,14 @@ func mustLoad() {
 		}
 	}
 	patchSparse(models)
-	// 开发时优先读取磁盘，便于刷新模型库；独立二进制回退内嵌数据。
+	// A binary update must also update its catalog. Working-directory files
+	// only override the bundled catalogs when explicitly requested.
 	index := make(map[string]int, len(models))
 	for i := range models {
 		index[models[i].ID] = i
 	}
 	for _, path := range []string{"data/models_hf.json", "data/models_modelscope.json"} {
-		fb, err := os.ReadFile(path)
-		if err != nil {
-			fb, err = embedded.ReadFile(path)
-		}
+		fb, err := embedded.ReadFile(path)
 		if err != nil {
 			continue
 		}
@@ -80,6 +79,19 @@ func mustLoad() {
 		if err != nil {
 			log.Printf("%s 加载失败: %v", path, err)
 			continue
+		}
+		source := "embedded:" + path
+		if dataDir != "" {
+			diskPath := filepath.Join(dataDir, filepath.Base(path))
+			if disk, readErr := os.ReadFile(diskPath); readErr != nil {
+				if !os.IsNotExist(readErr) {
+					log.Printf("%s 读取失败，保留内置目录: %v", diskPath, readErr)
+				}
+			} else if override, parseErr := calc.LoadModels(disk); parseErr != nil {
+				log.Printf("%s 加载失败，保留内置目录: %v", diskPath, parseErr)
+			} else {
+				fetched, source = override, diskPath
+			}
 		}
 		added := 0
 		for _, m := range fetched {
@@ -91,7 +103,7 @@ func mustLoad() {
 			index[m.ID] = len(models) - 1
 			added++
 		}
-		log.Printf("%s 合并 %d 个模型（总计 %d）", path, added, len(models))
+		log.Printf("%s 合并 %d 个模型（总计 %d）", source, added, len(models))
 	}
 	patchSparse(models)
 }
@@ -448,8 +460,9 @@ func inlineIndex() ([]byte, error) {
 
 func main() {
 	addr := flag.String("addr", ":8317", "listen address")
+	dataDir := flag.String("data-dir", "", "explicit HF/ModelScope catalog override directory; default: embedded release data")
 	flag.Parse()
-	mustLoad()
+	mustLoad(*dataDir)
 	fmt.Printf("LLM 推理计算器 → http://localhost%s  (硬件 %d · 模型 %d)\n", *addr, len(hws), len(models))
 	log.Fatal(http.ListenAndServe(*addr, newHandler()))
 }

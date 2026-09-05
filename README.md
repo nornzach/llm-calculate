@@ -63,7 +63,9 @@ go build -trimpath -o llmcalc .
 ./llmcalc -addr :8317
 ```
 
-`web/` 和全部 `data/` 文件均内嵌到二进制。只有 `data/models_hf.json` 与 `data/models_modelscope.json` 优先读取磁盘版本，便于刷新采集库；硬件和精选模型修改后需要重新编译。
+`web/` 和全部 `data/` 文件均内嵌到二进制，默认使用随版本发布的数据。更新二进制并重启即可更新目录，运行目录遗留的旧 JSON 不会覆盖新版数据。
+
+需要单独更新采集库时，显式指定 `./llmcalc -data-dir ./data`，启动时读取该目录中的 `models_hf.json` 和 `models_modelscope.json`。文件缺失、读取失败或内容无效时保留对应内置目录；读取或解析错误会写入日志。硬件和精选模型始终使用内置数据。
 
 Linux 后台运行示例：
 
@@ -183,6 +185,8 @@ go run ./scripts/collect -source modelscope -all -min-year 2023
 ```
 
 结果分别写入 `data/models_hf.json` 和 `data/models_modelscope.json`。同一官方范围内采用 **只增不删**：同 ID 使用新元数据更新，本次解析失败的旧条目原样保留；缺少 query heads、架构、参数来源或 revision 的旧条目会自动重解析，无需指定 `-refresh`；执行 `-all` 时会清除不在已核实发布机构列表中的自动采集条目。可用 `-orgs Qwen,deepseek-ai,...` 缩小内置已核实发布机构范围，`-refresh` 强制重拉已有条目；非内置机构不会写入默认库。
+
+采集完成后重新编译并重启服务；使用显式 `-data-dir ./data` 的服务只需重启。正在运行的进程不会自动重载目录。
 
 采集器按 SHA 固定 config、index 和单文件元数据读取；逻辑参数量与打包存储量分开，处理 tied embeddings、显式嵌套量化格式及 MQA。缺少证据时不再由 payload/参数量反推位宽，也不猜 GQA-8。`param_source` 区分 config、未打包逻辑计数、model_card、name 和 unknown。旧记录未经刷新不会自动获得核验标记；精选目录的 attention 结构补录附有对应 config 链接，沿用的参数规模仍按未绑定 checkpoint 的条件场景处理；官方发布机构不等于所有字段已核验。
 

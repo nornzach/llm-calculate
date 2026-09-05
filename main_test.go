@@ -4,14 +4,93 @@ import (
 	"encoding/json"
 	"math"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"llmcalc/calc"
 )
 
+func TestBinaryUpdateIgnoresStaleWorkingDirectoryCatalog(t *testing.T) {
+	// Reproduce a binary-only deployment with a pre-metadata-refresh JSON
+	// left in its working directory. The released catalog must still win.
+	b, err := embedded.ReadFile("data/models_hf.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catalog []calc.Model
+	if err := json.Unmarshal(b, &catalog); err != nil {
+		t.Fatal(err)
+	}
+	var old calc.Model
+	for _, m := range catalog {
+		if m.ID == "qwen--qwen3.8-27b" {
+			old = m
+			break
+		}
+	}
+	if old.ID == "" {
+		t.Fatal("screenshot model missing from bundled catalog")
+	}
+	old.Heads, old.Revision, old.ParamSource = 0, "", ""
+	t.Chdir(t.TempDir())
+	if err := os.Mkdir("data", 0755); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := json.Marshal([]calc.Model{old})
+	if err := os.WriteFile(filepath.Join("data", "models_hf.json"), stale, 0644); err != nil {
+		t.Fatal(err)
+	}
+	mustLoad("")
+	m := findModel(old.ID)
+	if m == nil || m.Heads != 24 || m.Revision == "" || m.ParamSource != "safetensors" {
+		t.Fatalf("working-directory JSON overrode the released catalog: %+v", m)
+	}
+	w := []calc.WorkloadBucket{{Context: 8192, Output: 512, Share: 1}}
+	result := calc.Recommend(hws, models, *m, w, calc.RecommendOpts{TargetTPM: 6000, Conc: 16, Objectives: "cost,tos"}, calc.Opts{})
+	if len(result.Pareto) == 0 {
+		t.Fatal("stale files must not break the screenshot's default map scenario")
+	}
+}
+
+func TestExplicitCatalogOverride(t *testing.T) {
+	b, err := embedded.ReadFile("data/models.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catalog []calc.Model
+	if err := json.Unmarshal(b, &catalog); err != nil {
+		t.Fatal(err)
+	}
+	catalog[0].ID = "explicit-override"
+	valid, _ := json.Marshal(catalog[:1])
+	for _, filename := range []string{"models_hf.json", "models_modelscope.json"} {
+		for _, tc := range []struct{ name, body string }{
+			{"missing", ""}, {"malformed", "{"}, {"invalid-model", `[{"id":"broken"}]`}, {"valid", string(valid)},
+		} {
+			t.Run(filename+"/"+tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				if tc.body != "" {
+					if err := os.WriteFile(filepath.Join(dir, filename), []byte(tc.body), 0644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				mustLoad(dir)
+				if tc.name != "valid" {
+					if m := findModel("qwen--qwen3.8-27b"); m == nil || m.Heads != 24 {
+						t.Fatal("missing or malformed override must preserve the bundled catalog")
+					}
+				} else if findModel("explicit-override") == nil {
+					t.Fatal("explicit catalog directory was ignored")
+				}
+			})
+		}
+	}
+}
+
 func TestAPIContracts(t *testing.T) {
-	mustLoad()
+	mustLoad("")
 	handler := newHandler()
 	request := func(path, body string, status int) *httptest.ResponseRecorder {
 		t.Helper()
@@ -128,7 +207,7 @@ func TestEnrichModelPreservesCuratedInferenceData(t *testing.T) {
 }
 
 func TestFullCatalogCalculationContracts(t *testing.T) {
-	mustLoad()
+	mustLoad("")
 	checked, valid, limited, metadataValid := 0, 0, 0, 0
 	check := func(h calc.HW, m calc.Model, q calc.Quant) {
 		t.Helper()
@@ -230,7 +309,7 @@ func TestValidatePlanOptionsRejectsInconsistentBounds(t *testing.T) {
 }
 
 func TestScreenshotScenarios(t *testing.T) {
-	mustLoad()
+	mustLoad("")
 	m := findModel("qwen--qwen3.8-27b")
 	if m == nil || m.Heads != 24 || m.ParamSource != "safetensors" || m.Revision == "" {
 		t.Fatalf("Qwen catalog metadata is incomplete: %+v", m)
