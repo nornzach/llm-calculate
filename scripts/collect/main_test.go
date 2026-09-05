@@ -6,6 +6,26 @@ import (
 	"testing"
 )
 
+func TestMetadataCompleteDoesNotSkipLegacyCatalogRows(t *testing.T) {
+	m := outModel{ID: "qwen", Heads: 24, ModelType: "qwen3_5", Revision: "sha", ParamSource: "safetensors"}
+	if !metadataComplete(m) {
+		t.Fatal("complete metadata should not require a repair")
+	}
+	for _, change := range []func(*outModel){
+		func(m *outModel) { m.Heads = 0 },
+		func(m *outModel) { m.Revision = "" },
+		func(m *outModel) { m.ParamSource = "" },
+		func(m *outModel) { m.ParamSource = "name" },
+		func(m *outModel) { m.ModelType = "" },
+	} {
+		legacy := m
+		change(&legacy)
+		if metadataComplete(legacy) {
+			t.Fatalf("legacy metadata would be skipped: %+v", legacy)
+		}
+	}
+}
+
 func TestParseOneUsesTensorCountForQuantizedCheckpoint(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/models/acme/Model-120B-A3B", func(w http.ResponseWriter, _ *http.Request) {

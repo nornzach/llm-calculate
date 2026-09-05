@@ -635,6 +635,10 @@ func main() {
 		o.Engine, o.Spec, o.KVQuant = req.Eng, req.Spec, req.KVQ
 
 		o.Lang = req.Lang
+		if _, reason, valid := calc.ModelSupport(m, o); !valid {
+			writeErr(w, http.StatusUnprocessableEntity, reason)
+			return
+		}
 		writeJSON(w, calc.Planner(hws, m, req.PlanOpts, workload, conc, o))
 	})
 
@@ -680,6 +684,12 @@ func main() {
 		o := req.Advanced
 		o.Engine, o.Spec, o.KVQuant = req.Eng, req.Spec, req.KVQ
 		o.Lang = req.Lang
+		if req.Direction != "card" {
+			if _, reason, valid := calc.ModelSupport(m, o); !valid {
+				writeErr(w, http.StatusUnprocessableEntity, reason)
+				return
+			}
+		}
 		writeJSON(w, calc.Recommend(hws, models, m, workload, req.RecommendOpts, o))
 	})
 

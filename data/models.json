@@ -72,7 +72,12 @@
   "dim": 128,
   "ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 12,
+  "model_type": "qwen2",
+  "architecture": "Qwen2ForCausalLM",
+  "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/blob/ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "qwen3-1.7b",
@@ -88,7 +93,12 @@
   "dim": 128,
   "ctx": 32768,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 16,
+  "model_type": "qwen3",
+  "architecture": "Qwen3ForCausalLM",
+  "source_url": "https://huggingface.co/Qwen/Qwen3-1.7B/blob/main/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "llama-3.2-3b",
@@ -120,7 +130,12 @@
   "dim": 128,
   "ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 16,
+  "model_type": "qwen2",
+  "architecture": "Qwen2ForCausalLM",
+  "source_url": "https://huggingface.co/Qwen/Qwen2.5-3B/blob/main/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "qwen3-4b",
@@ -136,7 +151,12 @@
   "dim": 128,
   "ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 32,
+  "model_type": "qwen3",
+  "architecture": "Qwen3ForCausalLM",
+  "source_url": "https://huggingface.co/Qwen/Qwen3-4B/blob/main/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "gemma-3-4b",
@@ -170,7 +190,12 @@
   "dim": 128,
   "ctx": 32768,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 32,
+  "model_type": "mistral",
+  "architecture": "MistralForCausalLM",
+  "source_url": "https://huggingface.co/mistralai/Mistral-7B-v0.3/blob/caa1feb0e54d415e2df31207e5f4e273e33509b1/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "qwen2.5-7b",
@@ -258,7 +283,12 @@
   "dim": 128,
   "ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 32,
+  "model_type": "llama",
+  "architecture": "LlamaForCausalLM",
+  "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B/blob/main/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "glm-4-9b",
@@ -274,7 +304,12 @@
   "dim": 128,
   "ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 32,
+  "model_type": "glm",
+  "architecture": "GlmForCausalLM",
+  "source_url": "https://huggingface.co/zai-org/glm-4-9b-hf/blob/b44e98fcc8df0faba03a48b405356af6b91821e7/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "gemma-2-9b",
@@ -307,7 +342,12 @@
   "dim": 128,
   "ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 32,
+  "model_type": "mistral",
+  "architecture": "MistralForCausalLM",
+  "source_url": "https://huggingface.co/mistralai/Mistral-Nemo-Base-2407/blob/a4477a2f977929a969745b69bbd62e03043551a5/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "gemma-3-12b",
@@ -334,14 +374,19 @@
   "year": 2024,
   "params": 14.7,
   "active": 14.7,
-  "layers": 40,
+  "layers": 48,
   "hidden": 5120,
   "kvt": "gqa",
   "kvh": 8,
   "dim": 128,
   "ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 40,
+  "model_type": "qwen2",
+  "architecture": "Qwen2ForCausalLM",
+  "source_url": "https://huggingface.co/Qwen/Qwen2.5-14B/blob/main/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "qwen3-14b",
@@ -357,7 +402,12 @@
   "dim": 128,
   "ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 40,
+  "model_type": "qwen3",
+  "architecture": "Qwen3ForCausalLM",
+  "source_url": "https://huggingface.co/Qwen/Qwen3-14B/blob/main/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "deepseek-r1-qwen-14b",
@@ -366,14 +416,19 @@
   "year": 2025,
   "params": 14.8,
   "active": 14.8,
-  "layers": 40,
+  "layers": 48,
   "hidden": 5120,
   "kvt": "gqa",
   "kvh": 8,
   "dim": 128,
   "ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 40,
+  "model_type": "qwen2",
+  "architecture": "Qwen2ForCausalLM",
+  "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-14B/blob/main/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "phi-4-14b",
@@ -385,11 +440,16 @@
   "layers": 40,
   "hidden": 5120,
   "kvt": "gqa",
-  "kvh": 8,
+  "kvh": 10,
   "dim": 128,
   "ctx": 16384,
   "moe": false,
-  "conf": "reported"
+  "conf": "reported",
+  "heads": 40,
+  "model_type": "phi3",
+  "architecture": "Phi3ForCausalLM",
+  "source_url": "https://huggingface.co/microsoft/phi-4/blob/2db69c1c3e91a05d2c64a3185acfbaf36f744e25/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "gpt-oss-20b",
@@ -406,9 +466,13 @@
   "ctx": 131072,
   "moe": true,
   "conf": "official",
-  "notes": "MoE 32 专家激活 4，MXFP4 原生",
+  "notes": "MoE 32 专家激活 4，MXFP4 原生；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
   "experts": 32,
-  "topk": 4
+  "topk": 4,
+  "heads": 64,
+  "model_type": "gpt_oss",
+  "architecture": "GptOssForCausalLM",
+  "source_url": "https://huggingface.co/openai/gpt-oss-20b/blob/main/config.json"
  },
  {
   "id": "mistral-small-24b",
@@ -424,7 +488,12 @@
   "dim": 128,
   "ctx": 32768,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 32,
+  "model_type": "mistral",
+  "architecture": "MistralForCausalLM",
+  "source_url": "https://huggingface.co/mistralai/Mistral-Small-24B-Instruct-2501/blob/9527884be6e5616bdd54de542f9ae13384489724/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "gemma-2-27b",
@@ -475,9 +544,13 @@
   "ctx": 131072,
   "moe": true,
   "conf": "official",
-  "notes": "MoE 128 专家激活 8，本地高 TPS 甜点",
+  "notes": "MoE 128 专家激活 8，本地高 TPS 甜点；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
   "experts": 128,
-  "topk": 8
+  "topk": 8,
+  "heads": 32,
+  "model_type": "qwen3_moe",
+  "architecture": "Qwen3MoeForCausalLM",
+  "source_url": "https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39/config.json"
  },
  {
   "id": "qwen2.5-32b",
@@ -493,7 +566,12 @@
   "dim": 128,
   "ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 40,
+  "model_type": "qwen2",
+  "architecture": "Qwen2ForCausalLM",
+  "source_url": "https://huggingface.co/Qwen/Qwen2.5-32B/blob/1818d35814b8319459f4bd55ed1ac8709630f003/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "qwen3-32b",
@@ -509,7 +587,12 @@
   "dim": 128,
   "ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 64,
+  "model_type": "qwen3",
+  "architecture": "Qwen3ForCausalLM",
+  "source_url": "https://huggingface.co/Qwen/Qwen3-32B/blob/main/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "deepseek-r1-qwen-32b",
@@ -525,7 +608,12 @@
   "dim": 128,
   "ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 40,
+  "model_type": "qwen2",
+  "architecture": "Qwen2ForCausalLM",
+  "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B/blob/main/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "yi-1.5-34b",
@@ -541,7 +629,12 @@
   "dim": 128,
   "ctx": 32768,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 56,
+  "model_type": "llama",
+  "architecture": "LlamaForCausalLM",
+  "source_url": "https://huggingface.co/01-ai/Yi-1.5-34B/blob/main/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "mixtral-8x7b",
@@ -559,7 +652,12 @@
   "moe": true,
   "conf": "official",
   "experts": 8,
-  "topk": 2
+  "topk": 2,
+  "heads": 32,
+  "model_type": "mixtral",
+  "architecture": "MixtralForCausalLM",
+  "source_url": "https://huggingface.co/mistralai/Mixtral-8x7B-v0.1/blob/fc7ac94680e38d7348cfa806e51218e6273104b0/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "llama-3.1-70b",
@@ -612,7 +710,12 @@
   "dim": 128,
   "ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 64,
+  "model_type": "llama",
+  "architecture": "LlamaForCausalLM",
+  "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-70B/blob/main/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "qwen2.5-72b",
@@ -628,7 +731,12 @@
   "dim": 128,
   "ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "heads": 64,
+  "model_type": "qwen2",
+  "architecture": "Qwen2ForCausalLM",
+  "source_url": "https://huggingface.co/Qwen/Qwen2.5-72B/blob/efba10c8e54e91e0d9570ab5f7b51a958474d4cb/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "glm-4.5-air",
@@ -645,11 +753,15 @@
   "ctx": 131072,
   "moe": true,
   "conf": "reported",
-  "notes": "MoE，结构参数为公开报道口径",
+  "notes": "MoE，结构参数为公开报道口径；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
   "experts": 128,
   "topk": 8,
   "shared_experts": 1,
-  "moe_layers": 45
+  "moe_layers": 45,
+  "heads": 96,
+  "model_type": "glm4_moe",
+  "architecture": "Glm4MoeForCausalLM",
+  "source_url": "https://huggingface.co/zai-org/GLM-4.5-Air/blob/a24ceef6ce4f3536971efe9b778bdaa1bab18daa/config.json"
  },
  {
   "id": "llama-4-scout",
@@ -685,9 +797,13 @@
   "ctx": 131072,
   "moe": true,
   "conf": "official",
-  "notes": "MoE 128 专家激活 4，单卡 80G 可跑",
+  "notes": "MoE 128 专家激活 4，单卡 80G 可跑；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
   "experts": 128,
-  "topk": 4
+  "topk": 4,
+  "heads": 64,
+  "model_type": "gpt_oss",
+  "architecture": "GptOssForCausalLM",
+  "source_url": "https://huggingface.co/openai/gpt-oss-120b/blob/b5c939de8f754692c1647ca79fbf85e8c1e70f8a/config.json"
  },
  {
   "id": "mixtral-8x22b",
@@ -705,7 +821,12 @@
   "moe": true,
   "conf": "official",
   "experts": 8,
-  "topk": 2
+  "topk": 2,
+  "heads": 48,
+  "model_type": "mixtral",
+  "architecture": "MixtralForCausalLM",
+  "source_url": "https://huggingface.co/mistralai/Mixtral-8x22B-v0.1/blob/e1cd34ff1747406fb2277635ed25242803009bc2/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "deepseek-v2",
@@ -717,17 +838,21 @@
   "layers": 60,
   "hidden": 5120,
   "kvt": "mla",
-  "kvh": 0,
-  "dim": 0,
+  "kvh": 128,
+  "dim": 40,
   "mla": 576,
   "ctx": 131072,
   "moe": true,
   "conf": "official",
-  "notes": "MLA：KV 压缩一个数量级",
+  "notes": "MLA：KV 压缩一个数量级；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
   "experts": 160,
   "topk": 6,
   "shared_experts": 2,
-  "moe_layers": 59
+  "moe_layers": 59,
+  "heads": 128,
+  "model_type": "deepseek_v2",
+  "architecture": "DeepseekV2ForCausalLM",
+  "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-V2/blob/4461458f186c35188585855f28f77af5661ad489/config.json"
  },
  {
   "id": "qwen3-235b-a22b",
@@ -745,7 +870,12 @@
   "moe": true,
   "conf": "official",
   "experts": 128,
-  "topk": 8
+  "topk": 8,
+  "heads": 64,
+  "model_type": "qwen3_moe",
+  "architecture": "Qwen3MoeForCausalLM",
+  "source_url": "https://huggingface.co/Qwen/Qwen3-235B-A22B/blob/8efa61729e24bd65b1d152b5ab5409052aa80e65/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "glm-4.5",
@@ -765,7 +895,12 @@
   "experts": 160,
   "topk": 8,
   "shared_experts": 1,
-  "moe_layers": 89
+  "moe_layers": 89,
+  "heads": 96,
+  "model_type": "glm4_moe",
+  "architecture": "Glm4MoeForCausalLM",
+  "source_url": "https://huggingface.co/zai-org/GLM-4.5/blob/cbb2c7cfb52fa128a9660cb1a7a78e017899e115/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "llama-4-maverick",
@@ -817,9 +952,13 @@
   "ctx": 1048576,
   "moe": true,
   "conf": "reported",
-  "notes": "Lightning Attention 混合",
+  "notes": "Lightning Attention 混合；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
   "experts": 32,
-  "topk": 2
+  "topk": 2,
+  "heads": 64,
+  "model_type": "minimax_m1",
+  "architecture": "MiniMaxM1ForCausalLM",
+  "source_url": "https://huggingface.co/MiniMaxAI/MiniMax-M1-80k/blob/8d1494b1a260e22040d5b9b2eb332eb44500b34d/config.json"
  },
  {
   "id": "qwen3-coder-480b",
@@ -837,7 +976,12 @@
   "moe": true,
   "conf": "official",
   "experts": 160,
-  "topk": 8
+  "topk": 8,
+  "heads": 96,
+  "model_type": "qwen3_moe",
+  "architecture": "Qwen3MoeForCausalLM",
+  "source_url": "https://huggingface.co/Qwen/Qwen3-Coder-480B-A35B-Instruct/blob/main/config.json",
+  "notes": "attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint"
  },
  {
   "id": "deepseek-v3.1",
@@ -849,8 +993,8 @@
   "layers": 61,
   "hidden": 7168,
   "kvt": "mla",
-  "kvh": 0,
-  "dim": 0,
+  "kvh": 128,
+  "dim": 56,
   "mla": 576,
   "ctx": 131072,
   "moe": true,
@@ -858,7 +1002,11 @@
   "topk": 8,
   "mtp": true,
   "conf": "official",
-  "notes": "MoE 256 专家激活 8 + MLA"
+  "notes": "MoE 256 专家激活 8 + MLA；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
+  "heads": 128,
+  "model_type": "deepseek_v3",
+  "architecture": "DeepseekV3ForCausalLM",
+  "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-V3.1/blob/c0781d039fb7a1ba2abc4add0bdc293e92d2b8db/config.json"
  },
  {
   "id": "deepseek-r1",
@@ -870,8 +1018,8 @@
   "layers": 61,
   "hidden": 7168,
   "kvt": "mla",
-  "kvh": 0,
-  "dim": 0,
+  "kvh": 128,
+  "dim": 56,
   "mla": 576,
   "ctx": 131072,
   "moe": true,
@@ -879,7 +1027,11 @@
   "topk": 8,
   "mtp": true,
   "conf": "official",
-  "notes": "推理模型，输出长，TPM 需求按实际 token 计"
+  "notes": "推理模型，输出长，TPM 需求按实际 token 计；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
+  "heads": 128,
+  "model_type": "deepseek_v3",
+  "architecture": "DeepseekV3ForCausalLM",
+  "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-R1/blob/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/config.json"
  },
  {
   "id": "kimi-k2",
@@ -891,15 +1043,19 @@
   "layers": 61,
   "hidden": 7168,
   "kvt": "mla",
-  "kvh": 0,
-  "dim": 0,
+  "kvh": 64,
+  "dim": 112,
   "mla": 576,
   "ctx": 131072,
   "moe": true,
   "experts": 384,
   "topk": 8,
   "conf": "official",
-  "notes": "1T 总参数 384 专家激活 8 + MLA"
+  "notes": "1T 总参数 384 专家激活 8 + MLA；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
+  "heads": 64,
+  "model_type": "kimi_k2",
+  "architecture": "DeepseekV3ForCausalLM",
+  "source_url": "https://huggingface.co/moonshotai/Kimi-K2-Instruct/blob/fd1984e2b7a3350dbf7305fe73a4ede25c14de50/config.json"
  },
  {
   "id": "deepseek-v3.2",
@@ -911,8 +1067,8 @@
   "layers": 61,
   "hidden": 7168,
   "kvt": "mla",
-  "kvh": 0,
-  "dim": 0,
+  "kvh": 128,
+  "dim": 56,
   "mla": 576,
   "ctx": 163840,
   "moe": true,
@@ -920,8 +1076,12 @@
   "topk": 8,
   "mtp": true,
   "conf": "official",
-  "notes": "DSA 稀疏注意力，长上下文推理更省",
-  "sparse": 2048
+  "notes": "DSA 稀疏注意力，长上下文推理更省；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
+  "sparse": 2048,
+  "heads": 128,
+  "model_type": "deepseek_v32",
+  "architecture": "DeepseekV32ForCausalLM",
+  "source_url": "https://huggingface.co/deepseek-ai/DeepSeek-V3.2/blob/a7e62ac04ecb2c0a54d736dc46601c5606cf10a6/config.json"
  },
  {
   "id": "kimi-k2-thinking",
@@ -933,15 +1093,19 @@
   "layers": 61,
   "hidden": 7168,
   "kvt": "mla",
-  "kvh": 0,
-  "dim": 0,
+  "kvh": 64,
+  "dim": 112,
   "mla": 576,
   "ctx": 262144,
   "moe": true,
   "experts": 384,
   "topk": 8,
   "conf": "official",
-  "notes": "K2 推理版，256K 上下文"
+  "notes": "K2 推理版，256K 上下文；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
+  "heads": 64,
+  "model_type": "kimi_k2",
+  "architecture": "DeepseekV3ForCausalLM",
+  "source_url": "https://huggingface.co/moonshotai/Kimi-K2-Thinking/blob/a51ccc050d73dab088bf7b0e2dd9b30ae85a4e55/config.json"
  },
  {
   "id": "glm-4.6",
@@ -958,11 +1122,15 @@
   "ctx": 204800,
   "moe": true,
   "conf": "reported",
-  "notes": "结构沿用 4.5 公开口径",
+  "notes": "结构沿用 4.5 公开口径；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
   "experts": 160,
   "topk": 8,
   "shared_experts": 1,
-  "moe_layers": 89
+  "moe_layers": 89,
+  "heads": 96,
+  "model_type": "glm4_moe",
+  "architecture": "Glm4MoeForCausalLM",
+  "source_url": "https://huggingface.co/zai-org/GLM-4.6/blob/be72194883d968d7923a07e2f61681ea9a2826d1/config.json"
  },
  {
   "id": "minimax-m2",
@@ -971,7 +1139,7 @@
   "year": 2025,
   "params": 230,
   "active": 10,
-  "layers": 48,
+  "layers": 62,
   "hidden": 3072,
   "kvt": "gqa",
   "kvh": 8,
@@ -979,9 +1147,13 @@
   "ctx": 204800,
   "moe": true,
   "conf": "reported",
-  "notes": "结构参数待核实",
+  "notes": "结构参数待核实；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
   "experts": 256,
-  "topk": 8
+  "topk": 8,
+  "heads": 48,
+  "model_type": "minimax_m2",
+  "architecture": "MiniMaxM2ForCausalLM",
+  "source_url": "https://huggingface.co/MiniMaxAI/MiniMax-M2/blob/757303d492a50514c312788b5247a4f696a4c6a3/config.json"
  },
  {
   "id": "qwen3-next-80b-a3b",
@@ -994,7 +1166,7 @@
   "hidden": 2048,
   "kvt": "gqa",
   "kvh": 2,
-  "dim": 128,
+  "dim": 256,
   "kvlayers": 12,
   "ctx": 262144,
   "moe": true,
@@ -1002,7 +1174,11 @@
   "topk": 10,
   "mtp": true,
   "conf": "official",
-  "notes": "混合线性注意力：仅 1/4 层持 KV，长上下文极省"
+  "notes": "混合线性注意力：仅 1/4 层持 KV，长上下文极省；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
+  "heads": 16,
+  "model_type": "qwen3_next",
+  "architecture": "Qwen3NextForCausalLM",
+  "source_url": "https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct/blob/9c7f2fbe84465e40164a94cc16cd30b6999b0cc7/config.json"
  },
  {
   "id": "qwen3-vl-235b-a22b",
@@ -1019,9 +1195,13 @@
   "ctx": 262144,
   "moe": true,
   "conf": "reported",
-  "notes": "多模态，视觉编码器额外占显存",
+  "notes": "多模态，视觉编码器额外占显存；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
   "experts": 128,
-  "topk": 8
+  "topk": 8,
+  "heads": 64,
+  "model_type": "qwen3_vl_moe",
+  "architecture": "Qwen3VLMoeForConditionalGeneration",
+  "source_url": "https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct/blob/710c13861be6c466e66de3f484069440b8f31389/config.json"
  },
  {
   "id": "hunyuan-a13b",
@@ -1058,9 +1238,13 @@
   "ctx": 131072,
   "moe": true,
   "conf": "reported",
-  "notes": "结构参数待核实",
+  "notes": "结构参数待核实；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
   "experts": 64,
-  "topk": 8
+  "topk": 8,
+  "heads": 64,
+  "model_type": "ernie4_5_moe",
+  "architecture": "Ernie4_5_MoeForCausalLM",
+  "source_url": "https://huggingface.co/baidu/ERNIE-4.5-300B-A47B-PT/blob/47bbaf1c9e356313c3cb2ded9078a494fb152f0e/config.json"
  },
  {
   "id": "ling-1t",
@@ -1070,18 +1254,22 @@
   "params": 1000,
   "active": 50,
   "layers": 80,
-  "hidden": 7168,
+  "hidden": 8192,
   "kvt": "gqa",
   "kvh": 8,
   "dim": 128,
   "ctx": 131072,
   "moe": true,
   "conf": "reported",
-  "notes": "蚂蚁百灵，结构参数待核实",
+  "notes": "蚂蚁百灵，结构参数待核实；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
   "experts": 256,
   "topk": 8,
   "shared_experts": 1,
-  "moe_layers": 76
+  "moe_layers": 76,
+  "heads": 64,
+  "model_type": "bailing_moe",
+  "architecture": "BailingMoeV2ForCausalLM",
+  "source_url": "https://huggingface.co/inclusionAI/Ling-1T/blob/268f2aa76aa8cf5b36ca33805481cea91133327e/config.json"
  },
  {
   "id": "step-3",
@@ -1118,7 +1306,11 @@
   "ctx": 131072,
   "moe": false,
   "conf": "official",
-  "notes": "Mistral 推理模型"
+  "notes": "Mistral 推理模型；attention 结构已核对所链接 config；参数规模沿用精选目录，未绑定具体 checkpoint",
+  "heads": 32,
+  "model_type": "mistral",
+  "architecture": "MistralForCausalLM",
+  "source_url": "https://huggingface.co/mistralai/Magistral-Small-2506/blob/ad2fce5b4113139e1877dcadfd826c9262ad8e8c/config.json"
  },
  {
   "id": "gemma-3n-e4b",

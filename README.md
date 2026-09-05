@@ -103,6 +103,8 @@ pkill -TERM -x llmcalc
 5. 展开“高级参数”可设置 TP/PP/EP/CP、KV offload、prefill chunk、推测接受 token/开销和其他实测校准值。
 6. 负载修改后自动重算；输入无效或接口失败时隐藏过期结果，避免将旧数字当作当前结论。顶部区分显存不可行、引擎不兼容与可继续验证的配置。
 
+显存分解按每卡显示。显存不足时优先报告每卡需求与容量；不重复展示无效性能区域。
+
 结果明确返回 `support`（`supported` / `conditional` / `unsupported` / `unknown`）、`support_reason`、`estimate_valid`、`deployable`。`fit` 始终只表示显存条件；无效估算不展示速度、时延或有效吞吐，未知/不支持的组合不进入自动选型。有条件的方案仅为候选，不标为已确认部署。
 
 HBM/FLOPs/link 利用率、调度或其他覆盖值属于用户场景假设。缺少同条件 benchmark、运行栈版本与残差评估时，不使用 `calibrated` 标签。
@@ -147,6 +149,8 @@ M/M/c 使用泊松到达、指数服务和独立副本假设，仅用于候选�
 | `POST` | `/api/plan` | 部署方案枚举 |
 | `POST` | `/api/recommend` | 模型/硬件方向的单目标或 Pareto 处方 |
 
+`/api/plan` 和模型方向的 `/api/recommend` 在模型结构数据不足时返回 HTTP 422 和具体缺失原因；正常计算但约束无解才返回空候选。
+
 `/api/fit` 可附带 `models`（模型 ID 数组）只计算指定模型；可附带 `workload` 使用与性能页相同的分桶计算。不提供 `workload` 时使用 `ctx` 对应的单桶、512 个输出 token。
 
 性能估算示例：
@@ -176,9 +180,9 @@ go run ./scripts/collect -source hf -all -min-year 2023
 go run ./scripts/collect -source modelscope -all -min-year 2023
 ```
 
-结果分别写入 `data/models_hf.json` 和 `data/models_modelscope.json`。同一官方范围内采用 **只增不删**：同 ID 使用新元数据更新，本次解析失败的旧条目原样保留；执行 `-all` 时会清除不在已核实发布机构列表中的自动采集条目。可用 `-orgs Qwen,deepseek-ai,...` 缩小内置已核实发布机构范围，`-refresh` 强制重拉已有条目；非内置机构不会写入默认库。
+结果分别写入 `data/models_hf.json` 和 `data/models_modelscope.json`。同一官方范围内采用 **只增不删**：同 ID 使用新元数据更新，本次解析失败的旧条目原样保留；缺少 query heads、架构、参数来源或 revision 的旧条目会自动重解析，无需指定 `-refresh`；执行 `-all` 时会清除不在已核实发布机构列表中的自动采集条目。可用 `-orgs Qwen,deepseek-ai,...` 缩小内置已核实发布机构范围，`-refresh` 强制重拉已有条目；非内置机构不会写入默认库。
 
-采集器按 SHA 固定 config、index 和单文件元数据读取；逻辑参数量与打包存储量分开，处理 tied embeddings、显式嵌套量化格式及 MQA。缺少证据时不再由 payload/参数量反推位宽，也不猜 GQA-8。`param_source` 区分 config、未打包逻辑计数、model_card、name 和 unknown。旧记录未经刷新不会自动获得核验标记；官方发布机构不等于所有字段已核验。
+采集器按 SHA 固定 config、index 和单文件元数据读取；逻辑参数量与打包存储量分开，处理 tied embeddings、显式嵌套量化格式及 MQA。缺少证据时不再由 payload/参数量反推位宽，也不猜 GQA-8。`param_source` 区分 config、未打包逻辑计数、model_card、name 和 unknown。旧记录未经刷新不会自动获得核验标记；精选目录的 attention 结构补录附有对应 config 链接，沿用的参数规模仍按未绑定 checkpoint 的条件场景处理；官方发布机构不等于所有字段已核验。
 
 ModelScope OpenAPI 对单个发布机构查询设有 3,000 条上限；超过该上限需要按更细的发布机构范围分批同步。
 

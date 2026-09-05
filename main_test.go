@@ -82,3 +82,49 @@ func TestValidatePlanOptionsRejectsInconsistentBounds(t *testing.T) {
 		t.Fatalf("valid planner bounds rejected: %v", err)
 	}
 }
+
+func TestScreenshotScenarios(t *testing.T) {
+	mustLoad()
+	m := findModel("qwen--qwen3.8-27b")
+	if m == nil || m.Heads != 24 || m.ParamSource != "safetensors" || m.Revision == "" {
+		t.Fatalf("Qwen catalog metadata is incomplete: %+v", m)
+	}
+	w := []calc.WorkloadBucket{{Context: 8192, Output: 512, Share: 1}}
+	plans := calc.Planner(hws, *m, calc.PlanOpts{TargetTPM: 1e6, QuantOnly: "fp4"}, w, 16, calc.Opts{})
+	if len(plans) == 0 {
+		t.Fatal("Qwen NVFP4 at 1M TPM must have a candidate in the real hardware catalog")
+	}
+	for _, p := range plans {
+		if (p.Support != "supported" && p.Support != "conditional") || p.TPM < 1e6 {
+			t.Fatalf("invalid or insufficient plan: %+v", p)
+		}
+	}
+	rec := calc.Recommend(hws, models, *m, w, calc.RecommendOpts{TargetTPM: 6000, Conc: 16}, calc.Opts{})
+	if len(rec.Picks) == 0 {
+		t.Fatal("Qwen default prescription must not be empty")
+	}
+	for _, id := range []string{"deepseek-r1", "qwen3-32b", "qwen3-next-80b-a3b", "gpt-oss-120b"} {
+		model := findModel(id)
+		if model == nil {
+			t.Fatalf("missing curated model %s", id)
+		}
+		if _, reason, valid := calc.ModelSupport(*model, calc.Opts{}); !valid {
+			t.Errorf("curated model %s blocked by missing metadata: %s", id, reason)
+		}
+	}
+	bad := *m
+	bad.Heads = 0
+	if _, reason, valid := calc.ModelSupport(bad, calc.Opts{}); valid || reason == "" {
+		t.Fatal("missing query heads must explain the data issue without fabricating geometry")
+	}
+	perf := calc.ThroughputWorkload(*findHW("rtx2080"), *findModel("llama-3.1-70b"), calc.QuantByID("q4km"),
+		[]calc.WorkloadBucket{{Context: 4096, Output: 512, Share: 1}}, 4, 4, calc.Opts{})
+	if perf.Fit || perf.Deployable || perf.Mem.Weights <= perf.Mem.Cap {
+		t.Fatalf("4x8GB cannot hold 70B Q4_K_M weights: %+v", perf)
+	}
+	perf = calc.ThroughputWorkload(*findHW("rtx4090"), *findModel("llama-3.1-8b"), calc.QuantByID("q4km"),
+		[]calc.WorkloadBucket{{Context: 4096, Output: 512, Share: 1}}, 4, 1, calc.Opts{})
+	if !perf.EstimateValid || !perf.Fit || perf.SingleTPS <= 0 {
+		t.Fatalf("the default performance example must be calculable: %+v", perf)
+	}
+}

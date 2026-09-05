@@ -383,7 +383,7 @@ func main() {
 	only := flag.String("only", "", "只采集指定仓库（逗号分隔完整 id），结果合并进 out 而非覆盖")
 	minYear := flag.Int("min-year", 2023, "只采集该年份及之后创建的模型")
 	all := flag.Bool("all", false, "分页采集已核实机构的全部 LLM / 多模态 LLM 仓库")
-	refresh := flag.Bool("refresh", false, "重新解析已入库模型；默认只解析新增仓库")
+	refresh := flag.Bool("refresh", false, "重新解析已入库模型；默认解析新增及元数据不完整的仓库")
 	out := flag.String("out", "", "输出文件；默认按数据源写入 data/models_hf.json 或 data/models_modelscope.json")
 	flag.Parse()
 
@@ -509,10 +509,7 @@ func main() {
 				}
 				e = response.Data.catalogEntry()
 			} else {
-				if err := getJSON(c, host+"/api/models/"+id, &e); err != nil {
-					fmt.Fprintf(os.Stderr, "%s 信息拉取失败: %v\n", id, err)
-					continue
-				}
+				// parseOne fetches the detail in the bounded worker pool below.
 				e.ID = id
 			}
 			e.Official = officialPublishers[strings.ToLower(strings.SplitN(id, "/", 2)[0])]
@@ -558,7 +555,7 @@ func main() {
 	}
 	oldIDs := make(map[string]bool, len(old))
 	for _, m := range old {
-		oldIDs[m.ID] = true
+		oldIDs[m.ID] = metadataComplete(m)
 	}
 
 	type result struct {
@@ -649,6 +646,11 @@ func main() {
 	for why, n := range fail {
 		fmt.Printf("  跳过 %d 个：%s\n", n, why)
 	}
+}
+
+func metadataComplete(m outModel) bool {
+	return m.Revision != "" && m.Heads > 0 && (m.ModelType != "" || m.Architecture != "") &&
+		(m.ParamSource == "config" || m.ParamSource == "safetensors" || m.ParamSource == "model_card")
 }
 
 // mergeModels 只用新数据更新同 ID 条目，永远不因本次限流、筛选或解析失败删除旧数据。

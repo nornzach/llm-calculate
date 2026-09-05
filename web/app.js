@@ -983,7 +983,7 @@ async function boot() {
   CS["map-model"].set("qwen3-8b", true); CS["map-preset"].set("balanced", true);
   CS["rec-qonly"].set("", true); CS["rec-preset"].set("balanced", true);
   CS["f-hw"].set("rtx4090", true); CS["f-ctx"].set("8192", true);
-  CS["p-hw"].set("rtx4090", true); CS["p-model"].set("llama-3.1-70b", true);
+  CS["p-hw"].set("rtx4090", true); CS["p-model"].set("llama-3.1-8b", true);
   CS["p-quant"].set("q4km", true);
   CS["pl-model"].set("deepseek-r1", true);
   CS["pl-qonly"].set("", true); CS["hw-vendor"].set("", true);
@@ -1269,7 +1269,12 @@ async function runPerf() {
   const used = segs.reduce((sum, item) => sum + item[1], 0);
   const memoryKnown = cap > 0;
   const effectiveQuant = QUANTS.find(q => q.id === p.quant);
-  const verdict = !valid
+  const memoryAdvice = Number(d.weights) > cap
+    ? tr(`Weights alone need ${fmt.gb(d.weights)} per card. Use smaller weights or more GPU memory/cards.`, `仅权重就需要每卡 ${fmt.gb(d.weights)}，请减小权重或增加卡数 / 显存。`)
+    : tr("Reduce concurrency or workload length, use smaller weights, or add GPU memory.", "请降低并发、缩短负载、减小权重或增加显存。");
+  const verdict = memoryKnown && !p.fit
+    ? tr(`Insufficient memory: each card needs ${fmt.gb(d.p999_total)} / ${fmt.gb(cap)} available (${body.n} cards). `, `显存不足：每卡需要 ${fmt.gb(d.p999_total)}，每卡只有 ${fmt.gb(cap)}（共 ${body.n} 卡）。`) + memoryAdvice
+    : !valid
     ? tr("Performance unavailable. Memory diagnostics, when present, are capacity-only.", "性能估算不可用；如有显存诊断，也只表示容量。")
     : deployable
       ? tr(`Modeled deployment candidate; maximum modeled concurrency ${p.max_batch}. Benchmark the exact stack before production.`, `模型判断为部署候选；模型估算最大并发 ${p.max_batch}。生产使用前须对完全相同的栈做基准测试。`)
@@ -1280,7 +1285,7 @@ async function runPerf() {
           : tr("Memory fits only; the returned status does not confirm deployment.", "仅显存可容纳；返回状态并未确认可部署。");
   $("#perfVerdict").classList.toggle("bad", !valid || ["unsupported", "unknown"].includes(p.support));
   $("#perfVerdict").classList.toggle("warn", valid && !deployable);
-  $("#perfVerdict").textContent = `${supportLabel(p.support)} — ${verdict} ${reason}` +
+  $("#perfVerdict").textContent = `${verdict} ${supportLabel(p.support)}${reason ? " — " + reason : ""}` +
     (!p.kv_supported ? tr(" Selected KV precision was not applied; memory uses the returned fallback accounting.", " 所选 KV 精度未生效；显存按接口返回的回退口径计算。") : "");
 
   if (valid) {
@@ -1299,7 +1304,7 @@ async function runPerf() {
       [tr("Decode bottleneck", "decode 瓶颈"), bottleneck, `memory ${fmt.ms(p.decode_mem_ms)} · compute ${fmt.ms(p.decode_compute_ms)} · comm ${fmt.ms(p.comm_ms)}`],
       [tr("Estimate basis", "估算口径"), accuracyLabel(p.accuracy), basis],
     ].map(([key, value, unit, hot]) =>
-      `<div class="stat ${deployable ? "" : "bad"} ${hot ? "hot" : ""}"><div class="k">${escapeHTML(key)}</div><div class="v">${escapeHTML(value)}</div><div class="u">${escapeHTML(unit)}</div></div>`).join("");
+      `<div class="stat ${hot ? "hot" : ""}"><div class="k">${escapeHTML(key)}</div><div class="v">${escapeHTML(value)}</div><div class="u">${escapeHTML(unit)}</div></div>`).join("");
 
     const bottleneckName = ({ compute: tr("compute", "算力"), memory: tr("memory bandwidth", "显存带宽"), offload: "KV offload" })[p.bottleneck] || p.bottleneck || "—";
     const flow = [
@@ -1321,11 +1326,12 @@ async function runPerf() {
       <td class="n" style="color:var(--${bucket.fit ? "ok" : "bad"})">${fmt.gb(bucket.batch_memory)}</td>
     </tr>`).join("")}</tbody></table></div>` : `<div class="detail-callout warn">${tr("No workload breakdown was returned.", "接口未返回工作负载明细。")}</div>`;
   } else {
-    const unavailable = `${tr("No speed, throughput, or latency is shown because the estimate is invalid.", "由于估算无效，不显示速度、吞吐或时延。")} ${reason}`;
-    $("#perfHero").innerHTML = `<div class="stat bad status-only"><div class="k">${tr("Performance status", "性能状态")}</div><div class="v">${escapeHTML(supportLabel(p.support))}</div><div class="u">${escapeHTML(unavailable)}</div></div>`;
-    $("#perfFlow").innerHTML = `<div class="detail-callout bad">${escapeHTML(unavailable)}</div>`;
-    $("#perfBuckets").innerHTML = `<div class="detail-callout bad">${escapeHTML(tr("Workload performance details are unavailable for this invalid estimate.", "该无效估算没有工作负载性能明细。"))}</div>`;
+    $("#perfHero").innerHTML = $("#perfFlow").innerHTML = $("#perfBuckets").innerHTML = "";
   }
+  $("#perfHero").style.display = valid ? "" : "none";
+  ["#perfFlow", "#perfBuckets", "#curveBox"].forEach(selector => {
+    $(selector).style.display = $(selector).previousElementSibling.style.display = valid ? "" : "none";
+  });
 
   const colors = { vw: "var(--weight)", vkv: "var(--kv)", vfw: "var(--runtime)", vact: "var(--active)", vadp: "var(--adapter)", vsys: "var(--reserve)" };
   if (memoryKnown) {
@@ -1338,9 +1344,9 @@ async function runPerf() {
       `<span><i style="background:transparent;border:1px solid var(--line2)"></i>${tr("Mean free", "均值空闲")} <span class="mono">${fmt.gb(Math.max(0, cap - used))}</span></span>` +
       (d.offloaded_kv > 0 ? `<span>${tr("External KV", "外部 KV")} <span class="mono">${fmt.gb(d.offloaded_kv)}</span></span>` : "") + `</div>`;
     $("#perfFitState").innerHTML = p.fit
-      ? `<span style="color:var(--${deployable ? "ok" : "warn"})">${tr(`Memory-only: P99.9 fits · ${fmt.gb(d.p999_total)} / ${fmt.gb(cap)} · ${(Number(d.head_pct) * 100).toFixed(0)}% headroom`, `仅显存：P99.9 可容纳 · ${fmt.gb(d.p999_total)} / ${fmt.gb(cap)} · 余量 ${(Number(d.head_pct) * 100).toFixed(0)}%`)}</span>`
+      ? `<span style="color:var(--${deployable ? "ok" : "warn"})">${tr(`Per-card memory: P99.9 fits · ${fmt.gb(d.p999_total)} / ${fmt.gb(cap)} · ${(Number(d.head_pct) * 100).toFixed(0)}% headroom`, `每卡显存：P99.9 可容纳 · ${fmt.gb(d.p999_total)} / ${fmt.gb(cap)} · 余量 ${(Number(d.head_pct) * 100).toFixed(0)}%`)}</span>`
       : `<span style="color:var(--bad)">${Number(d.p999_total) > cap
-        ? tr(`Memory-only: P99.9 is ${fmt.gb(Number(d.p999_total) - cap)} above physical VRAM`, `仅显存：P99.9 超物理显存 ${fmt.gb(Number(d.p999_total) - cap)}`)
+        ? tr(`Per-card memory: P99.9 is ${fmt.gb(Number(d.p999_total) - cap)} above physical VRAM`, `每卡显存：P99.9 超物理显存 ${fmt.gb(Number(d.p999_total) - cap)}`)
         : tr("Memory-only: a tail bucket cannot fit even one request.", "仅显存：尾部分桶连单个请求都装不下。")}</span>`;
   } else {
     $("#vramBar").innerHTML = `<div class="detail-callout warn">${tr("No meaningful memory diagnostic was returned.", "接口未返回有意义的显存诊断。")}</div>`;
@@ -1360,7 +1366,6 @@ async function runPerf() {
 
   $("#curveBox").innerHTML = "";
   if (valid && curve.length) drawCurve(curve, body.batch);
-  else if (!valid) $("#curveBox").innerHTML = `<div class="detail-callout bad">${escapeHTML(tr("Speed sweep hidden because the performance estimate is invalid.", "性能估算无效，已隐藏速度扫描。"))}</div>`;
 }
 
 function drawCurve(curve, curB) {

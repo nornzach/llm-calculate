@@ -623,8 +623,7 @@ func LoadModels(b []byte) ([]Model, error) {
 			return nil, fmt.Errorf("model %q has invalid head/context metadata", m.ID)
 		}
 		if m.Heads > 0 && (m.KVT == "mha" || m.KVT == "gqa") {
-			if (m.standardHeadShape() && math.Abs(float64(m.Heads*m.Dim)-m.Hidden) > 1e-9) ||
-				(m.KVT == "mha" && m.KVH != m.Heads) ||
+			if (m.KVT == "mha" && m.KVH != m.Heads) ||
 				(m.KVT == "gqa" && (m.Heads < m.KVH || m.Heads%m.KVH != 0)) {
 				return nil, fmt.Errorf("model %q has inconsistent attention heads", m.ID)
 			}
@@ -835,31 +834,9 @@ func quantSupport(h HW, q Quant, eng Engine, lang string) (string, string, bool)
 	return "supported", "", true
 }
 
-func assessSupport(h HW, m Model, q Quant, eng Engine, t topology, cards, ctx int, o Opts) supportAssessment {
+// ModelSupport checks model metadata independently of hardware or target throughput.
+func ModelSupport(m Model, o Opts) (status, reason string, valid bool) {
 	a := supportAssessment{status: "supported", estimateValid: true}
-	if h.Svc || h.Cls == "supernode" {
-		a.add("unsupported", localText(o.Lang, "Aggregate service or supernode rows are not single-device roofline inputs", "聚合服务或超节点条目不能作为单设备 roofline 输入"), false)
-	}
-	if h.VRAM <= 0 || h.BW <= 0 || h.TF <= 0 {
-		a.add("unknown", localText(o.Lang, "Hardware lacks per-device memory, bandwidth, or dense compute inputs", "硬件缺少单设备显存、带宽或 dense 算力输入"), false)
-	}
-	switch h.PeakKind {
-	case "dense_matrix":
-		if h.SourceURL == "" {
-			a.add("conditional", localText(o.Lang, "Dense matrix peak is declared without a source", "dense 矩阵峰值已声明但缺少来源"), true)
-		}
-	case "vector":
-		a.add("conditional", localText(o.Lang, "Vector peak is used as a compute ceiling; matrix-kernel efficiency is not certified", "使用向量峰值作为计算上限；矩阵内核效率未经核验"), true)
-	case "estimated":
-		a.add("conditional", localText(o.Lang, "Dense compute peak is estimated rather than a sourced specification", "dense 算力峰值为估计值而非有来源的规格"), true)
-	default:
-		a.add("conditional", localText(o.Lang, "Dense compute peak provenance is unknown; TF is treated as a scenario input", "dense 算力峰值来源未知；TF 仅作为场景输入"), true)
-	}
-	status, reason := engineSupport(eng, h, o.Lang)
-	a.add(status, reason, status == "supported" || status == "conditional")
-	status, reason, valid := quantSupport(h, q, eng, o.Lang)
-	a.add(status, reason, valid)
-
 	family := executionFamily(m)
 	if strings.Contains(family, "diffusion") || strings.Contains(family, "llada") ||
 		strings.Contains(family, "dflashdraft") || strings.Contains(family, "efficientdlm") ||
@@ -900,9 +877,8 @@ func assessSupport(h HW, m Model, q Quant, eng Engine, t topology, cards, ctx in
 			a.add("unknown", localText(o.Lang, "Attention head geometry is incomplete", "attention 头几何信息不完整"), false)
 		}
 		if heads, ok := m.queryHeads(); ok {
-			if m.standardHeadShape() && math.Abs(float64(heads*m.Dim)-m.Hidden) > 1e-9 {
-				a.add("unknown", localText(o.Lang, "Query heads, head dimension, and hidden size disagree", "query heads、head dimension 与 hidden size 不一致"), false)
-			}
+			// Attention projections may have a different width from the residual
+			// stream (e.g. Llama Minitron, Falcon-H1 and Qwen3).
 			if m.KVT == "mha" && m.KVH != heads {
 				a.add("unknown", localText(o.Lang, "MHA query and KV head counts disagree", "MHA 的 query 与 KV 头数不一致"), false)
 			}
@@ -919,6 +895,37 @@ func assessSupport(h HW, m Model, q Quant, eng Engine, t topology, cards, ctx in
 	default:
 		a.add("unknown", localText(o.Lang, "Attention execution geometry is unknown", "attention 执行几何信息未知"), false)
 	}
+
+	return a.status, a.reason, a.estimateValid
+}
+
+func assessSupport(h HW, m Model, q Quant, eng Engine, t topology, cards, ctx int, o Opts) supportAssessment {
+	a := supportAssessment{status: "supported", estimateValid: true}
+	if h.Svc || h.Cls == "supernode" {
+		a.add("unsupported", localText(o.Lang, "Aggregate service or supernode rows are not single-device roofline inputs", "聚合服务或超节点条目不能作为单设备 roofline 输入"), false)
+	}
+	if h.VRAM <= 0 || h.BW <= 0 || h.TF <= 0 {
+		a.add("unknown", localText(o.Lang, "Hardware lacks per-device memory, bandwidth, or dense compute inputs", "硬件缺少单设备显存、带宽或 dense 算力输入"), false)
+	}
+	switch h.PeakKind {
+	case "dense_matrix":
+		if h.SourceURL == "" {
+			a.add("conditional", localText(o.Lang, "Dense matrix peak is declared without a source", "dense 矩阵峰值已声明但缺少来源"), true)
+		}
+	case "vector":
+		a.add("conditional", localText(o.Lang, "Vector peak is used as a compute ceiling; matrix-kernel efficiency is not certified", "使用向量峰值作为计算上限；矩阵内核效率未经核验"), true)
+	case "estimated":
+		a.add("conditional", localText(o.Lang, "Dense compute peak is estimated rather than a sourced specification", "dense 算力峰值为估计值而非有来源的规格"), true)
+	default:
+		a.add("conditional", localText(o.Lang, "Dense compute peak provenance is unknown; TF is treated as a scenario input", "dense 算力峰值来源未知；TF 仅作为场景输入"), true)
+	}
+	status, reason := engineSupport(eng, h, o.Lang)
+	a.add(status, reason, status == "supported" || status == "conditional")
+	status, reason, valid := quantSupport(h, q, eng, o.Lang)
+	a.add(status, reason, valid)
+
+	modelStatus, modelReason, modelValid := ModelSupport(m, o)
+	a.add(modelStatus, modelReason, modelValid)
 
 	if !t.valid {
 		a.add("unsupported", localText(o.Lang, "TP×PP×EP×CP must exactly match the requested card count", "TP×PP×EP×CP 必须精确匹配请求卡数"), false)

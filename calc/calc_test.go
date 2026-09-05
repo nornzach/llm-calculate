@@ -1,6 +1,7 @@
 package calc
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -1148,8 +1149,8 @@ func TestMultimodalUnknownEncoderIsNotDeployable(t *testing.T) {
 }
 
 func TestCatalogLoadersRejectInvalidAuditMetadata(t *testing.T) {
-	if _, err := LoadModels([]byte(`[{"id":"bad","name":"Bad","org":"x","params":3,"active":2,"layers":1,"hidden":4,"heads":3,"model_type":"llama","kvt":"gqa","kvh":1,"dim":2,"ctx":1}]`)); err == nil {
-		t.Fatal("inconsistent conventional query head geometry must fail catalog loading")
+	if _, err := LoadModels([]byte(`[{"id":"bad","name":"Bad","org":"x","params":3,"active":2,"layers":1,"hidden":4,"heads":3,"model_type":"llama","kvt":"gqa","kvh":2,"dim":2,"ctx":1}]`)); err == nil {
+		t.Fatal("non-divisible query/KV grouping must fail catalog loading")
 	}
 	qwen3JSON := []byte(`[{"id":"qwen3","name":"Qwen3","org":"x","params":0.6,"active":0.6,"layers":28,"hidden":1024,"heads":16,"model_type":"qwen3","architecture":"Qwen3ForCausalLM","kvt":"gqa","kvh":8,"dim":128,"ctx":32768,"extended_ctx":131072,"param_source":"config","revision":"test"}]`)
 	models, err := LoadModels(qwen3JSON)
@@ -1159,6 +1160,20 @@ func TestCatalogLoadersRejectInvalidAuditMetadata(t *testing.T) {
 	p := Throughput(h100, models[0], QuantByID("fp16"), 4096, 1, 1, Opts{})
 	if !p.EstimateValid || p.Support != "supported" || p.SingleTPS <= 0 {
 		t.Fatalf("explicit Qwen3 heads should be modeled without Hidden/Dim rejection: %+v", p)
+	}
+	for _, family := range []string{"llama", "falcon_h1"} {
+		// NVIDIA Minitron uses 32 x 128 attention width with hidden_size 3072.
+		wide := models[0]
+		wide.ModelType, wide.Architecture = family, ""
+		wide.Hidden, wide.Heads, wide.Dim = 3072, 32, 128
+		b, _ := json.Marshal([]Model{wide})
+		if _, err := LoadModels(b); err != nil {
+			t.Fatalf("explicit %s projection width must load: %v", family, err)
+		}
+		perf := Throughput(h100, wide, QuantByID("fp16"), 4096, 1, 1, Opts{})
+		if !perf.EstimateValid || perf.SingleTPS <= 0 || wide.attentionWidth() != 4096 {
+			t.Fatalf("independent %s attention width rejected: %+v", family, perf)
+		}
 	}
 	missingHeads := models[0]
 	missingHeads.Heads = 0
