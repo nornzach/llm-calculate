@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -964,11 +965,11 @@ func assessSupport(h HW, m Model, q Quant, eng Engine, t topology, cards, ctx in
 	} else if ctx > m.Ctx {
 		switch {
 		case m.ExtendedCtx <= 0:
-			a.add("unknown", localText(o.Lang, "Requested context exceeds the native limit and no verified extended limit is available", "请求上下文超过原生上限，且没有已核验的扩展上限"), false)
+			a.add("unknown", localText(o.Lang, "Input plus output exceeds the native limit and no verified extended limit is available", "输入加输出超过原生上限，且没有已核验的扩展上限"), false)
 		case ctx > m.ExtendedCtx:
-			a.add("unsupported", localText(o.Lang, "Requested context exceeds the verified extended limit", "请求上下文超过已核验的扩展上限"), false)
+			a.add("unsupported", localText(o.Lang, "Input plus output exceeds the verified extended limit", "输入加输出超过已核验的扩展上限"), false)
 		default:
-			a.add("conditional", localText(o.Lang, "Requested context uses an extended rather than native limit", "请求上下文使用扩展上限而非原生上限"), true)
+			a.add("conditional", localText(o.Lang, "Input plus output requires the extended context limit", "输入加输出需要扩展上下文上限"), true)
 		}
 	}
 	return a
@@ -1100,10 +1101,14 @@ func (m Model) KVBytes(ctx int) float64 {
 // KVBatchBytes 返回 batch 个请求在共享前缀命中时实际驻留的 FP16 KV 字节。
 // full-attention 前缀 block 只存一份；local-attention 仅共享仍落在滑窗内的尾部。
 func (m Model) KVBatchBytes(ctx, batch int, hit float64) float64 {
+	return m.kvBatchBytes(ctx, batch, int(float64(ctx)*clamp(hit, 0, 1)))
+}
+
+func (m Model) kvBatchBytes(ctx, batch, shared int) float64 {
 	if ctx <= 0 || batch <= 0 {
 		return 0
 	}
-	shared := min(ctx, int(float64(ctx)*clamp(hit, 0, 1)))
+	shared = min(ctx, max(0, shared))
 	local := m.localLayers()
 	full := m.kvLayers() - local
 	fullTokens := shared + (ctx-shared)*batch
@@ -1180,7 +1185,9 @@ func Memory(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) MemDetail {
 		textWeight*(parts.baseTotal/math.Max(textParams, 1e-9)/(float64(t.tp)*float64(t.pp))+
 			parts.expertTotal/math.Max(textParams, 1e-9)/(float64(t.tp)*float64(t.ep)*float64(t.pp)))
 
-	kvRaw := m.KVBatchBytes(ctx, batch, o.HitRate) / 1e9 * o.kvMemF(h, eng) * o.KVOverhead *
+	// The first output token comes from prefill; subsequent tokens append KV.
+	// Only input-prefix blocks may be shared across requests.
+	kvRaw := m.kvBatchBytes(ctx+max(0, o.OutLen-1), batch, int(float64(ctx)*o.HitRate)) / 1e9 * o.kvMemF(h, eng) * o.KVOverhead *
 		m.kvRankFactor(t.tp) / (float64(t.pp) * float64(t.cp))
 	offloadedKV := kvRaw * o.KVOffload
 	state := m.StateMB / 1000 * float64(batch) / (float64(t.tp) * float64(t.pp))
@@ -1545,7 +1552,7 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	kvmf, kvrf := o.kvMemF(h, eng), o.kvReadF(h, eng)
 	mem := Memory(h, m, q, ctx, batch, cards, o)
 	engineStatus, _ := engineSupport(eng, h, o.Lang)
-	assessment := assessSupport(h, m, q, eng, t, max(1, cards), ctx, o)
+	assessment := assessSupport(h, m, q, eng, t, max(1, cards), ctx+o.OutLen, o)
 	p := Perf{
 		Fit: mem.Fit, Mem: mem, QuantID: q.ID, QuantLocked: quantLocked,
 		KVSupported: o.kvSupported(h, eng), Accel: h.Accel(q),
@@ -1555,7 +1562,7 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 		Support: assessment.status, SupportReason: assessment.reason, EstimateValid: assessment.estimateValid,
 	}
 	p.Deployable = p.EstimateValid && p.Support == "supported" && p.Fit
-	if h.PeakKind != "dense_matrix" || o.hasScenarioInputs() {
+	if h.PeakKind != "dense_matrix" || o.hasScenarioInputs() || m.Src == "custom" || m.ParamSource == "user-supplied" {
 		p.Accuracy = "scenario"
 	}
 	if !p.EstimateValid {
@@ -1576,14 +1583,17 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	skew := routerSkew(m, float64(batch), t.ep, o)
 	activeW := activeWeightRead(m, batch)
 	wGB := activeW * bytesPerParam / float64(t.tp)
-	linearActive := math.Max(0, m.Active-m.EncoderParams)
+	linearActive := math.Max(0, math.Min(m.Active, m.Params-m.EncoderParams))
 	if parts.expertTotal > 0 {
 		wGB = (parts.baseTotal + parts.expertRead*skew/float64(t.ep)) * bytesPerParam / float64(t.tp)
 		linearActive = parts.baseTotal + parts.expertActive*skew/float64(t.ep)
 	}
 	wGB += o.AdapterGB / float64(t.tp)
 
-	kvReadCtx := ctx
+	// ponytail: mean decode length approximates a growing cache; per-step
+	// simulation is needed for exact long-generation timing.
+	decodeCtx := ctx + max(0, o.OutLen-1)/2
+	kvReadCtx := decodeCtx
 	if m.Sparse > 0 && float64(kvReadCtx) > m.Sparse {
 		kvReadCtx = int(m.Sparse)
 	}
@@ -1605,11 +1615,11 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	attnL := m.kvLayers()
 	localL := m.localLayers()
 	fullL := attnL - localL
-	fullKeys := float64(ctx)
+	fullKeys := float64(decodeCtx)
 	if m.Sparse > 0 {
 		fullKeys = math.Min(fullKeys, m.Sparse)
 	}
-	localKeys := float64(ctx)
+	localKeys := float64(decodeCtx)
 	if localL > 0 {
 		localKeys = math.Min(localKeys, float64(m.Window))
 	}
@@ -1670,7 +1680,7 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	inEff := float64(ctx) * (1 - o.HitRate)
 	preTokens := inEff / float64(t.cp)
 	preSkew := routerSkew(m, math.Max(1, preTokens), t.ep, o)
-	preActive := math.Max(0, m.Active-m.EncoderParams)
+	preActive := math.Max(0, math.Min(m.Active, m.Params-m.EncoderParams))
 	preParts := m.weights(max(1, int(math.Min(inEff, 1e6))))
 	preRead := activeWeightRead(m, max(1, int(math.Min(inEff, 1e6))))
 	if preParts.expertTotal > 0 {
@@ -1736,8 +1746,9 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	p.ReqMs = round1(tPre + decodeTokens*tStep/g)
 	p.tPre = tPre
 	kvScale := m.kvRankFactor(t.tp) / (float64(t.pp) * float64(t.cp)) * kvmf * o.KVOverhead * (1 - o.KVOffload) / 1e9
-	kvOne := m.KVBatchBytes(ctx, 1, o.HitRate) * kvScale
-	kvPerReq := (m.KVBatchBytes(ctx, 2, o.HitRate)-m.KVBatchBytes(ctx, 1, o.HitRate))*kvScale +
+	kvCtx, shared := ctx+max(0, o.OutLen-1), int(float64(ctx)*o.HitRate)
+	kvOne := m.kvBatchBytes(kvCtx, 1, shared) * kvScale
+	kvPerReq := (m.kvBatchBytes(kvCtx, 2, shared)-m.kvBatchBytes(kvCtx, 1, shared))*kvScale +
 		m.StateMB/1000/(float64(t.tp)*float64(t.pp))
 	actPerReq := mem.Act / float64(max(1, batch))
 	fixed := mem.Weights + mem.Fw + mem.Adapter + math.Max(0, kvOne-kvPerReq)
@@ -1769,7 +1780,7 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	}
 	p.Trace = []TraceRow{
 		tr(localText(o.Lang, "Estimate status", "估算级别"), p.Accuracy,
-			localText(o.Lang, "analytical is an uncalibrated roofline; scenario means user-supplied utilization inputs were applied", "analytical 为未校准 roofline；scenario 表示应用了用户输入的利用率参数")),
+			localText(o.Lang, "analytical is an uncalibrated roofline; scenario uses unverified peak inputs or custom/advanced assumptions", "analytical 为未校准 roofline；scenario 使用未核验峰值或自定义/高级假设")),
 		tr(localText(o.Lang, "Support", "支持状态"), p.Support, p.SupportReason),
 		tr(localText(o.Lang, "Parallel topology", "并行拓扑"), p.Topology,
 			localText(o.Lang, fmt.Sprintf("%d cards; the product must match", cards), fmt.Sprintf("%d cards；乘积必须相等", cards))),
@@ -1832,9 +1843,9 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 		p.Trace = append(p.Trace, tr(localText(o.Lang, "⚠ Multimodal encoder", "⚠ 多模态 encoder"), localText(o.Lang, "Unknown parameter count", "参数量未知"),
 			localText(o.Lang, "The text tower is modeled; media encoder TTFT is omitted", "文本塔可计算；媒体 encoder TTFT 未计入")))
 	}
-	if m.Ctx > 0 && ctx > m.Ctx {
+	if m.Ctx > 0 && ctx+o.OutLen > m.Ctx {
 		p.Trace = append(p.Trace, tr(localText(o.Lang, "⚠ Context extension", "⚠ 上下文外推"),
-			localText(o.Lang, fmt.Sprintf("%dK > %dK native", ctx/1024, m.Ctx/1024), fmt.Sprintf("%dK > 原生 %dK", ctx/1024, m.Ctx/1024)),
+			localText(o.Lang, fmt.Sprintf("%dK > %dK native", (ctx+o.OutLen)/1024, m.Ctx/1024), fmt.Sprintf("%dK > 原生 %dK", (ctx+o.OutLen)/1024, m.Ctx/1024)),
 			localText(o.Lang, "Requires YaRN / RoPE extension; long-context accuracy and stability may degrade", "需 YaRN / RoPE 外推，长文精度与稳定性可能下降")))
 	}
 	return p
@@ -2180,8 +2191,8 @@ func quantNote(h HW, q Quant, eng Engine, fmul float64, lang string) string {
 func kvNote(m Model, ctx, batch int, t topology, o Opts, readF float64) string {
 	rank := m.kvRankFactor(t.tp) / (float64(t.pp) * float64(t.cp))
 	base := localText(o.Lang,
-		fmt.Sprintf("%.1f MB raw KV/request × %d concurrent × %.3f rank ratio", m.KVBytes(ctx)/1e6, batch, rank),
-		fmt.Sprintf("%.1f MB/请求原始 KV × %d 并发 × rank比例 %.3f", m.KVBytes(ctx)/1e6, batch, rank))
+		fmt.Sprintf("%.1f MB raw KV/request × %d concurrent × %.3f rank ratio; %d input + %d cached output tokens", m.KVBytes(ctx+max(0, o.OutLen-1))/1e6, batch, rank, ctx, max(0, o.OutLen-1)),
+		fmt.Sprintf("%.1f MB/请求原始 KV × %d 并发 × rank比例 %.3f；%d 输入 + %d 已缓存输出 token", m.KVBytes(ctx+max(0, o.OutLen-1))/1e6, batch, rank, ctx, max(0, o.OutLen-1)))
 	if o.HitRate > 0 {
 		base += localText(o.Lang, fmt.Sprintf("; blocks in the %.0f%% shared prefix reside once", o.HitRate*100), fmt.Sprintf("；共享前缀 %.0f%% 的 block 仅驻留一份", o.HitRate*100))
 	}
@@ -2313,7 +2324,7 @@ func round4(v float64) float64 {
 
 type FitCell struct {
 	Quant         string  `json:"quant"`
-	Fit           int     `json:"fit"` // 0=❌ 1=⚠️ 2=✅
+	Fit           int     `json:"fit"` // Memory only: 0=over capacity, 1=<=10% headroom, 2=>10% headroom.
 	TPS           float64 `json:"tps"`
 	Accel         bool    `json:"accel"`
 	Applicable    bool    `json:"applicable"`
@@ -2340,11 +2351,8 @@ func FitMatrix(h HW, models []Model, n int, workload []WorkloadBucket, batch int
 			p := ThroughputWorkload(h, m, q, workload, batch, n, o)
 			st, reason := 0, p.SupportReason
 			switch {
-			case !p.EstimateValid || p.Support == "unsupported" || p.Support == "unknown":
 			case !p.Fit:
 				reason = joinWarn(reason, localText(o.Lang, "Workload exceeds the memory budget", "工作负载超过显存预算"))
-			case p.Support == "conditional":
-				st = 1
 			case p.Mem.HeadPct > 0.10:
 				st = 2
 			default:
@@ -2377,6 +2385,7 @@ type PlanOpts struct {
 }
 
 type Plan struct {
+	Accuracy      string  `json:"accuracy"`
 	HW            HW      `json:"hw"`
 	N             int     `json:"n"`        // 单副本卡数
 	Replicas      int     `json:"replicas"` // 副本（节点）数
@@ -2485,9 +2494,10 @@ func Planner(hws []HW, m Model, po PlanOpts, workload []WorkloadBucket, conc int
 	if po.Queue {
 		po.MaxQ = max(po.MaxQ, conc)
 	}
-	maxContext := 0
+	maxContext, maxSequence := 0, 0
 	for _, bucket := range workload {
 		maxContext = max(maxContext, bucket.Context)
+		maxSequence = max(maxSequence, bucket.Context+bucket.Output)
 	}
 	quants := Quants
 	if fixed := m.FixedQuantID(); fixed != "" {
@@ -2598,8 +2608,8 @@ func Planner(hws []HW, m Model, po PlanOpts, workload []WorkloadBucket, conc int
 					P999Context: servicePerf.Workload.P999Context, MaxContext: servicePerf.Workload.MaxContext,
 					MemoryP999: servicePerf.Mem.P999Total,
 					CostCNY:    h.CNY * totalCards, Support: servicePerf.Support,
-					Topology:      servicePerf.Topology,
-					SupportReason: servicePerf.SupportReason, Deployable: servicePerf.Deployable,
+					Topology: servicePerf.Topology,
+					Accuracy: servicePerf.Accuracy, SupportReason: servicePerf.SupportReason, Deployable: servicePerf.Deployable,
 				}
 				p.Strategy = strategy(h, n, st.Lang)
 				elec := h.TDP * totalCards * 0.6 * 24 * 30 / 1000 * 0.8 // 60% 负载，0.8 元/kWh
@@ -2609,10 +2619,10 @@ func Planner(hws []HW, m Model, po PlanOpts, workload []WorkloadBucket, conc int
 				}
 				p.Warn = warnOf(h, m, q, pf, st.Lang)
 				p.Warn = joinWarn(p.Warn, p.SupportReason)
-				if m.Ctx > 0 && maxContext > m.Ctx {
+				if m.Ctx > 0 && maxSequence > m.Ctx {
 					p.Warn = joinWarn(p.Warn, localText(st.Lang,
-						fmt.Sprintf("The workload tail exceeds the model's native context (%dK>%dK); YaRN/RoPE extension required", maxContext/1024, m.Ctx/1024),
-						fmt.Sprintf("工作负载尾部超过模型原生上下文（%dK>%dK），需 YaRN/RoPE 外推", maxContext/1024, m.Ctx/1024)))
+						fmt.Sprintf("The workload tail exceeds the model's native context (%dK>%dK); YaRN/RoPE extension required", maxSequence/1024, m.Ctx/1024),
+						fmt.Sprintf("工作负载尾部超过模型原生上下文（%dK>%dK），需 YaRN/RoPE 外推", maxSequence/1024, m.Ctx/1024)))
 				}
 				if st.KVQuant != "fp16" && !st.kvSupported(h, eng) {
 					p.Warn = joinWarn(p.Warn, localText(st.Lang, "The hardware/engine does not support this KV format; capacity and reads use FP16", "所选硬件/引擎不支持该 KV 格式，容量与读取均按 FP16"))
@@ -2808,14 +2818,14 @@ func rankPrescriptions(items []Prescription, objectives []string) {
 		return
 	}
 	costVals := make([]float64, 0, len(items))
-	latencyVals := make([]float64, len(items))
+	tosVals := make([]float64, len(items))
 	tpmVals := make([]float64, len(items))
 	availVals := make([]float64, len(items))
 	for i := range items {
 		if cost := items[i].Plan.Monthly; cost > 0 {
 			costVals = append(costVals, cost)
 		}
-		latencyVals[i] = planP95(items[i].Plan)
+		tosVals[i] = items[i].Plan.P95SingleTPS
 		tpmVals[i] = items[i].Plan.TPM
 		availVals[i] = availScoreOf(items[i].Plan)
 	}
@@ -2828,7 +2838,7 @@ func rankPrescriptions(items []Prescription, objectives []string) {
 					score += normalizeLower(costVals, cost)
 				}
 			case "tos":
-				score += normalizeLower(latencyVals, planP95(items[i].Plan))
+				score += normalizeHigher(tosVals, items[i].Plan.P95SingleTPS)
 			case "tpm":
 				score += normalizeHigher(tpmVals, items[i].Plan.TPM)
 			case "avail":
@@ -2837,12 +2847,6 @@ func rankPrescriptions(items []Prescription, objectives []string) {
 		}
 		if len(objectives) > 0 {
 			score /= float64(len(objectives))
-		}
-		if items[i].Plan.Warn != "" {
-			score *= 0.72
-		}
-		if items[i].Plan.MemoryP999 > 0 && items[i].HeadroomPct < 0.05 {
-			score *= 0.65
 		}
 		items[i].Score = round4(score)
 		wins := 0
@@ -2965,7 +2969,7 @@ func prescriptionReason(p Prescription, objectives []string, lang string) string
 				parts = append(parts, localText(lang, "price unknown; cost cannot be ranked", "价格未知，无法比较成本"))
 			}
 		case "tos":
-			parts = append(parts, localText(lang, fmt.Sprintf("latency-first (end-to-end request P95 %.1f ms)", planP95(p.Plan)), fmt.Sprintf("时延优先（端到端请求 P95 %.1f ms）", planP95(p.Plan))))
+			parts = append(parts, localText(lang, fmt.Sprintf("stream-speed-first (P95 single-stream %.1f tok/s)", p.Plan.P95SingleTPS), fmt.Sprintf("单流速度优先（P95 单流 %.1f tok/s）", p.Plan.P95SingleTPS)))
 		case "tpm":
 			parts = append(parts, localText(lang, fmt.Sprintf("throughput-first (%.1f tok/min)", p.Plan.TPM), fmt.Sprintf("吞吐优先（%.1f tok/min）", p.Plan.TPM)))
 		case "avail":
@@ -3022,6 +3026,16 @@ func recommendForModel(hws []HW, m Model, workload []WorkloadBucket, opts Recomm
 		}
 		// 先按现有 Planner 求一个合规集合，再补处方所需的 Perf 细节。
 		plans := Planner([]HW{h}, m, po, workload, max(1, opts.Conc), st)
+		// Include both ordinary and N+1 configurations for a paired availability goal.
+		if len(objectives) == 2 && slices.Contains(objectives, "avail") {
+			other := po
+			if po.Objective == "avail" {
+				other.Objective = "cost"
+			} else {
+				other.Objective = "avail"
+			}
+			plans = append(plans, Planner([]HW{h}, m, other, workload, max(1, opts.Conc), st)...)
+		}
 		for _, p := range plans {
 			pf := ThroughputWorkload(h, m, QuantByID(p.Quant), workload, p.MaxConc, p.N, st)
 			if !pf.EstimateValid || pf.Support == "unsupported" || pf.Support == "unknown" || !pf.Fit || pf.Workload == nil {
@@ -3091,7 +3105,7 @@ func recommendForCard(models []Model, h HW, workload []WorkloadBucket, opts Reco
 				P999Context: pf.Workload.P999Context, MaxContext: pf.Workload.MaxContext,
 				MemoryP999: pf.Mem.P999Total,
 				CostCNY:    h.CNY * float64(opts.Cards), Support: pf.Support,
-				SupportReason: pf.SupportReason, Deployable: pf.Deployable,
+				Accuracy: pf.Accuracy, SupportReason: pf.SupportReason, Deployable: pf.Deployable,
 			}
 			elec := h.TDP * float64(opts.Cards) * 0.6 * 24 * 30 / 1000 * 0.8
 			if p.CostCNY > 0 {
@@ -3223,6 +3237,21 @@ func Recommend(hws []HW, models []Model, m Model, workload []WorkloadBucket, opt
 		limit = 50
 	}
 	if len(pareto) > limit {
+		if len(objectives) > 1 {
+			// Preserve an endpoint for each objective before filling the display
+			// limit; equal-cost quant variants must not hide the other tradeoff.
+			endpoints := make([]Prescription, 0, len(objectives)+len(pareto))
+			for _, objective := range objectives {
+				best := pareto[0]
+				for _, candidate := range pareto[1:] {
+					if prescriptionMetric(candidate, objective) > prescriptionMetric(best, objective) {
+						best = candidate
+					}
+				}
+				endpoints = append(endpoints, best)
+			}
+			pareto = dedupePrescriptions(append(endpoints, pareto...))
+		}
 		pareto = pareto[:limit]
 	}
 	if len(items) > limit {
@@ -3236,7 +3265,7 @@ func prescriptionMetric(p Prescription, objective string) float64 {
 	case "cost":
 		return -planCost(p.Plan)
 	case "tos":
-		return -planP95(p.Plan)
+		return p.Plan.P95SingleTPS
 	case "tpm":
 		return p.Plan.TPM
 	case "avail":

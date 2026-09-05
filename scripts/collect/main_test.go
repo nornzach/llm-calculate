@@ -1,10 +1,25 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
+
+func TestFP8StorageEvidence(t *testing.T) {
+	for _, raw := range []string{
+		`{"quant_method":"fp8","weight_block_size":[128,128],"activation_scheme":"dynamic"}`,
+		`{"quant_method":"compressed-tensors","config_groups":{"group_0":{"weights":{"num_bits":8,"type":"float"}}}}`,
+	} {
+		if quant, stored := quantFormat(json.RawMessage(raw)); quant != "fp8" || !stored {
+			t.Fatalf("serialized FP8 was misclassified: %s => %s/%v", raw, quant, stored)
+		}
+	}
+	if quant, stored := quantFormat(json.RawMessage(`{"quant_method":"fp8"}`)); quant != "" || stored {
+		t.Fatal("runtime-only precision is not checkpoint storage evidence")
+	}
+}
 
 func TestMetadataCompleteDoesNotSkipLegacyCatalogRows(t *testing.T) {
 	m := outModel{ID: "qwen", Heads: 24, ModelType: "qwen3_5", Revision: "sha", ParamSource: "safetensors"}

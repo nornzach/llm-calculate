@@ -827,6 +827,10 @@ func scanQuant(v any, path string, evidence *quantEvidence) {
 			lower := strings.ToLower(key)
 			childPath := path + "." + lower
 			switch lower {
+			case "weight_block_size":
+				if !strings.Contains(childPath, "kv") {
+					evidence.storage = true
+				}
 			case "config_groups":
 				if groups, ok := child.(map[string]any); ok && len(groups) > 0 {
 					evidence.storage = true
@@ -884,6 +888,8 @@ func quantFormat(raw hfQuantConfig) (string, bool) {
 		return "fp4", true
 	case evidence.bits > 0 && evidence.bits <= 4:
 		return "int4", true
+	case evidence.bits > 0 && evidence.bits <= 8 && evidence.floatWeights:
+		return "fp8", true
 	case evidence.bits > 0 && evidence.bits <= 8:
 		return "int8", true
 	case evidence.storage && strings.Contains(text, "fp8"):
@@ -1061,6 +1067,14 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 	repoID := strings.ToLower(e.ID)
 	published, verified := verifiedModels[repoID]
 	nativeQuant, quantStorage := quantFormat(cfg.QuantConfig)
+	if nativeQuant == "" && e.Safetensors != nil {
+		for dtype, count := range e.Safetensors.Parameters {
+			dtype = strings.ToUpper(dtype)
+			if count > 0 && (strings.HasPrefix(dtype, "F8") || strings.HasPrefix(dtype, "FP8") || strings.HasPrefix(dtype, "FLOAT8")) {
+				nativeQuant, quantStorage = "fp8", true
+			}
+		}
+	}
 	paramSource := "unknown"
 	var params float64
 	switch {
@@ -1069,11 +1083,11 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 	case e.ParameterCount > 0:
 		params, paramSource = float64(e.ParameterCount)/1e9, "unknown"
 		notePre += "参数量取源目录元数据，未由 config 验证；"
-	case quantStorage && !multimodal:
+	case quantStorage && nativeQuant != "fp8" && !multimodal:
 		params, paramSource = logicalParams(cfg), "config"
 	case cfg.TieWordEmbeddings != nil && *cfg.TieWordEmbeddings && !multimodal:
 		params, paramSource = logicalParams(cfg), "config"
-	case !quantStorage && e.Safetensors != nil && e.Safetensors.Total > 0:
+	case (!quantStorage || nativeQuant == "fp8") && e.Safetensors != nil && e.Safetensors.Total > 0:
 		params, paramSource = float64(e.Safetensors.Total)/1e9, "safetensors"
 		if multimodal && cfg.TieWordEmbeddings != nil && *cfg.TieWordEmbeddings && cfg.Vocab > 0 {
 			// HF tensor metadata includes the serialized lm_head alias; logical

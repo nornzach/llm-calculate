@@ -288,12 +288,13 @@
       </div>
       <div id="pl-custom" style="display:none">
         <div class="cgrid">
-          <label>总参数 B<input type="number" id="cm-params" value="70" min="0.1" step="0.1"></label>
-          <label>激活 B<input type="number" id="cm-active" value="3.5" min="0.05" step="0.1" disabled></label>
+          <label>总参数 B<input type="number" id="cm-params" value="70" min="0.1" max="5000" step="0.1"></label>
+          <label>激活 B<input type="number" id="cm-active" value="3.5" min="0.05" step="0.05" disabled></label>
           <label>层数<input type="number" id="cm-layers" value="80" min="1" max="256"></label>
-          <label>隐藏维度<input type="number" id="cm-hidden" value="8192" min="256" step="256"></label>
+          <label>隐藏维度<input type="number" id="cm-hidden" value="8192" min="256" max="65536" step="256"></label>
+          <label>Query 头数<input type="number" id="cm-heads" value="64" min="1" max="65536"></label>
           <label>KV 头数<input type="number" id="cm-kvh" value="8" min="1" max="256"></label>
-          <label>头维度<input type="number" id="cm-dim" value="128" min="16" step="32"></label>
+          <label>头维度<input type="number" id="cm-dim" value="128" min="16" max="1024" step="1"></label>
           <label title="0 = 全部层持有 KV（混合线性注意力架构用）">KV 层数<input type="number" id="cm-kvlayers" value="0" min="0"></label>
           <label id="cm-mla-wrap" style="display:none">MLA latent<input type="number" id="cm-mla" value="576" min="64" step="64"></label>
           <label title="滑动窗口/local attention 层数；0 = 关闭">Local 层数<input type="number" id="cm-local-layers" value="0" min="0"></label>

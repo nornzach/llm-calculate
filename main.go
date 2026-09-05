@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"slices"
@@ -180,7 +182,20 @@ func writeJSON(w http.ResponseWriter, v any) {
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(code)
-	fmt.Fprintf(w, `{"error":%q}`, msg)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func decodeRequest(w http.ResponseWriter, r *http.Request, dst any) bool {
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	d.DisallowUnknownFields()
+	err := d.Decode(dst)
+	if err == nil && d.Decode(new(any)) != io.EOF {
+		err = fmt.Errorf("request body must contain exactly one JSON value")
+	}
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+	}
+	return err == nil
 }
 
 type fitReq struct {
@@ -294,6 +309,12 @@ func sanitizeCustom(m *calc.Model, lang string) calc.Model {
 	m.KVH = clamp(m.KVH, 1, 256, 8)
 	m.Dim = clamp(m.Dim, 16, 1024, 128)
 	m.Heads = clamp(m.Heads, 0, 65536, 0)
+	if m.KVT == "mha" {
+		if m.Heads == 0 && math.Mod(m.Hidden, float64(m.Dim)) == 0 {
+			m.Heads = int(m.Hidden) / m.Dim
+		}
+		m.KVH = m.Heads
+	}
 	if m.KVT == "mla" {
 		m.MLA = clampF(m.MLA, 64, 4096, 576)
 	}
@@ -429,7 +450,11 @@ func main() {
 	addr := flag.String("addr", ":8317", "listen address")
 	flag.Parse()
 	mustLoad()
+	fmt.Printf("LLM 推理计算器 → http://localhost%s  (硬件 %d · 模型 %d)\n", *addr, len(hws), len(models))
+	log.Fatal(http.ListenAndServe(*addr, newHandler()))
+}
 
+func newHandler() http.Handler {
 	indexHTML, err := inlineIndex()
 	if err != nil {
 		log.Fatal(err)
@@ -470,8 +495,7 @@ func main() {
 
 	mux.HandleFunc("POST /api/fit", func(w http.ResponseWriter, r *http.Request) {
 		var req fitReq
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErr(w, 400, err.Error())
+		if !decodeRequest(w, r, &req) {
 			return
 		}
 		if !validStack(req.Eng, req.Spec, req.KVQ) {
@@ -517,8 +541,7 @@ func main() {
 
 	mux.HandleFunc("POST /api/perf", func(w http.ResponseWriter, r *http.Request) {
 		var req perfReq
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErr(w, 400, err.Error())
+		if !decodeRequest(w, r, &req) {
 			return
 		}
 		if !validStack(req.Eng, req.Spec, req.KVQ) {
@@ -596,8 +619,7 @@ func main() {
 
 	mux.HandleFunc("POST /api/plan", func(w http.ResponseWriter, r *http.Request) {
 		var req planReq
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErr(w, 400, err.Error())
+		if !decodeRequest(w, r, &req) {
 			return
 		}
 		if !validStack(req.Eng, req.Spec, req.KVQ) {
@@ -644,9 +666,43 @@ func main() {
 
 	mux.HandleFunc("POST /api/recommend", func(w http.ResponseWriter, r *http.Request) {
 		var req recReq
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErr(w, 400, err.Error())
+		if !decodeRequest(w, r, &req) {
 			return
+		}
+		if req.Direction != "" && req.Direction != "model" && req.Direction != "card" {
+			writeErr(w, 400, "unknown recommendation direction")
+			return
+		}
+		objectives := strings.Split(req.Objectives, ",")
+		if len(objectives) > 2 {
+			writeErr(w, 400, "select at most two objectives")
+			return
+		}
+		for _, objective := range objectives {
+			switch strings.TrimSpace(strings.ToLower(objective)) {
+			case "", "cost", "tos", "tpm", "avail":
+			default:
+				writeErr(w, 400, "unknown recommendation objective")
+				return
+			}
+		}
+		if req.Direction == "card" {
+			h := findHW(req.HW)
+			if h == nil {
+				writeErr(w, 404, "unknown hardware")
+				return
+			}
+			if h.Svc || h.Cls == "supernode" {
+				writeErr(w, 422, "hardware has no local roofline inputs")
+				return
+			}
+			if req.Cards < 0 || req.Cards > 8 {
+				writeErr(w, 400, "cards must be between 1 and 8")
+				return
+			}
+			// Fixed-hardware mode ranks available capacity; target sizing and
+			// queueing are model-direction controls, disabled in the UI.
+			req.TargetTPM, req.MinTOS, req.Queue, req.MaxQ = 0, 0, false, 0
 		}
 		if !validStack(req.Eng, req.Spec, req.KVQ) {
 			writeErr(w, 400, "unknown engine, speculative method, or KV format")
@@ -701,6 +757,5 @@ func main() {
 		mux.ServeHTTP(w, r)
 	})
 
-	fmt.Printf("LLM 推理计算器 → http://localhost%s  (硬件 %d · 模型 %d)\n", *addr, len(hws), len(models))
-	log.Fatal(http.ListenAndServe(*addr, handler))
+	return handler
 }

@@ -60,6 +60,7 @@ const STATIC_EN = new Map([
   ["层数", "Layers"],
   ["隐藏维度", "Hidden Size"],
   ["KV 头数", "KV Heads"],
+  ["Query 头数", "Query Heads"],
   ["头维度", "Head Dimension"],
   ["KV 层数", "KV Layers"],
   ["Local 层数", "Local Layers"],
@@ -244,8 +245,7 @@ function restoreUIState(state, syncRecDir) {
   $("#rec-queue-opts").style.display = $("#rec-queue").checked ? "" : "none";
   $("#pl-queue-opts").style.display = $("#pl-queue").checked ? "" : "none";
   syncQueueCap();
-  $("#cm-active").disabled = segArch.get() !== "moe";
-  $("#cm-mla-wrap").style.display = segKVT.get() === "mla" ? "" : "none";
+  syncQueueCap("rec");
   syncModelQuant("p-model", "p-quant", "p-quant-note");
   if (!customOn) syncModelQuant("pl-model", "pl-qonly", "pl-quant-note");
   const view = $("#" + "v-" + state.view) ? state.view : "map";
@@ -563,7 +563,7 @@ const SUPPORT_LABEL = {
   unknown: ["Unknown support", "支持状态未知"],
 };
 const supportLabel = value => localized(SUPPORT_LABEL, value || "unknown");
-const supportReason = value => value?.support_reason || tr("No execution-support evidence was returned.", "接口未返回执行支持依据。");
+const supportReason = value => value?.support_reason || (value?.support === "supported" ? tr("No additional restrictions in the modeled path.", "当前建模路径无额外限制。") : tr("No execution-support evidence was returned.", "接口未返回执行支持依据。"));
 const planConfirmed = plan => plan?.support === "supported" && plan.deployable === true;
 const planVisible = plan => planConfirmed(plan) || plan?.support === "conditional";
 const accuracyLabel = value => value === "scenario" ? tr("What-if scenario", "What-if 场景") : tr("Analytical estimate", "解析估算");
@@ -603,7 +603,7 @@ function cselect(el, groups, opts = {}) {
 
   let value = opts.value ?? null, flat = [], disabled = false;
   list.innerHTML = groups.map(g =>
-    (g.label ? `<div class="cs-grp" data-grp>${g.label}</div>` : "") +
+    (g.label ? `<div class="cs-grp" data-grp>${escapeHTML(g.label)}</div>` : "") +
     g.items.map(it => `<button type="button" role="option" tabindex="-1" class="cs-opt" data-v="${escapeHTML(it.v)}" data-s="${escapeHTML((it.n + " " + (it.m || "")).toLowerCase())}">
       <span class="cs-n">${escapeHTML(it.n)}</span>${it.m ? `<span class="cs-m">${escapeHTML(it.m)}</span>` : ""}</button>`).join("")
   ).join("");
@@ -611,8 +611,8 @@ function cselect(el, groups, opts = {}) {
 
   function render() {
     const cur = flat.find(o => o.dataset.v === value);
-    vEl.innerHTML = cur ? `${cur.querySelector(".cs-n").textContent}` +
-      (cur.querySelector(".cs-m") ? `<span class="cs-m">${cur.querySelector(".cs-m").textContent}</span>` : "") : "—";
+    vEl.innerHTML = cur ? `${escapeHTML(cur.querySelector(".cs-n").textContent)}` +
+      (cur.querySelector(".cs-m") ? `<span class="cs-m">${escapeHTML(cur.querySelector(".cs-m").textContent)}</span>` : "") : "—";
     flat.forEach(o => {
       o.classList.toggle("sel", o.dataset.v === value);
       o.setAttribute("aria-selected", String(o.dataset.v === value));
@@ -692,7 +692,7 @@ const LONG_TAIL_WORKLOAD = [
   { context: 102400, output: 512, share: 81.55, prefix_hit: 0 },
   { context: 204800, output: 512, share: 15.29, prefix_hit: 0 },
   { context: 512000, output: 512, share: 3.06, prefix_hit: 0 },
-  { context: 1048576, output: 512, share: 0.10, prefix_hit: 0 },
+  { context: 1048064, output: 512, share: 0.10, prefix_hit: 0 },
 ];
 const OBJECTIVE_LABEL = { cost: tr("Lowest Cost", "最低成本"), tos: tr("Highest TOS", "最高 TOS"), tpm: tr("Highest TPM", "最高 TPM"), avail: tr("Highest Availability", "最高可用") };
 const REC_PRESETS = {
@@ -707,7 +707,7 @@ const presetGroups = () => [{ label: "", items: [
   { v: "long", n: tr("Long tail", "长尾"), m: tr("100K–1M tail example", "100K–1M 长尾示例") },
 ]}];
 
-const formatTokens = v => v >= 1048576 ? `${(v / 1048576).toFixed(v % 1048576 ? 1 : 0)}M` :
+const formatTokens = v => !Number.isFinite(v) ? "—" : v >= 1048576 ? `${(v / 1048576).toFixed(v % 1048576 ? 1 : 0)}M` :
   v >= 1024 ? `${(v / 1024).toFixed(v % 1024 ? 1 : 0)}K` : `${Math.round(v)}`;
 
 function summarizeWorkload(workload) {
@@ -727,6 +727,7 @@ function summarizeWorkload(workload) {
     p99Context: quantile(.99),
     p999Context: quantile(.999),
     maxContext: rows.at(-1).context,
+    maxSequence: Math.max(...rows.map(b => b.context + b.output)),
   };
 }
 
@@ -941,7 +942,7 @@ async function boot() {
     $("#rec-tpm").disabled = card;
     $("#rec-tos").disabled = card;
     $("#rec-queue").disabled = card;
-    $("#rec-maxq").disabled = card;
+    $("#rec-maxq").disabled = card || !$("#rec-queue").checked;
   };
   $("#rec-dir").addEventListener("click", e => {
     const b = e.target.closest("button[data-v]");
@@ -953,16 +954,18 @@ async function boot() {
   });
   $("#rec-q").oninput = () => { recPage = 0; renderRecommend(); };
   $("#rec-queue").onchange = () => {
+    syncRecDir();
+    syncQueueCap("rec");
     $("#rec-queue-opts").style.display = $("#rec-queue").checked ? "" : "none";
     runRecommend();
   };
-  $("#rec-maxq").oninput = runRecommend;
+  $("#rec-maxq").oninput = () => { syncQueueCap("rec"); runRecommend(); };
   $("#rec-obj").addEventListener("change", e => {
     const selected = $$("#rec-obj input:checked");
     if (!selected.length || selected.length > 2) e.target.checked = !e.target.checked;
     runRecommend();
   });
-  ["#rec-tpm", "#rec-tos", "#rec-cards", "#rec-conc"].forEach(id => { $(id).oninput = runRecommend; });
+  ["#rec-tpm", "#rec-tos", "#rec-cards", "#rec-conc"].forEach(id => { $(id).oninput = () => { syncQueueCap("rec"); runRecommend(); }; });
   mountAdvanced("rec", false);
   syncRecDir();
   seg("#rec-kvq", runRecommend);
@@ -1008,9 +1011,9 @@ async function boot() {
   showView(location.hash.slice(1));
 }
 
-function syncQueueCap() {
-  const input = $("#pl-maxq");
-  const concurrency = +$("#pl-c").value;
+function syncQueueCap(prefix = "pl") {
+  const input = $(`#${prefix}-maxq`);
+  const concurrency = +$(prefix === "pl" ? "#pl-c" : "#rec-conc").value;
   input.min = concurrency;
   if (+input.value < concurrency) input.value = concurrency;
 }
@@ -1461,6 +1464,7 @@ function customModel() {
     moe,
     layers: +$("#cm-layers").value,
     hidden: +$("#cm-hidden").value,
+    heads: +$("#cm-heads").value,
     kvh: +$("#cm-kvh").value,
     dim: +$("#cm-dim").value,
     kvlayers: +$("#cm-kvlayers").value,
@@ -1483,6 +1487,12 @@ function customModel() {
 }
 
 function syncCustomMode() {
+  $$("#pl-custom input").forEach(el => { el.disabled = !customOn; });
+  $("#cm-active").disabled = !customOn || segArch?.get() !== "moe";
+  $("#cm-mla").disabled = !customOn || segKVT?.get() !== "mla";
+  $("#cm-kvh").disabled = !customOn || segKVT?.get() === "mha";
+  if (customOn && segKVT?.get() === "mha") $("#cm-kvh").value = $("#cm-heads").value;
+  $("#cm-mla-wrap").style.display = segKVT?.get() === "mla" ? "" : "none";
   $("#pl-model-wrap").style.display = customOn ? "none" : "";
   $("#pl-custom").style.display = customOn ? "" : "none";
   if (customOn) {
@@ -1496,11 +1506,11 @@ function syncCustomMode() {
 
 function wireCustom() {
   segArch = seg("#cm-arch", () => {
-    $("#cm-active").disabled = segArch.get() !== "moe";
+    syncCustomMode();
     runPlan();
   });
   segKVT = seg("#cm-kvt", () => {
-    $("#cm-mla-wrap").style.display = segKVT.get() === "mla" ? "" : "none";
+    syncCustomMode();
     runPlan();
   });
   segObj = seg("#pl-obj", () => runPlan());
@@ -1517,7 +1527,7 @@ function wireCustom() {
     syncCustomMode();
     runPlan();
   };
-  ["cm-params", "cm-active", "cm-layers", "cm-hidden", "cm-kvh", "cm-dim", "cm-kvlayers", "cm-mla",
+  ["cm-params", "cm-active", "cm-layers", "cm-hidden", "cm-heads", "cm-kvh", "cm-dim", "cm-kvlayers", "cm-mla",
     "cm-local-layers", "cm-window", "cm-intermediate", "cm-moe-intermediate", "cm-experts", "cm-topk",
     "cm-shared", "cm-moelayers", "cm-mtpheads", "cm-encoderparams"]
     .forEach(id => { $("#" + id).oninput = () => runPlan(); });
@@ -1533,6 +1543,7 @@ function wireCustom() {
 }
 
 async function runPlan() {
+  if (customOn) syncCustomMode();
   const run = ++planRun;
   const workload = workloadPl?.get();
   const invalid = inputError("#v-plan aside");
@@ -1774,18 +1785,22 @@ async function runRecommend() {
   const invalid = inputError("#v-rec aside");
   if (invalid) return calculationState("#v-rec .result", "invalid", invalid);
   if (direction === "model") syncModelQuant("rec-model", "rec-qonly", "rec-quant-note");
-  else CS["rec-qonly"].setDisabled(false);
+  else {
+    CS["rec-qonly"].setDisabled(false);
+    $("#rec-quant-note").classList.remove("locked");
+    $("#rec-quant-note").textContent = tr("Choose weight quantization; native quantized checkpoints retain their own format. KV precision is independent.", "选择权重量化；原生量化 checkpoint 保持自身格式。KV 精度独立选择。");
+  }
   calculationState("#v-rec .result", "loading");
   const body = {
     direction,
     model: CS["rec-model"].get(),
     hw: CS["rec-hw"].get(),
     objectives: objectivesSelected().join(","),
-    tpm: +$("#rec-tpm").value, tos: +$("#rec-tos").value,
+    tpm: direction === "card" ? 0 : +$("#rec-tpm").value, tos: direction === "card" ? 0 : +$("#rec-tos").value,
     quant_only: CS["rec-qonly"].get() || "",
     workload: recommendationWorkload(),
     conc: +$("#rec-conc").value, cards: +$("#rec-cards").value,
-    queue: $("#rec-queue").checked, maxq: +$("#rec-maxq").value,
+    queue: direction === "model" && $("#rec-queue").checked, maxq: direction === "card" ? 0 : +$("#rec-maxq").value,
     eng: CS["rec-eng"].get(), spec: CS["rec-spec"].get(), kvq: $("#rec-kvq button.on")?.dataset.v || "fp16",
     advanced: advancedOpts("rec"), lang,
   };
@@ -1845,7 +1860,7 @@ function runMap() {
   $("#mapWorkloadNote").textContent = tr(
     `${workload.length} buckets · mean input ${formatTokens(profile.meanContext)} / output ${formatTokens(profile.meanOutput)} · maximum input ${formatTokens(profile.maxContext)}. Both views use the full workload; the matrix is memory-only.`,
     `${workload.length} 个分桶 · 平均输入 ${formatTokens(profile.meanContext)} / 输出 ${formatTokens(profile.meanOutput)} · 最长输入 ${formatTokens(profile.maxContext)}。两个视图都使用完整负载；矩阵仅表示显存。`) +
-    (model && profile.maxContext > model.ctx ? tr(" Some requests exceed native context; only returned conditional support metadata may allow them, never a blanket deployment claim.", " 部分请求超过原生上下文；只能按接口返回的有条件支持元数据处理，不能笼统视为可部署。") : "");
+    (model && profile.maxSequence > model.ctx ? tr(" Some requests exceed native context; only returned conditional support metadata may allow them, never a blanket deployment claim.", " 部分请求超过原生上下文；只能按接口返回的有条件支持元数据处理，不能笼统视为可部署。") : "");
   renderMapLandscape();
   runMapScatter();
   runMapHeat();
@@ -2047,6 +2062,12 @@ function renderMapHeat(cols, resps, rows, workload, batch) {
       });
       if (!best) {
         const cell = result?.cells.find(item => item.applicable);
+        if (!cell) {
+          const reason = result
+            ? tr("The native weight format is not included in this matrix; inspect it on the Throughput page.", "该模型的原生权重格式未列入此矩阵，请到能跑多快页查看。")
+            : tr("No memory result returned for this model.", "接口未返回该模型的显存结果。");
+          return `<td><span class="hm unsupported" data-tip="${escapeHTML(reason)}">${result ? "N/A" : "?"}</span></td>`;
+        }
         const reason = [cell?.reason, cell?.support_reason].filter(Boolean).join(" · ") || tr("No main quantization fits memory", "主量化档位均装不下");
         return `<td><span class="hm no" data-tip="${escapeHTML(reason)}">—</span></td>`;
       }
@@ -2077,6 +2098,7 @@ function renderMapHeat(cols, resps, rows, workload, batch) {
     `<span><span class="hm t4 edge">4-bit</span> ${tr("low memory headroom", "显存余量低")}</span>` +
     `<span><span class="hm conditional">COND</span> ${tr("conditional execution", "有条件执行")}</span>` +
     `<span><span class="hm unsupported">?</span> ${tr("unknown/unsupported execution", "执行未知/不支持")}</span>` +
+    `<span><span class="hm unsupported">N/A</span> ${tr("native format not listed", "未列入原生格式")}</span>` +
     `<span><span class="hm no">—</span> ${tr("does not fit memory", "显存装不下")}</span>`;
 }
 function planAdvice(plan, perf, model, quant, body) {
@@ -2150,10 +2172,11 @@ function planAdvice(plan, perf, model, quant, body) {
   } else {
     add("warn", tr("Memory diagnostic unavailable", "显存诊断不可用"), tr("No meaningful per-card capacity values were returned.", "未返回有意义的每卡容量值。"));
   }
-  if (model.ctx && plan.max_context > model.ctx) {
+  const maxSequence = Math.max(0, ...(perf.workload?.buckets || []).map(b => b.context + b.output));
+  if (model.ctx && maxSequence > model.ctx) {
     add("bad", tr("Workload exceeds native context", "工作负载超过原生上下文"),
-      tr(`The largest request is ${formatTokens(plan.max_context)}, above native ${formatTokens(model.ctx)}. Only explicit returned extension support can make this conditional.`,
-        `最大请求为 ${formatTokens(plan.max_context)}，超过原生 ${formatTokens(model.ctx)}。只有接口明确返回的外推支持才能将其视为有条件。`));
+      tr(`The largest request is ${formatTokens(maxSequence)}, above native ${formatTokens(model.ctx)}. Only explicit returned extension support can make this conditional.`,
+        `最大请求为 ${formatTokens(maxSequence)}，超过原生 ${formatTokens(model.ctx)}。只有接口明确返回的外推支持才能将其视为有条件。`));
   }
   if (valid && Number.isFinite(plan.util_pct) && plan.util_pct >= 80) {
     add("warn", tr("Target load leaves little operating margin", "目标负载缺少运行余量"),
@@ -2255,7 +2278,7 @@ function renderPlanDetail(plan, perf, override = null) {
     <div class="detail-callout bad">${escapeHTML(tr("No speed, throughput, latency, sizing, or workload-performance values are shown because estimate_valid is false. ", "estimate_valid=false，因此不显示速度、吞吐、时延、容量规划或工作负载性能值。") + supportReason(perf))}</div>
   </section>`;
 
-  const sizingSection = valid && meanTokens > 0 && Number.isFinite(body.tpm) ? `<section class="detail-section"><h3>${tr("Scenario target sizing and queueing", "场景目标容量与排队")}</h3>
+  const sizingSection = body.direction !== "card" && valid && meanTokens > 0 && Number.isFinite(body.tpm) ? `<section class="detail-section"><h3>${tr("Scenario target sizing and queueing", "场景目标容量与排队")}</h3>
     <div class="tblwrap"><table class="detail-table"><tbody>
       <tr><td>${tr("Mean tokens/request", "平均 token/请求")}</td><td class="formula">${formatTokens(stats.mean_context)} input + ${formatTokens(stats.mean_output)} output = ${formatTokens(meanTokens)}</td><td>${tr("Arrival-share weighted", "按到达占比加权")}</td></tr>
       <tr><td>${tr("Target arrival rate", "目标到达率")}</td><td class="formula">${fmt.tpm(body.tpm)} ÷ ${formatTokens(meanTokens)} ÷ 60 = ${fmt.rate(plan.arrival_qps)} req/s</td><td>${tr("Target mixed TPM converted to requests", "目标混合 TPM 换算为请求")}</td></tr>

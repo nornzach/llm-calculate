@@ -19,6 +19,70 @@ func singleWorkload(ctx, output int) []WorkloadBucket {
 	return []WorkloadBucket{{Context: ctx, Output: output, Share: 1}}
 }
 
+func TestEncoderAndAvailabilityObjectiveContracts(t *testing.T) {
+	mm := llama8b
+	mm.Params, mm.Active, mm.EncoderParams, mm.Multimodal = 10, 8, 2, true
+	base := Throughput(h200, llama8b, QuantByID("fp16"), 4096, 4, 1, Opts{})
+	media := Throughput(h200, mm, QuantByID("fp16"), 4096, 4, 1, Opts{})
+	if !media.EstimateValid || media.DecodeComputeMs != base.DecodeComputeMs {
+		t.Fatalf("text-active parameters must not subtract encoder twice: text=%g multimodal=%g", base.DecodeComputeMs, media.DecodeComputeMs)
+	}
+	workload := singleWorkload(4096, 128)
+	for _, objectives := range []string{"cost,avail", "avail,cost"} {
+		items := recommendForModel([]HW{h200}, llama8b, workload, RecommendOpts{Objectives: objectives, TargetTPM: 6000, Conc: 4, QuantOnly: "fp16"}, Opts{})
+		ordinary, redundant := false, false
+		for _, p := range items {
+			ordinary = ordinary || p.Plan.Replicas == 1
+			redundant = redundant || p.Plan.Replicas == 2
+		}
+		if !ordinary || !redundant {
+			t.Fatalf("%s must compare ordinary and redundant configurations", objectives)
+		}
+	}
+	items := []Prescription{{Plan: Plan{Monthly: 100, Warn: "conditional"}, HeadroomPct: .01}, {Plan: Plan{Monthly: 200}, HeadroomPct: .5}}
+	rankPrescriptions(items, []string{"cost"})
+	if items[0].Plan.Monthly != 100 {
+		t.Fatal("unrelated warning penalties must not reverse the selected cost goal")
+	}
+}
+
+func TestGenerationLengthAndSpeculationContracts(t *testing.T) {
+	q := QuantByID("fp16")
+	short := ThroughputWorkload(h200, llama8b, q, singleWorkload(4096, 1), 4, 1, Opts{})
+	long := ThroughputWorkload(h200, llama8b, q, singleWorkload(4096, 8192), 4, 1, Opts{})
+	wantGrowth := llama8b.KVTokBytes() * 8191 * 4 / 1e9
+	if math.Abs(long.Mem.KV-short.Mem.KV-wantGrowth) > 1e-6 {
+		t.Errorf("generated tokens must reserve their own KV: short=%g long=%g expected growth=%g", short.Mem.KV, long.Mem.KV, wantGrowth)
+	}
+	cached := ThroughputWorkload(h200, llama8b, q, []WorkloadBucket{{Context: 4096, Output: 8192, Share: 1, PrefixHit: .5}}, 4, 1, Opts{})
+	wantSaving := llama8b.KVTokBytes() * 2048 * 3 / 1e9
+	if math.Abs(long.Mem.KV-cached.Mem.KV-wantSaving) > 1e-6 {
+		t.Error("prefix caching must share input tokens only, never generated output")
+	}
+	m := llama8b
+	m.Ctx, m.ExtendedCtx = 8192, 0
+	beyond := ThroughputWorkload(h200, m, q, singleWorkload(8192, 512), 1, 1, Opts{})
+	if beyond.EstimateValid || beyond.SupportReason == "" {
+		t.Error("input plus output must respect the model context limit")
+	}
+	base := Throughput(h200, llama8b, q, 4096, 1, 1, Opts{Spec: "none"})
+	off := Throughput(h200, llama8b, q, 4096, 1, 1, Opts{Spec: "none", SpecTau: 8, SpecOvh: 1})
+	if off.SingleTPS != base.SingleTPS || off.ReqMs != base.ReqMs || off.SpecApplied {
+		t.Error("disabled speculative decoding must ignore speculative coefficients")
+	}
+}
+
+func TestTOSObjectiveUsesStreamSpeed(t *testing.T) {
+	items := []Prescription{
+		{Plan: Plan{P95SingleTPS: 100, ReqP95ms: 10000}},
+		{Plan: Plan{P95SingleTPS: 20, ReqP95ms: 100}},
+	}
+	rankPrescriptions(items, []string{"tos"})
+	if items[0].Score <= items[1].Score || items[0].ObjectiveWins != 1 || prescriptionMetric(items[0], "tos") <= prescriptionMetric(items[1], "tos") {
+		t.Fatal("highest TOS must favor the faster stream even when its prefill/E2E is longer")
+	}
+}
+
 var (
 	hw4090  = HW{ID: "rtx4090", Vendor: "nvidia", Arch: "ada", VRAM: 24, BW: 1008, TF: 330, Prec: []string{"fp16", "bf16", "fp8", "int8"}, Link: Link{T: "pcie", B: 32, Dom: 2}, PeakKind: "dense_matrix", SourceURL: "https://example.test/spec"}
 	h100    = HW{ID: "h100", Vendor: "nvidia", Arch: "hopper", VRAM: 80, BW: 3350, TF: 989, Prec: []string{"fp16", "bf16", "fp8", "int8"}, PeakKind: "dense_matrix", SourceURL: "https://example.test/spec"}
@@ -75,13 +139,13 @@ func TestMemoryFeasibility(t *testing.T) {
 	if Memory(hw4090, llama70, QuantByID("int4"), 8192, 8, 1, Opts{}).Fit {
 		t.Error("70B INT4 不应能单卡 4090")
 	}
-	// 修正系统预留重复扣减后，2×24G 的 70B INT4 可装入，但余量不足 10%，
-	// FitMatrix 必须标为贴边而不是稳妥。
-	edge := Memory(hw4090, llama70, QuantByID("int4"), 4096, 1, 2, Opts{})
+	// 仅输出一个 token 时，2×24G 的 70B INT4 贴边可容纳；
+	// 再生成 511 个 token 的 KV 会超过预算。
+	edge := Memory(hw4090, llama70, QuantByID("int4"), 4096, 1, 2, Opts{OutLen: 1})
 	if !edge.Fit || edge.HeadPct > 0.10 {
 		t.Errorf("70B INT4 / 2×4090 应为贴边可行，得 fit=%v head=%.1f%%", edge.Fit, edge.HeadPct*100)
 	}
-	if got := FitMatrix(hw4090, []Model{llama70}, 2, singleWorkload(4096, 512), 1, Opts{})[0].Cells[2].Fit; got != 1 {
+	if got := FitMatrix(hw4090, []Model{llama70}, 2, singleWorkload(4096, 1), 1, Opts{})[0].Cells[2].Fit; got != 1 {
 		t.Errorf("70B INT4 / 2×4090 应显示警告态，得 %d", got)
 	}
 	if !Memory(hw4090, llama70, QuantByID("exl3"), 4096, 1, 2, Opts{Engine: "exllama"}).Fit {
@@ -108,7 +172,7 @@ func TestKVTok(t *testing.T) {
 }
 
 func TestSlidingWindowKV(t *testing.T) {
-	m := Model{Params: 0.001, Active: 0.001, Layers: 6, Hidden: 2048, KVT: "gqa", KVH: 8, Dim: 128, LocalLayers: 5, Window: 1024, Ctx: 8192, ParamSource: "user-supplied", Revision: "test"}
+	m := Model{Params: 0.001, Active: 0.001, Layers: 6, Hidden: 2048, KVT: "gqa", KVH: 8, Dim: 128, LocalLayers: 5, Window: 1024, Ctx: 16384, ParamSource: "user-supplied", Revision: "test"}
 	wantTokens := 8192 + 5*1024
 	want := float64(wantTokens) * m.kvLayerBytes()
 	if got := m.KVBytes(8192); got != want {
@@ -324,7 +388,7 @@ func TestLongCtxQuadratic(t *testing.T) {
 		t.Errorf("128K TTFT 应显著超线性（8K×16=%.0fms 线性口径），实测比 %.1f×", p8.TTFTms*16, ratio)
 	}
 	// 4K→1M 注意力项应压倒一切：1M TTFT 在单卡 H100 上应以小时/十分钟级计
-	p1m := Throughput(h100, llama70, QuantByID("fp16"), 1048576, 1, 1, Opts{})
+	p1m := Throughput(h100, llama70, QuantByID("fp16"), 1048064, 1, 1, Opts{})
 	if p1m.TTFTms < 1e6 {
 		t.Errorf("70B FP16 单卡 1M prefill 应 >1000s 量级，得 %.0fms", p1m.TTFTms)
 	}
@@ -603,7 +667,7 @@ func TestOffloadChunkCalibrationAndEncoder(t *testing.T) {
 	if off.Accuracy != "scenario" || off.Mem.KV >= base.Mem.KV || off.Mem.OffloadedKV <= 0 || off.OffloadMs <= 0 || off.SingleTPS >= base.SingleTPS {
 		t.Errorf("KV offload 应以时延换显存: base=%+v off=%+v", base, off)
 	}
-	chunkModel := Model{Params: 100, Active: 1, MoE: true, Layers: 24, Hidden: 2048, KVT: "gqa", KVH: 4, Dim: 128, Ctx: 8192, ParamSource: "user-supplied", Revision: "test"}
+	chunkModel := Model{Params: 100, Active: 1, MoE: true, Layers: 24, Hidden: 2048, KVT: "gqa", KVH: 4, Dim: 128, Ctx: 16384, ParamSource: "user-supplied", Revision: "test"}
 	whole := Throughput(h100, chunkModel, QuantByID("fp16"), 8192, 1, 1, Opts{PrefillChunk: 8192})
 	chunk := Throughput(h100, chunkModel, QuantByID("fp16"), 8192, 1, 1, Opts{PrefillChunk: 512})
 	if chunk.TTFTms <= whole.TTFTms {
@@ -669,7 +733,7 @@ func TestThroughputWorkloadLongTailReweightsOccupancy(t *testing.T) {
 		{Context: 102400, Output: 512, Share: 0.80},
 		{Context: 204800, Output: 512, Share: 0.15},
 		{Context: 512000, Output: 512, Share: 0.03},
-		{Context: 1048576, Output: 512, Share: 0.001},
+		{Context: 1048064, Output: 512, Share: 0.001},
 	}
 	p := ThroughputWorkload(h200, qwen7b, QuantByID("fp16"), workload, 4, 1, Opts{})
 	if !p.EstimateValid {
@@ -681,8 +745,8 @@ func TestThroughputWorkloadLongTailReweightsOccupancy(t *testing.T) {
 	if p.Workload.MeanContext < 131000 || p.Workload.MeanContext > 132000 {
 		t.Errorf("归一化平均上下文应约 131.5K，得 %.1f", p.Workload.MeanContext)
 	}
-	if p.Workload.P99Context != 512000 || p.Workload.P999Context != 1048576 ||
-		p.Workload.MaxContext != 1048576 {
+	if p.Workload.P99Context != 512000 || p.Workload.P999Context != 1048064 ||
+		p.Workload.MaxContext != 1048064 {
 		t.Errorf("上下文分位错误: P99=%d P99.9=%d max=%d", p.Workload.P99Context, p.Workload.P999Context, p.Workload.MaxContext)
 	}
 	tail := p.Workload.Buckets[len(p.Workload.Buckets)-1]
@@ -718,12 +782,21 @@ func TestDecisionConstraints(t *testing.T) {
 			}
 		}
 	})
-	t.Run("fit rejects an incompatible engine", func(t *testing.T) {
+	t.Run("memory fit is independent of engine support", func(t *testing.T) {
 		rows := FitMatrix(m3ultra, []Model{llama8b}, 1, singleWorkload(4096, 512), 1, Opts{Engine: "vllm"})
 		for _, cell := range rows[0].Cells {
-			if cell.Fit != 0 || cell.TPS != 0 {
-				t.Fatalf("an unsupported engine must not look deployable: %+v", cell)
+			if cell.Fit != 2 || cell.TPS != 0 || cell.Support != "unsupported" || cell.SupportReason == "" {
+				t.Fatalf("an unsupported engine must retain capacity without claiming execution: %+v", cell)
 			}
+		}
+	})
+	t.Run("missing query heads do not mean out of memory", func(t *testing.T) {
+		m := qwen7b
+		m.Heads, m.ModelType = 0, "qwen3"
+		m.Architecture = "Qwen3ForCausalLM"
+		cell := FitMatrix(h100, []Model{m}, 1, singleWorkload(8192, 512), 16, Opts{})[0].Cells[0]
+		if cell.Fit != 2 || cell.Support != "unknown" || cell.TPS != 0 || !strings.Contains(cell.SupportReason, "Query head") {
+			t.Fatalf("known KV capacity must survive missing execution geometry: %+v", cell)
 		}
 	})
 	t.Run("fit retains rare memory-heavy requests", func(t *testing.T) {
@@ -769,8 +842,8 @@ func TestWorkloadPercentilesUseTheirOwnMetric(t *testing.T) {
 	longContext := Throughput(h100, llama8b, QuantByID("fp16"), 32768, 4, 1, Opts{OutLen: 1})
 	normalDecode := Throughput(h100, llama8b, QuantByID("fp16"), 4096, 4, 1, Opts{OutLen: 512})
 	longOutput := Throughput(h100, llama8b, QuantByID("fp16"), 512, 4, 1, Opts{OutLen: 8192})
-	if mixed.Workload.P95SingleTPS != normalDecode.SingleTPS {
-		t.Errorf("decode TPS 下限应排除没有后续 decode 的请求: got %.1f want %.1f", mixed.Workload.P95SingleTPS, normalDecode.SingleTPS)
+	if mixed.Workload.P95SingleTPS != math.Min(normalDecode.SingleTPS, longOutput.SingleTPS) {
+		t.Errorf("decode TPS 下限应排除没有后续 decode 的请求: got %.1f want %.1f", mixed.Workload.P95SingleTPS, math.Min(normalDecode.SingleTPS, longOutput.SingleTPS))
 	}
 	if mixed.Workload.P95TTFTms != longContext.TTFTms {
 		t.Errorf("TTFT P95 必须按 TTFT 自身排序: got %.1f want %.1f", mixed.Workload.P95TTFTms, longContext.TTFTms)
@@ -952,8 +1025,11 @@ func TestSupportMetadataAcrossDecisionAPIs(t *testing.T) {
 	}
 	cells := FitMatrix(h100, []Model{conditional}, 1, singleWorkload(4096, 128), 1, Opts{})[0].Cells
 	for _, cell := range cells {
-		if cell.Applicable && cell.Fit != 0 && (cell.Fit != 1 || cell.Support != "conditional" || cell.SupportReason == "") {
-			t.Fatalf("conditional fit cell must warn rather than turn green: %+v", cell)
+		if cell.Applicable {
+			perf := ThroughputWorkload(h100, conditional, QuantByID(cell.Quant), singleWorkload(4096, 128), 1, 1, Opts{})
+			if cell.Fit != 2 || cell.Support != perf.Support || cell.SupportReason == "" || (!perf.EstimateValid && cell.TPS != 0) {
+				t.Fatalf("ample memory must retain the separate execution warning: %+v", cell)
+			}
 		}
 	}
 	plans := Planner([]HW{h100}, conditional, PlanOpts{TargetTPM: 60, QuantOnly: "fp16"}, singleWorkload(4096, 128), 1, Opts{})
@@ -1044,11 +1120,6 @@ func TestLatencyRankingUsesEndToEndP95(t *testing.T) {
 	if items[0].HW.ID != "h100" {
 		t.Fatalf("latency rank ignored queue-tail latency: %+v", items)
 	}
-	pres := []Prescription{{Plan: items[1]}, {Plan: items[0]}}
-	rankPrescriptions(pres, []string{"tos"})
-	if pres[1].Score <= pres[0].Score || prescriptionMetric(pres[1], "tos") <= prescriptionMetric(pres[0], "tos") {
-		t.Fatalf("recommendation TOS objective must reward lower end-to-end request P95: %+v", pres)
-	}
 }
 
 func TestPrescriptionDedupePreservesDeploymentShape(t *testing.T) {
@@ -1093,7 +1164,7 @@ func TestNativeMXFP4SupportIsConsistent(t *testing.T) {
 	for _, cell := range cells {
 		if cell.Applicable {
 			found = true
-			if cell.Quant != "mxfp4" || cell.Support != p.Support || cell.Fit != 1 || cell.Accel {
+			if cell.Quant != "mxfp4" || cell.Support != p.Support || cell.Fit != 2 || cell.Accel {
 				t.Fatalf("fit matrix disagrees with throughput MXFP4 support: %+v", cell)
 			}
 		}
@@ -1184,8 +1255,8 @@ func TestCatalogLoadersRejectInvalidAuditMetadata(t *testing.T) {
 	wide := models[0]
 	narrow := wide
 	narrow.Heads = 8
-	widePerf := Throughput(h100, wide, QuantByID("fp16"), 131072, 1, 1, Opts{})
-	narrowPerf := Throughput(h100, narrow, QuantByID("fp16"), 131072, 1, 1, Opts{})
+	widePerf := Throughput(h100, wide, QuantByID("fp16"), 130560, 1, 1, Opts{})
+	narrowPerf := Throughput(h100, narrow, QuantByID("fp16"), 130560, 1, 1, Opts{})
 	if widePerf.TTFTms <= narrowPerf.TTFTms*1.5 {
 		t.Fatalf("attention FLOPs must use query width Heads×Dim: wide %.1fms narrow %.1fms", widePerf.TTFTms, narrowPerf.TTFTms)
 	}
