@@ -278,6 +278,14 @@ input[type=range]::-moz-range-thumb {
 .cell.warn::before { background: var(--warn); }
 .cell.no::before { background: var(--no); }
 .cell.na { color: var(--faint); font-size: 10px; }
+.status-badge {
+  display: inline-block; padding: 1px 5px; border: 1px solid currentColor; border-radius: 999px;
+  color: var(--acc); font: 700 8px/1.4 var(--mono); letter-spacing: .04em; vertical-align: 1px;
+}
+.status-badge.conditional { color: var(--warn); }
+.status-badge.unsupported { color: var(--bad); }
+.status-badge.unknown { color: var(--no); }
+.tbl .warn { margin-top: 4px; color: var(--warn); font-size: 10.5px; line-height: 1.45; }
 
 .devline {
   display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
@@ -308,6 +316,8 @@ input[type=range]::-moz-range-thumb {
 .stat.hot { background: var(--panel); }
 .stat.hot .v { color: var(--acc); }
 .stat.bad .v { color: var(--bad); }
+.stat.status-only { grid-column: 1 / -1; }
+.stat.status-only .v { font-size: 20px; letter-spacing: 0; }
 
 .method-flow {
   display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -396,6 +406,7 @@ input[type=range]::-moz-range-thumb {
 .cdot { fill: var(--acc); stroke: var(--panel); stroke-width: 1; }
 .cdot.secondary { fill: var(--active); }
 .cdot.unfit { fill: var(--bad); }
+.cdot.conditional { fill: var(--warn); }
 .cdot.current { stroke: var(--text); stroke-width: 1.5; }
 .clabel { fill: var(--faint); font-size: 8.5px; font-family: var(--mono); }
 .axis-title { fill: var(--sub); font-size: 9px; font-family: var(--mono); }
@@ -403,6 +414,7 @@ input[type=range]::-moz-range-thumb {
 .chart-legend i { width: 14px; height: 2px; display: inline-block; margin-right: 5px; vertical-align: middle; background: var(--acc); }
 .chart-legend i.secondary { background: var(--active); }
 .chart-legend i.limit, .chart-legend i.unfit { background: var(--bad); }
+.chart-legend i.conditional { background: var(--warn); }
 
 /* ---------- 模式三：方案 ---------- */
 
@@ -432,6 +444,8 @@ input[type=range]::-moz-range-thumb {
   grid-column: 2 / -1; font-size: 11px; color: var(--warn);
   padding-top: 7px;
 }
+.planrow.conditional { box-shadow: inset 3px 0 var(--warn); }
+.planrow .status-badge { white-space: nowrap; }
 .planhead { padding: 10px 16px; border: 0; border-bottom: 1px solid var(--line); background: var(--panel2); }
 .planhead span { font-size: 10px; letter-spacing: .08em; color: var(--faint); font-weight: 700; text-transform: uppercase; }
 .planrow[data-plan-detail], .planrow[data-rec-detail] { cursor: pointer; }
@@ -492,9 +506,22 @@ input[type=range]::-moz-range-thumb {
 .detail-table tr:last-child td { border-bottom: 0; }
 .detail-table .formula { font-family: var(--mono); color: var(--sub); }
 .detail-callout { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 7px; color: var(--sub); font-size: 11px; line-height: 1.65; }
+.detail-callout.warn { border-color: var(--warn); color: var(--warn); }
+.detail-callout.bad { border-color: var(--bad); color: var(--bad); }
 body.modal-open { overflow: hidden; }
 
 .empty { padding: 60px 0; text-align: center; color: var(--faint); font-size: 12.5px; }
+
+.calculation-status { padding: 16px; margin-bottom: 16px; border: 1px solid var(--line); border-radius: 8px; color: var(--sub); font-size: 12px; }
+[data-calculation="loading"] > :not(.calculation-status) { opacity: .45; pointer-events: none; }
+[data-calculation="error"] > :not(.calculation-status), [data-calculation="invalid"] > :not(.calculation-status) { display: none !important; }
+[data-calculation="error"] > .calculation-status, [data-calculation="invalid"] > .calculation-status { color: var(--bad); }
+.table-action { border: 0; padding: 0; background: transparent; cursor: pointer; color: var(--acc); font: inherit; text-align: inherit; }
+.table-action:hover { text-decoration: underline; }
+.pager .minibtn { width: auto; margin-top: 0; }
+.glossary-grid > .empty { grid-column: 1 / -1; }
+.cs-opt { width: 100%; border: 0; background: transparent; text-align: left; }
+.cs-opt:focus-visible, .table-action:focus-visible, .mdot:focus-visible { outline: 2px solid var(--acc); outline-offset: -2px; }
 
 /* ---------- 库/筛选 ---------- */
 
@@ -701,15 +728,26 @@ button:focus-visible, input:focus-visible, .cs-btn:focus-visible, .planrow:focus
 .mapcard h3 { display: flex; justify-content: space-between; align-items: baseline; }
 .mapcard h3 .tag { margin-left: 8px; }
 .mapcard > p { min-height: 14px; }
+.mapgrid > .mapcard { display: flex; flex-direction: column; }
+.mapgrid .chart-legend > .dim2 { flex-basis: 100%; }
+#mapLandscape { position: relative; flex: 1; min-height: 280px; }
+#mapLandscape svg { position: absolute; inset: 0; height: 100%; }
+.map-picks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 12px 0; }
+.map-picks .minibtn { margin: 0; text-align: left; font-size: 12px; }
+.map-picks .minibtn.conditional { border-color: var(--warn); }
+.map-picks small { display: block; margin-top: 4px; color: var(--faint); font: 10px var(--mono); }
+#mapWorkloadNote { margin: 0 0 16px; }
+.heat tr.selected .mname { color: var(--acc); }
 
 /* 散点/版图 SVG */
 .mdot { stroke: var(--panel); stroke-width: .8; cursor: pointer; }
 .mdot:hover { stroke: var(--text); stroke-width: 1.6; }
 .mdot.pareto { stroke: var(--text); stroke-width: 1.4; }
 .mdot.sel { stroke: var(--acc); stroke-width: 2; }
+.mdot.conditional { stroke: var(--warn); stroke-width: 2; }
 .pline { fill: none; stroke: var(--text); stroke-width: 1.2; stroke-dasharray: 1 3; opacity: .55; }
 
-/* 可部署热图 */
+/* 显存适配热图 */
 .heat { min-width: 980px; }
 .heat td, .heat th { text-align: center; padding: 7px 8px; }
 .heat td.mname, .heat th.mname { text-align: left; }
@@ -719,12 +757,16 @@ button:focus-visible, input:focus-visible, .cs-btn:focus-visible, .planrow:focus
 .hm.t8  { background: color-mix(in srgb, var(--ok) 13%, var(--panel)); color: var(--ok); }
 .hm.t4  { background: color-mix(in srgb, var(--warn) 16%, var(--panel)); color: var(--warn); }
 .hm.edge { outline: 1px dashed color-mix(in srgb, var(--warn) 65%, transparent); outline-offset: -1px; }
+.hm.conditional { background: color-mix(in srgb, var(--warn) 15%, var(--panel)); color: var(--warn); outline: 1px solid var(--warn); }
+.hm.unsupported { color: var(--bad); background: color-mix(in srgb, var(--bad) 8%, var(--panel)); }
 .hm.no { color: var(--no); background: transparent; min-width: 0; }
 .hm.na { color: var(--faint); background: transparent; min-width: 0; font-size: 9px; }
 
 @media (max-width: 1100px) {
   .mapgrid { grid-template-columns: 1fr; }
-  .mapbar { grid-template-columns: 1fr 1fr; }
+  #mapLandscape { flex: none; min-height: 0; aspect-ratio: 520 / 380; }
+  .mapbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mapbar > div { min-width: 0; }
 }
 
 /* 悬浮提示（即时，不等原生 title 延迟） */
@@ -743,7 +785,7 @@ button:focus-visible, input:focus-visible, .cs-btn:focus-visible, .planrow:focus
   #curveBox { grid-template-columns: 1fr; }
   .chart + .chart { border-left: 0; border-top: 1px solid var(--line); }
   .planrow { min-width: 980px; }
-  #planList { overflow-x: auto; padding-bottom: 4px; }
+  #planList, #recList { overflow-x: auto; padding-bottom: 4px; }
   .detail-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 

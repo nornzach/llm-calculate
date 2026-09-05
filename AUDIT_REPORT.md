@@ -1,270 +1,95 @@
-# LLM 推理计算器审计报告
+# LLM 推理计算器修复与可信度边界
 
-**审计日期：** 2026-09-03
-**审计范围：** 模型元数据、加速卡、量化、推理引擎、推测解码、缓存、并行部署、显存与性能公式  
-**结论：** 未校准结果适合显存可行性和一阶容量筛选；完整填写同条件实测利用率后可作为部署 what-if。任何口径都不应脱离压测直接用于采购承诺、生产 SLA 或成本预算。
+**更新日期：2026-09-05**
 
-本报告替代此前同名报告。此前报告含多项可证伪结论，例如把 B200 带宽写成 14 TB/s、把 B300 写成 22 TB/s、把 RTX 5090 写成 24 GB/672 GB/s、声称 B300/NVFP4/EXL3/推测解码尚未实现，并在无同条件基准的情况下给出“典型误差 ±30~50%”。这些结论均不再有效。
+本报告取代旧版“全量修正”“零启发式 active”及不带同条件证据的速度锚点结论。结构校验通过不等于数据已经逐条核验；解析估算也不是压测。
 
-## 1. 可信度结论
+## 已修复
 
-| 部分 | 当前用途 | 可信度边界 |
-|---|---|---|
-| 权重显存 | 初筛/校准 | 用户实测加载 GB 优先；带具体存储格式的预量化 checkpoint 自动锁定并使用 safetensors payload；只有基础权重可切换假想量化。混合精度、padding 和运行时重排仍需实测 |
-| KV/固定状态显存 | 初筛 | 已区分 MHA/GQA/MLA、全局/滑窗/线性 attention、共享前缀、KV allocator、量化、CP 与 offload；FP8/FP4 KV 仅在硬件与引擎组合支持时压缩，未模拟驱逐、远端容量上限和逐层混合 dtype |
-| 可部署性 | 静态容量判断 | 引擎预算、运行时、workspace、adapter/draft 均可覆盖；默认预算仍是场景值，不是设备探测 |
-| Decode/Prefill | 一阶 roofline | 已建模 HBM、算力、TP/PP/EP/CP 通信、chunked prefill、媒体 encoder 与 offload；推测解码只在填写同条件实测接受 token/开销后应用，analytical 无统计置信区间 |
-| 校准模式 | 同部署 what-if | 只有 HBM/算力/调度及多卡互联利用率均有实测输入时标为 `calibrated`；校准值不可跨模型、版本和负载迁移 |
-| 规划器 | 候选枚举 | 显示容量、目标到达率、利用率及 M/M/c 平均/p95 排队等待；其泊松到达、指数服务和独立副本假设不等于生产 SLA |
-| 自动采集模型 | 官方发布机构发现与粗筛 | 当前 2,195 条均来自内置已核实发布机构且保留源 URL；`conf=fetched` 描述字段提取方式，不等于逐字段人工核验，模型更新后必须重新采集 |
-| 硬件与价格 | 规格检索 | 关键旗舰逐精度 dense 峰值附一手来源；缺逐精度峰值时明确使用倍率估算，`reported` 和价格不能当采购报价 |
+### 计算与推荐
 
-## 2. 本次全量修正
+- 规划、推荐与前端去重保留量化、引擎、KV、推测方式、卡数、副本、并发及拓扑差异，不再先按最高 TPM 吞掉便宜部署。
+- latency 目标使用完整请求 P95（服务 P95 加估算排队 P95），不是 TTFT + 一个 TPOT。两种 P95 相加仍是保守场景分数，不是联合分布的实测分位数。
+- Output=1 不再被虚构为一次后续 decode；decode 平均值、分位数及桶指标只计实际后续 token。全部输出为一个 token 时，decode 指标为零，TTFT、req/s、mixed TPM 仍有意义。
+- 调度开销明细使用实际纳入 decode step 的数值。
+- 显式 query heads 用于 TP 约束和 attention FLOPs。Qwen3 等模型的 query 宽度可能不同于 hidden size，不能通用地用 hidden/head_dim 推断 query heads；残差通信仍使用 hidden。
+- 无效 TP/PP/EP/CP 不再给出正常回退速度。聚合整柜、diffusion/block diffusion、未建模 CP/DCP 或不完整关键几何不会产生正常性能结论。
 
-### 2.1 模型参数与检查点
+### 支持状态
 
-采集器现在优先使用 Hugging Face `safetensors.total` 作为与存储 dtype 无关的参数量，并独立保存 safetensors payload。分片仓库读取 index `metadata.total_size`；单文件仓库从 `siblings[].size` 汇总。
+Perf 和规划结果区分：
 
-存储精度优先读取 compressed-tensors/AWQ/GPTQ 的具体 `format`、权重位数和类型，并映射到计算器已有的 INT4/FP4/MXFP4 等执行格式。只有配置未描述具体打包存储时，才用 payload bytes/parameter（≥1.45 为 FP16/BF16 族，0.72–1.45 为 8-bit 族，更低为 4-bit 族）纠正仅声明运行时能力的配置。因此 DeepSeek-V3-0324 的 1,369 GB 源仓库保持 FP16/BF16，而 Gemma 4 QAT W4A16 与 Kimi K3 分别保持 INT4、MXFP4。
+- `fit`：仅显存条件。
+- `support`：supported、conditional、unsupported、unknown。
+- `support_reason`：约束或缺失前提。
+- `estimate_valid`：该输入是否适用于当前性能模型。
+- `deployable`：静态已支持且显存满足；不是现场部署认证。
 
-MoE active 参数优先级：
+无效估算的速度为零并由界面隐藏。未知/不支持或无效估算不进入自动推荐；conditional 可作为待验证候选，但不标绿或声称已确认部署。
 
-1. 官方模型卡覆盖；
-2. `MoE layers × experts × 3 × hidden × expert intermediate` 的结构推导；
-3. 模型名 `A…B`；
-4. 仅在结构缺失时使用启发式，并在备注中明确标识。
+兼容性不再以厂商匹配作为唯一条件：旧 NVIDIA 架构、厂商插件、量化加载、query/KV 分片、互联域和执行家族有独立约束。auto 可为旧 NVIDIA 选择 llama.cpp 条件路径，显式选择不会被偷偷替换。FP8 KV 存储与原生 FP8 算术能力分开，A100 仍需要核对 CUDA、attention backend 和运行时版本。MXFP4 使用统一加载路径规则，不再由 Accel 充当可加载性。
 
-重点抽查：
+`analytical` 与 `scenario` 都不是实测校准。填写覆盖参数不会获得 `calibrated` 认证。`peak_exact` 只对有来源的对应 dense 矩阵规格成立；向量、营销换算及未核验 TF 只能作为有条件的场景输入。
 
-| 模型 | 总参数 | 激活参数 | 路由 | Payload / 原生格式 |
-|---|---:|---:|---|---|
-| OpenAI GPT-OSS-120B | 116.8B | 5.1B 官方 | 128×Top4，36 MoE 层 | 65.25 GB / MXFP4 |
-| DeepSeek-V3-0324 | 684.5B | 37B 官方 | 256×Top8，58 MoE 层 | 1,369.06 GB / FP16 |
-| Kimi K3 | 2,779.9B | 104B | 896×Top16，93 层 | 1,560.86 GB / MXFP4 |
-| Step 3.5 Flash | 199.3B payload 计数 | 11B 官方 | 288×Top8，45 层，MTP-3 | 398.77 GB / FP16 |
-| Gemma 4 12B QAT W4A16 | 13.3B | 13.3B | Dense，48 层 | 10.26 GB / INT4 |
+### 数据
 
-模型字段包含 `model_type`、dense/MoE intermediate、shared experts、MoE layers、MTP heads、multimodal、encoder params、checkpoint GB、native quant 和 source URL。完整刷新与校验结果：
+硬件保留 121 个 ID。确认修改包括 A100 PCIe/SXM、P100 PCIe、V100 SXM2 的规格组合，RX 9070 XT 的 dense FP16/FP8/INT8 峰值和 TPU7x 的官方 pod 口径。DGX Spark 的 140W 芯片 TDP、240W PSU 额定值不能当作实测整机功耗，整机功耗保留未知。
 
-- 2,195 条 HF 自动记录；与 62 条精选记录合并后运行时共 2,257 个模型，无重复 ID；
-- 502 条 MoE，`experts/topk` 缺失为 0；386 条 active 由结构推导，启发估计为 0；
-- 1,901 条取得 checkpoint payload，2,195 条均有官方发布机构源 URL；
-- 原生格式分布：FP16 1,737、FP8 340、INT4 112、MXFP4 6；
-- 188 条 local/sliding attention、105 条 hybrid recurrent state、184 条 MTP、298 条多模态包装模型。
+历史 H100 PCIe 600GB/s NVLink 和 B200 2250/4500/9000 dense 峰值未被误改。GB200/GB300 标称/可用容量与 MI355X 链路聚合口径的争议不作为确认错误。
 
-### 2.2 显存与 KV
+模型采集器：
 
-单卡可分配量与物理显存分开：
+- 按 SHA 固定 config、分片 index 和单文件 blob 元数据读取。
+- 逻辑参数与 packed tensor 元素、payload 字节分开；处理共享 embedding 和明确的嵌套量化配置。
+- 不再用 payload/参数量比值猜存储格式；缺少 KV heads 时按配置中的 MQA/MHA 语义处理，不再猜 GQA-8。
+- 保存 heads、revision、param_source、extended_ctx 和 encoder_params；不能取得的值不会虚构核验。
+- Qwen3-0.6B 为 0.6B；NVIDIA Qwen3-8B-NVFP4 为 8.2B/FP4；Falcon-7B 为 MQA、一个 KV head。
+- **复核更正：Qwen2.5-7B Base 原生配置为 131072；Instruct 为 32768，扩展 131072 需对应运行条件。不能因为名字相近就统一成 32K。**
+- 精选 Qwen 条目同步相同 SHA 来源中的架构元数据；Llama 3.1 8B/70B 使用 Meta 发布规模作取整场景，未假装绑定具体权重 revision。
 
-`Budget = VRAM × mem_util`，`System reserve = VRAM - Budget`
+当前目录为 62 个精选 + 2195 个 HF + 0 个 ModelScope，共 2257 个 ID。12 条记录固定了 revision；14 条记录具有已核对的参数来源（含取整模型卡规模）；296 条多模态记录仍缺独立 encoder 参数。其余旧记录没有完成逐字段外部核验。官方发布机构标签不代表参数、格式或性能已经验证。
 
-`Fit` 只比较权重、KV、运行时、workspace、adapter/draft 与 `Budget`，不再把系统预留重复扣减。70B INT4 在 2×24 GB、4K、低并发下因此是“贴边可行”而非错误的“装不下”；FitMatrix 仍按 <10% 余量显示警告。
+### 页面
 
-权重按拓扑拆分：
+显存条、性能页、矩阵、地图、方案与处方统一使用支持状态。无效配置只显示状态与容量诊断，不展示虚构速度。语言切换通过一次性 sessionStorage 保留页面、原生输入、选择器、负载、高级参数、自定义模型和展开状态。首页默认使用已补齐元数据的 Qwen3-8B，而不是未经核验的新条目。
 
-- 文本基础权重：`base / (TP×PP)`；
-- routed expert：`experts / (TP×PP×EP)`；
-- encoder：保守按 `encoder / TP`；
-- 用户实测 `weight_gb` 优先于所有推导。
+## 验证证据
 
-KV 处理：
+- `go test ./...` 通过；移除了缺乏同条件来源、用社区范围或“同构估计”硬断言速度的旧锚点测试，没有重钉伪精度。
+- `node --check web/app.js` 与 `go build -trimpath -o llmcalc .` 通过。
+- 真实采集命令定向刷新 `nvidia/Qwen3-8B-NVFP4`，输出 8.2B、FP4、固定 SHA `ccd10a893cbca613259517c3efe08e151ddf2b8e` 和 6.396932352GB payload。
+- HTTP 反例确认：P100/TRT、TP3/4卡、Qwen2.5 TP8、整柜和 diffusion 不再输出正常性能；A100 FP8 KV 不因缺原生 FP8 算术被一概否决。
+- Llama 70B INT4/6000 TPM 场景中，规划器保留 H200 的 1/2/4/8 卡成本。推荐返回与规划相同的最低月成本方案；推荐输出上限不意味着包含每个硬件候选。
+- 混合 Output=1/101 的请求不再污染 decode 统计；长输出 latency 方案按完整请求 P95 排序。
+- 实际 Chromium 页面验证：地图 9000 TPM/并发3、性能页 H200/TP3/输出777和高级面板展开状态在语言切换后保留；TP3 被拒绝并隐藏速度，恢复 TP4 后显示条件估算与完整 E2E 指标。
 
-- GQA 每 rank 比例 `ceil(KV_heads/TP)/KV_heads`，TP 超过 KV heads 时复制；
-- MLA latent cache 默认在 TP ranks 复制；
-- PP/CP 分摊 KV，linear recurrent state 单独按请求计；
-- prefix hit 对 full-attention 共享 block 只驻留一份；local attention 只共享仍位于滑窗尾部的 block；
-- `kv_overhead` 表达 allocator/block 开销；
-- `kv_offload` 从 GPU 容量移出，并按 `offload_bw` 把回读和写入时延计回；
-- max batch 同时计入每请求 KV、state 和 prefill workspace，不再只除 KV。
+上述是计算器行为验证，不是 GPU 实测 benchmark。
 
-### 2.3 Decode、Prefill 与并行
+## 仍需的生产前提
 
-当前 decode 单步：
+1. 固定 checkpoint、引擎/驱动/OS、kernel、量化方法、KV backend 和实际拓扑。
+2. 测量加载显存、workspace、同负载 TTFT/TPOT/吞吐、功耗和误差范围。
+3. 真实连续批处理、cache 驱逐、通信拥塞与 overlap 未被静态模型完整模拟。
+4. P99.9 显存是负载分桶的矩近似，排队是 M/M/c；不保证生产尾延迟或 SLO。
+5. 所有 CNY 为未核验参考假设，非当前报价；36 月摊销、电价和功耗比例不是完整 TCO。
+6. SLO/goodput、质量约束、完整 TCO、MIG/多模型共卡、场景导出和完整非自回归模拟仍属功能扩展，本轮未实现。
 
-`T_step = max(T_HBM + T_offload, T_compute) + T_TP + T_EP + T_CP + T_PP + T_schedule`
+## 一手来源
 
-- HBM 读取包括当前 batch 期望触达的唯一 MoE 专家、完整 K+V、线性 state 与 adapter；
-- MoE 有结构时分离基础/专家权重；EP 对 expert 计算和存储分片，并按 TopK 计 dispatch+combine All-to-All；
-- `router_skew` 表达最忙 rank / 平均负载，低 token 数还会自动加入离散路由下界；
-- TP 用 ring `2×(TP-1)/TP`，CP 和 PP 分别计 attention collective 与 stage activation；
-- TP×PP×EP×CP 必须等于卡数；Dense+EP 或乘积错误会标记无效并回退全 TP；
-- 硬件有逐精度 dense 峰值时直接使用，否则输出 `peak_exact=false` 并标记倍率估算。
-
-当前 prefill：
-
-- 线性项为总计算时间与每 chunk 权重读取时间之较大值；
-- `prefill_chunk` 明确计重复权重读取和每 chunk 调度；
-- causal、sparse、sliding/local attention 分别使用对应 key 数；
-- 计入 TP/EP/CP/PP 通信、KV 写入、offload 写入；
-- `encoder_params × media_tokens` 单独形成多模态 encoder 计算/权重读取时间；
-- TTFT、TPOT、请求总时延、req/s、decode TPM 和输入+输出 mixed TPM 使用同一输出长度口径。
-
-### 2.4 硬件逐精度峰值
-
-| 加速卡 | 显存 | 带宽 | Dense FP16/BF16 | Dense FP8/INT8 | Dense FP4 | 互联 |
-|---|---:|---:|---:|---:|---:|---:|
-| NVIDIA H100 SXM | 80 GB | 3.35 TB/s | 989 TF | 1,979 TF / 1,979 TOPS | — | NVLink 900 GB/s |
-| NVIDIA H200 | 141 GB | 4.8 TB/s | 989 TF | 1,979 TF / 1,979 TOPS | — | NVLink 900 GB/s |
-| NVIDIA B200 | 192 GB 物理规格 | 8 TB/s | 2.25 PF | 4.5 PF / 4.5 POPS | 9 PF | NVLink 1.8 TB/s |
-| NVIDIA B300 | 288 GB | 8 TB/s | 2.5 PF | 5 PF / 5 POPS | 15 PF NVFP4 | NVLink 1.8 TB/s |
-| NVIDIA Rubin | 288 GB HBM4 | 22 TB/s | 4 PF | 17.5 PF | 50 PF NVFP4 | NVLink 3.6 TB/s |
-| AMD MI300X | 192 GB | 5.3 TB/s | 1.307 PF | 2.615 PF / 2.615 POPS | — | Infinity Fabric |
-| AMD MI325X | 256 GB | 6 TB/s | 1.307 PF | 2.615 PF / 2.615 POPS | — | Infinity Fabric |
-| AMD MI355X | 288 GB | 8 TB/s | 2.5 PF | 5 PF / 5 POPS | 10.1 PF MXFP4 | Infinity Fabric |
-| AMD MI455X | 432 GB HBM4 | 23.3 TB/s | 5 PF | 20.1 PF / 20.1 POPS | 40.3 PF MXFP4 | UALoE 3.6 TB/s |
-
-这些字段均使用 dense 口径；NVIDIA 页面带 structured sparsity 的数值不再直接当 dense 峰值。Rubin/MI455X 的初步规格及未公布功耗/价格保持明确状态，不补猜测值。
-
-### 2.5 量化、adapter 与推测解码
-
-| 选择项 | 当前解释 | 边界 |
-|---|---|---|
-| FP8/INT8 W8A8 | 容量约 1 byte/parameter；优先用硬件逐精度峰值 | kernel、scale、未量化层需按 checkpoint/引擎核对 |
-| INT4·W4A16、GGUF、MLX、EXL3 | 4-bit/格式级容量与带宽收益 | 不自动套 4×算力；AWQ/GPTQ/QAT 是该档覆盖的不同存储实现 |
-| NVFP4 | NVIDIA W4A4 路径 | 只有硬件和引擎支持时使用 FP4 峰值 |
-| MXFP4 | MXFP4 权重路径 | 不等于通用 W4A4；GPT-OSS/Kimi K3 仍按实际执行栈校准 |
-| 预量化 checkpoint | 自动锁定 `native_quant`，使用匹配 safetensors payload；矩阵与规划器不枚举虚构格式 | 若要比较重定量化，必须选择对应基础权重记录；可再用该部署的实际 `weight_gb` 覆盖容量 |
-| FP8/FP4 KV | FP8 仅在 FP8 硬件 + vLLM/SGLang/TensorRT-LLM 时压缩；FP4 仅在 FP4 硬件 + SGLang 时压缩 | 不支持时容量与时延均按 FP16，结果返回 `kv_supported=false` |
-| Adapter/draft/MTP | 显式 GB 加入权重与访存；MTP 需模型元数据 | 选中方法只预留内存；仅同时填写 `spec_tau/spec_ovh` 时应用实测推测增益 |
-
-### 2.6 服务负载
-
-规划器不再用“队列深度÷吞吐”冒充等待时间。目标 mixed TPM 先换算 arrival req/s，单副本通过 prefill+decode 串行资源预算得到 service req/s，再使用 Erlang-C：
-
-- 利用率 `ρ = λ/(cμ)`；
-- 平均等待 `P(wait)/(cμ-λ)`；
-- `P(Wq>t)=P(wait)·exp(-(cμ-λ)t)` 得到无条件 p95；
-- `ρ=1` 不存在稳态，开启排队时会增加副本保留服务余量。
-
-UI 同时显示容量 QPS、目标 QPS、利用率、平均/p95 等待，并明确标注 M/M/c 假设。
-
-## 3. 当前覆盖与剩余边界
-
-### 3.1 已可表达的输入
-
-- 模型：总/激活/encoder 参数、layers、hidden、intermediate、MoE experts/top-k/shared experts/MoE layers、MTP heads、MHA/GQA/MLA、KV/local layers、window、linear state、sparse budget、原生 context；
-- 检查点：实际加载权重、源 payload、原生量化；
-- 部署：TP/PP/EP/CP、运行时常驻、workspace、adapter/draft、显存预算、HBM/算力/互联利用率、调度开销；
-- KV/缓存：KV dtype、allocator 系数、prefix hit、offload 比例与有效带宽；
-- 负载：固定 context、batch、output length、prefill chunk、media tokens、router skew、spec acceptance/overhead；
-- 输出：容量分解、headroom、max batch、decode/prefill 分项、拓扑/峰值来源、req/s、mixed TPM、规划容量与 M/M/c 队列指标。
-
-### 3.2 数据完整性
-
-- 2,195 条自动模型中，502 条 MoE 路由字段已全覆盖；没有启发式 active，294 条未取得 payload；
-- 298 条自动多模态记录能识别包装模型，但缺独立 encoder 参数时只计算文本塔并告警；用户可用 `encoder_params`/`media_tokens` 补齐；
-- 121 条硬件中 82 条为 `official`、39 条为 `reported`，7 条缺 TDP，13 条缺参考价，仅 11 条附逐项一手 URL；
-- 37 条宣称 FP8 能力但缺逐卡 FP8 dense 峰值，11 条 FP4、97 条 INT8 记录缺对应逐精度峰值；计算器会标成倍率估算而非伪装成精确规格。7 条只提供托管服务/整机口径且缺本地 roofline 的硬件会被容量/性能 API 拒绝。
-
-### 3.3 尚未自动覆盖
-
-以下项目没有足够输入时不会被压缩成无来源固定倍率：
-
-1. Data Parallel、DCP/DPA、wide-EP、PD/EPD 的自动联合搜索与跨节点 placement；
-2. 真实 expert histogram、拓扑分层、collective 并发/拥塞和通信-计算 overlap；
-3. continuous batching 调度轨迹、CUDA Graph、kernel fusion、算子特定效率；
-4. prefix cache 生命周期、驱逐、跨请求不同前缀、分层缓存容量与远端命中；
-5. 自动模型的精确视觉/音频塔、encoder cache、逐 adapter 热切换；
-6. safetensors 内逐 tensor 混合 dtype、scale、padding 和运行时重排；
-7. 到达/长度/采样参数分布及生产 P50/P95/P99、goodput、SLO 违约率；
-8. 主机 CPU/NUMA/PCIe/NIC、存储、PUE、机柜功率、云折扣和运维成本；
-9. diffusion language model 等非自回归执行范式。
-
-这些是输入缺口，不是再加几个全局系数能可靠修复的问题。
-
-## 4. 精度解释
-
-`analytical` 表示：
-
-- 使用厂商理论峰值或明确标识的倍率估算；
-- 使用默认 HBM、FLOPs、通信和调度利用率；
-- 输出没有统计置信区间。
-
-`calibrated` 表示：
-
-- HBM、FLOPs、调度均有同部署实测输入；
-- 多卡时互联利用率也已输入；
-- 结果仍只对该模型、checkpoint、引擎版本、拓扑和负载口径有效。
-
-因此不存在可辩护的全局“±30%”误差。静态模型不能从均值可靠推导生产尾延迟。
-
-## 5. 生产使用门槛
-
-用于实际 sizing 前至少需要：
-
-1. 精确 checkpoint 清单、原生量化和实际加载 `weight_gb`；
-2. 引擎 commit/version、kernel、KV dtype、运行时常驻与峰值 workspace；
-3. TP/PP/EP/CP placement 和每条链路实测有效带宽；
-4. 真实请求 trace：到达率、prefix 重用、输入/输出长度、media token、采样参数；
-5. 同条件 TTFT、ITL、TPS、显存、功耗及 P50/P95/P99；
-6. 用实测反推 HBM/FLOPs/link 利用率、调度开销、router skew、spec τ/overhead；
-7. 使用真实 trace 或压测验证 M/M/c 假设失配后的尾延迟。
-
-未完成这些步骤前，只使用容量余量、瓶颈方向和候选数量级，不使用绝对性能值做承诺。
-
-## 6. 验证
-
-回归契约覆盖：
-
-- 原生量化 checkpoint 锁定、payload 复用、基础权重自由量化，以及矩阵/规划器不枚举不适用格式；
-- compressed-tensors MXFP4/INT4 存储格式解析、辅助 MTP 仓库过滤、定向刷新不丢失官方来源；
-- 硬件/模型 ID、核心维度、attention 层数、KV 维度和量化枚举加载校验；
-- 系统预留不重复扣减，GQA/MLA TP 复制、PP/CP/EP 分片、prefix 共享、KV allocator 与 offload；
-- KV 格式按硬件/引擎支持门控；不支持的 FP4 请求与 FP16 得到相同容量/吞吐；
-- 推测解码在缺实测 `τ/overhead` 时不改变吞吐，填写后按场景公式应用；MTP 另校验模型元数据；
-- decode/prefill roofline、通信、校准状态、TTFT/TPOT/E2E、req/s、mixed TPM 与 Erlang-C。
-
-最终验证：
-
-- `go test ./...`、`node --check web/app.js`、`go build -trimpath -o llmcalc .` 全部通过；
-- 数据校验：121 个唯一硬件、2,257 个唯一模型、零重复 ID、零无效核心/KV/attention/原生量化记录；2,195 条 HF 记录均来自允许的官方发布机构且均有源 URL；
-- API 实测：任意 batch 7 被插入曲线；RTX 4090 + vLLM 请求 FP4 KV 返回 `kv_supported=false`，容量/吞吐与 FP16 相同；未校准 EAGLE-3 保持 482.7 tok/s，填写 `τ=2/overhead=0.2` 后返回 `spec_applied=true` 与 716.7 tok/s；
-- API 实测：请求 Kimi K3 + INT4 自动返回 MXFP4/locked；FitMatrix 只有 MXFP4 可用，Gemma 4 QAT W4A16 规划器忽略冲突的 FP8 过滤并只返回 INT4；
-- API 边界：未知量化返回 400，缺本地 roofline 的 Groq LPU 返回 422；
-- 浏览器实测：默认浅色正文/弱化文字对比度分别 14.91:1、5.13:1，深色切换可恢复；吞吐与显存两张 SVG 使用 API 同一批曲线数据并标记选中 batch/超显存点；
-- 浏览器实测：Kimi K3 自动锁定 MXFP4、Gemma 4 QAT 自动锁定 INT4、基础 Llama 解锁；99 项术语可搜索；390 px 视口吞吐页与术语页均无横向溢出；规划器返回 71 条默认候选。
-- 生产服务 `127.0.0.1:8317` 已加载 121 个硬件/2,257 个模型，Gemma 4 QAT 请求冲突的 FP8 时返回 INT4/locked，batch 7 曲线字段完整。
-
-## 7. 一手资料
-
-### 硬件
-
-1. [NVIDIA H100 Tensor Core GPU](https://www.nvidia.com/en-us/data-center/h100/)
-2. [NVIDIA H200 Tensor Core GPU](https://www.nvidia.com/en-us/data-center/h200/)
-3. [NVIDIA Blackwell architecture / B200](https://www.nvidia.com/en-us/data-center/technologies/blackwell-architecture/)
-4. [NVIDIA Blackwell Ultra / B300](https://developer.nvidia.com/blog/inside-nvidia-blackwell-ultra-the-chip-powering-the-ai-factory-era)
-5. [NVIDIA Vera Rubin NVL72 specifications](https://www.nvidia.com/en-us/data-center/vera-rubin-nvl72/)
-6. [NVIDIA GeForce RTX 5090](https://www.nvidia.com/en-us/geforce/graphics-cards/50-series/rtx-5090/)
-7. [AMD Instinct MI300X](https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html)
-8. [AMD Instinct MI325X](https://www.amd.com/en/products/accelerators/instinct/mi300/mi325x.html)
-9. [AMD Instinct MI355X](https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html)
-10. [AMD Instinct MI455X](https://www.amd.com/en/products/accelerators/instinct/mi400/mi455x.html)
-
-### 模型
-
-11. [Qwen3-30B-A3B-Instruct-2507 model card](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507)
-12. [DeepSeek-V3-0324 model card](https://huggingface.co/deepseek-ai/DeepSeek-V3-0324)
-13. [OpenAI GPT-OSS-120B model card](https://huggingface.co/openai/gpt-oss-120b)
-14. [Kimi-K2-Instruct model card](https://huggingface.co/moonshotai/Kimi-K2-Instruct)
-15. [Kimi K3 model card](https://huggingface.co/moonshotai/Kimi-K3)
-16. [Gemma 4 12B QAT W4A16 model card](https://huggingface.co/google/gemma-4-12B-it-qat-w4a16-ct)
-17. [Step 3.5 Flash model card](https://huggingface.co/stepfun-ai/Step-3.5-Flash)
-18. [Qwen3.8-2.4T-A95B model card](https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B)
-19. [GLM-5 repository](https://github.com/zai-org/GLM-5)
-20. [Mistral Small 4 model card](https://huggingface.co/mistralai/Mistral-Small-4-119B-2603)
-
-### 量化、缓存与服务
-
-21. [vLLM quantization](https://docs.vllm.ai/en/latest/features/quantization/)
-22. [vLLM quantized KV cache](https://docs.vllm.ai/en/latest/features/quantization/quantized_kvcache/)
-23. [vLLM speculative decoding](https://docs.vllm.ai/en/latest/features/speculative_decoding/)
-24. [vLLM disaggregated prefill](https://docs.vllm.ai/en/latest/features/disagg_prefill/)
-25. [vLLM hybrid attention support](https://vllm.ai/blog/2025-09-11-qwen3-next)
-26. [SGLang documentation index](https://docs.sglang.io/llms.txt)
-27. [SGLang quantized KV cache](https://docs.sglang.ai/advanced_features/quantized_kv_cache.html)
-28. [SGLang production metrics](https://docs.sglang.io/docs/references/production_metrics.md)
-29. [TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM)
-30. [llama.cpp quantization](https://github.com/ggml-org/llama.cpp/blob/master/tools/quantize/README.md)
-31. [MLX-LM](https://github.com/ml-explore/mlx-lm)
-32. [ExLlamaV3](https://github.com/turboderp-org/exllamav3)
-33. [LLM inference performance modeling survey](https://arxiv.org/html/2402.16363)
+- [A100 官方数据表](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-us-nvidia-1758950-r4-web.pdf)
+- [P100 PCIe](https://images.nvidia.com/content/tesla/pdf/nvidia-tesla-p100-PCIe-datasheet.pdf)
+- [V100](https://images.nvidia.com/content/technologies/volta/pdf/tesla-volta-v100-datasheet-letter-fnl-web.pdf)
+- [RX 9070 XT](https://www.amd.com/en/products/graphics/desktops/radeon/9000-series/amd-radeon-rx-9070xt.html)
+- [DGX B200](https://www.nvidia.com/en-us/data-center/dgx-b200/)
+- [DGX Spark](https://www.nvidia.com/en-us/products/workstations/dgx-spark/)
+- [TPU7x](https://docs.cloud.google.com/tpu/docs/tpu7x)
+- [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B)
+- [Qwen3-8B-NVFP4](https://huggingface.co/nvidia/Qwen3-8B-NVFP4)
+- [Qwen2.5 Base config](https://huggingface.co/Qwen/Qwen2.5-7B/raw/main/config.json)
+- [Qwen2.5 Instruct config](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/raw/main/config.json)
+- [Falcon-7B config](https://huggingface.co/tiiuae/falcon-7b/raw/main/config.json)
+- [DiffusionGemma](https://huggingface.co/google/diffusiongemma-26B-A4B-it)
+- [Meta Llama 3.1](https://github.com/meta-llama/llama-models/blob/main/models/llama3_1/MODEL_CARD.md)
+- [TensorRT-LLM support matrix](https://nvidia.github.io/TensorRT-LLM/reference/support-matrix.html)
+- [vLLM FP8 KV](https://docs.vllm.ai/en/latest/features/quantization/quantized_kvcache/)
+- [vLLM context parallelism](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment/)

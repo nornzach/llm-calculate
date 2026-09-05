@@ -6,6 +6,7 @@
   "year": 2025,
   "params": 0.6,
   "active": 0.6,
+  "heads": 16,
   "layers": 28,
   "hidden": 1024,
   "kvt": "gqa",
@@ -13,7 +14,15 @@
   "dim": 128,
   "ctx": 32768,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "src": "hf",
+  "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+  "param_source": "model_card",
+  "source_url": "https://huggingface.co/Qwen/Qwen3-0.6B",
+  "model_type": "qwen3",
+  "architecture": "Qwen3ForCausalLM",
+  "dtype": "bfloat16",
+  "native_quant": "fp16"
  },
  {
   "id": "gemma-3-1b",
@@ -170,6 +179,7 @@
   "year": 2024,
   "params": 7.6,
   "active": 7.6,
+  "heads": 28,
   "layers": 28,
   "hidden": 3584,
   "kvt": "gqa",
@@ -177,7 +187,15 @@
   "dim": 128,
   "ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "src": "hf",
+  "revision": "d149729398750b98c0af14eb82c78cfe92750796",
+  "param_source": "model_card",
+  "source_url": "https://huggingface.co/Qwen/Qwen2.5-7B",
+  "model_type": "qwen2",
+  "architecture": "Qwen2ForCausalLM",
+  "dtype": "bfloat16",
+  "native_quant": "fp16"
  },
  {
   "id": "llama-3.1-8b",
@@ -193,7 +211,12 @@
   "dim": 128,
   "ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "model_type": "llama",
+  "architecture": "LlamaForCausalLM",
+  "param_source": "model_card",
+  "source_url": "https://github.com/meta-llama/llama-models/blob/main/models/llama3_1/MODEL_CARD.md",
+  "notes": "Meta 发布规模取整；未绑定具体 checkpoint revision，性能仅为条件场景估算"
  },
  {
   "id": "qwen3-8b",
@@ -202,14 +225,24 @@
   "year": 2025,
   "params": 8.2,
   "active": 8.2,
+  "heads": 32,
   "layers": 36,
   "hidden": 4096,
   "kvt": "gqa",
   "kvh": 8,
   "dim": 128,
-  "ctx": 131072,
+  "ctx": 32768,
+  "extended_ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "src": "hf",
+  "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+  "param_source": "model_card",
+  "source_url": "https://huggingface.co/Qwen/Qwen3-8B",
+  "model_type": "qwen3",
+  "architecture": "Qwen3ForCausalLM",
+  "dtype": "bfloat16",
+  "native_quant": "fp16"
  },
  {
   "id": "deepseek-r1-llama-8b",
@@ -542,7 +575,12 @@
   "dim": 128,
   "ctx": 131072,
   "moe": false,
-  "conf": "official"
+  "conf": "official",
+  "model_type": "llama",
+  "architecture": "LlamaForCausalLM",
+  "param_source": "model_card",
+  "source_url": "https://github.com/meta-llama/llama-models/blob/main/models/llama3_1/MODEL_CARD.md",
+  "notes": "Meta 发布规模取整；未绑定具体 checkpoint revision，性能仅为条件场景估算"
  },
  {
   "id": "llama-3.3-70b",

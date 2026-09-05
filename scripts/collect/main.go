@@ -27,6 +27,7 @@ type hfEntry struct {
 	LastModified   string   `json:"lastModified"`
 	CreatedAt      string   `json:"createdAt"`
 	Tags           []string `json:"tags"`
+	SHA            string   `json:"sha"`
 	PipelineTag    string   `json:"pipeline_tag"`
 	Provider       string   `json:"-"`
 	ParameterCount int64    `json:"-"`
@@ -90,70 +91,63 @@ type msFilesResponse struct {
 	} `json:"Data"`
 }
 
-type hfQuantConfig struct {
-	Method       string                  `json:"quant_method"`
-	Format       string                  `json:"format"`
-	ConfigGroups map[string]hfQuantGroup `json:"config_groups"`
-}
-
-type hfQuantGroup struct {
-	Format  string `json:"format"`
-	Weights struct {
-		NumBits int    `json:"num_bits"`
-		Type    string `json:"type"`
-	} `json:"weights"`
-}
+type hfQuantConfig = json.RawMessage
 
 type hfConfig struct {
-	ModelType            string    `json:"model_type"`
-	Architectures        []string  `json:"architectures"`
-	TorchDType           string    `json:"torch_dtype"`
-	DType                string    `json:"dtype"`
-	RopeTheta            float64   `json:"rope_theta"`
-	Layers               int       `json:"num_hidden_layers"`
-	Hidden               float64   `json:"hidden_size"`
-	Intermediate         float64   `json:"intermediate_size"`
-	MoeIntermediate      float64   `json:"moe_intermediate_size"`
-	Heads                int       `json:"num_attention_heads"`
-	KVHeads              int       `json:"num_key_value_heads"`
-	HeadDim              int       `json:"head_dim"`
-	MaxPos               int       `json:"max_position_embeddings"`
-	KvLoraRank           float64   `json:"kv_lora_rank"`
-	QkRopeDim            float64   `json:"qk_rope_head_dim"`
-	NRouted              int       `json:"n_routed_experts"`
-	NumRouted            int       `json:"num_routed_experts"`
-	NumExperts           int       `json:"num_experts"`
-	NumLocal             int       `json:"num_local_experts"`
-	ExpertsPerToken      int       `json:"experts_per_token"`
-	NumSelectedExperts   int       `json:"num_selected_experts"`
-	NShared              int       `json:"n_shared_experts"`
-	NumShared            int       `json:"num_shared_experts"`
-	FirstKDense          int       `json:"first_k_dense_replace"`
-	MoeLayerFreq         int       `json:"moe_layer_freq"`
-	MoeLayerFrequency    int       `json:"moe_layer_frequency"`
-	ExpertLayerPeriod    int       `json:"expert_layer_period"`
-	ExpertLayerOffset    int       `json:"expert_layer_offset"`
-	Topk                 int       `json:"num_experts_per_tok"`
-	TopkAlt              int       `json:"num_experts_per_token"`
-	MoeTopk              int       `json:"moe_topk"`
-	Vocab                float64   `json:"vocab_size"`
-	NextN                int       `json:"num_nextn_predict_layers"`
-	MTP                  int       `json:"mtp_num_hidden_layers"`
-	LinearVHeads         int       `json:"linear_num_value_heads"`
-	LinearKDim           int       `json:"linear_key_head_dim"`
-	LinearVDim           int       `json:"linear_value_head_dim"`
-	TextConfig           *hfConfig `json:"text_config"`
-	LayerTypes           []string  `json:"layer_types"`
-	FullAttnEvery        int       `json:"full_attention_interval"`
-	SlidingWindow        int       `json:"sliding_window"`
-	UseSlidingWindow     *bool     `json:"use_sliding_window"`
-	SlidingWindowPattern int       `json:"sliding_window_pattern"`
+	ModelType            string          `json:"model_type"`
+	Architectures        []string        `json:"architectures"`
+	TorchDType           string          `json:"torch_dtype"`
+	DType                string          `json:"dtype"`
+	RopeTheta            float64         `json:"rope_theta"`
+	Layers               int             `json:"num_hidden_layers"`
+	Hidden               float64         `json:"hidden_size"`
+	Intermediate         float64         `json:"intermediate_size"`
+	MoeIntermediate      float64         `json:"moe_intermediate_size"`
+	Heads                int             `json:"num_attention_heads"`
+	KVHeads              int             `json:"num_key_value_heads"`
+	MultiQuery           bool            `json:"multi_query"`
+	TieWordEmbeddings    *bool           `json:"tie_word_embeddings"`
+	HeadDim              int             `json:"head_dim"`
+	MaxPos               int             `json:"max_position_embeddings"`
+	RopeScaling          json.RawMessage `json:"rope_scaling"`
+	KvLoraRank           float64         `json:"kv_lora_rank"`
+	QkRopeDim            float64         `json:"qk_rope_head_dim"`
+	NRouted              int             `json:"n_routed_experts"`
+	NumRouted            int             `json:"num_routed_experts"`
+	NumExperts           int             `json:"num_experts"`
+	NumLocal             int             `json:"num_local_experts"`
+	ExpertsPerToken      int             `json:"experts_per_token"`
+	NumSelectedExperts   int             `json:"num_selected_experts"`
+	NShared              int             `json:"n_shared_experts"`
+	NumShared            int             `json:"num_shared_experts"`
+	FirstKDense          int             `json:"first_k_dense_replace"`
+	MoeLayerFreq         int             `json:"moe_layer_freq"`
+	MoeLayerFrequency    int             `json:"moe_layer_frequency"`
+	ExpertLayerPeriod    int             `json:"expert_layer_period"`
+	ExpertLayerOffset    int             `json:"expert_layer_offset"`
+	Topk                 int             `json:"num_experts_per_tok"`
+	TopkAlt              int             `json:"num_experts_per_token"`
+	MoeTopk              int             `json:"moe_topk"`
+	TopKExperts          int             `json:"top_k_experts"`
+	Vocab                float64         `json:"vocab_size"`
+	NextN                int             `json:"num_nextn_predict_layers"`
+	MTP                  int             `json:"mtp_num_hidden_layers"`
+	LinearVHeads         int             `json:"linear_num_value_heads"`
+	LinearKDim           int             `json:"linear_key_head_dim"`
+	LinearVDim           int             `json:"linear_value_head_dim"`
+	TextConfig           *hfConfig       `json:"text_config"`
+	VisionConfig         *hfConfig       `json:"vision_config"`
+	LayerTypes           []string        `json:"layer_types"`
+	FullAttnEvery        int             `json:"full_attention_interval"`
+	SlidingWindow        int             `json:"sliding_window"`
+	UseSlidingWindow     *bool           `json:"use_sliding_window"`
+	SlidingWindowPattern int             `json:"sliding_window_pattern"`
 	LinearAttn           *struct {
 		FullAttnLayers []int `json:"full_attn_layers"`
 		NumHeads       int   `json:"num_heads"`
 		HeadDim        int   `json:"head_dim"`
 	} `json:"linear_attn_config"`
-	QuantConfig *hfQuantConfig `json:"quantization_config"`
+	QuantConfig hfQuantConfig `json:"quantization_config"`
 }
 
 type outModel struct {
@@ -163,6 +157,7 @@ type outModel struct {
 	Year            int      `json:"year"`
 	Params          float64  `json:"params"`
 	Active          float64  `json:"active"`
+	Heads           int      `json:"heads"`
 	Layers          int      `json:"layers"`
 	Hidden          float64  `json:"hidden"`
 	ModelType       string   `json:"model_type,omitempty"`
@@ -188,10 +183,14 @@ type outModel struct {
 	Sparse          float64  `json:"sparse,omitempty"`
 	Ctx             int      `json:"ctx"`
 	MoE             bool     `json:"moe"`
+	EncoderParams   float64  `json:"encoder_params,omitempty"`
+	ExtendedCtx     int      `json:"extended_ctx,omitempty"`
 	Multimodal      bool     `json:"multimodal,omitempty"`
 	Conf            string   `json:"conf"`
 	Official        bool     `json:"official,omitempty"`
 	Src             string   `json:"src"`
+	Revision        string   `json:"revision,omitempty"`
+	ParamSource     string   `json:"param_source"`
 	CheckpointGB    float64  `json:"checkpoint_gb,omitempty"`
 	NativeQuant     string   `json:"native_quant,omitempty"`
 	SourceURL       string   `json:"source_url,omitempty"`
@@ -257,6 +256,25 @@ var officialSparse = map[string]float64{
 	"deepseek-ai/deepseek-v3.2-speciale": 2048,
 	"qwen/qwen3.8-flash-next":            2048,
 	"zai-org/glm-5.3":                    2048,
+}
+
+type verifiedModelMetadata struct {
+	Params, Active, EncoderParams float64
+	Heads, Ctx, ExtendedCtx       int
+	NativeQuant                   string
+}
+
+// Only exact publisher checkpoints with primary-source model-card values belong here.
+var verifiedModels = map[string]verifiedModelMetadata{
+	"qwen/qwen3-0.6b":                        {Params: 0.6, Active: 0.6, Heads: 16, Ctx: 32768},
+	"qwen/qwen3-8b":                          {Params: 8.2, Active: 8.2, Heads: 32, Ctx: 32768, ExtendedCtx: 131072},
+	"nvidia/qwen3-8b-nvfp4":                  {Params: 8.2, Active: 8.2, Heads: 32, Ctx: 32768, ExtendedCtx: 131072, NativeQuant: "fp4"},
+	"tiiuae/falcon-7b":                       {Params: 7.2, Active: 7.2, Heads: 71, Ctx: 2048},
+	"tiiuae/falcon-7b-instruct":              {Params: 7.2, Active: 7.2, Heads: 71, Ctx: 2048},
+	"qwen/qwen2.5-7b":                        {Params: 7.6, Active: 7.6, Heads: 28, Ctx: 131072},
+	"qwen/qwen2.5-7b-instruct":               {Params: 7.6, Active: 7.6, Heads: 28, Ctx: 32768, ExtendedCtx: 131072},
+	"google/diffusiongemma-26b-a4b-it":       {Params: 25.2, Active: 3.8, EncoderParams: 0.55, Heads: 16, Ctx: 262144},
+	"nvidia/diffusiongemma-26b-a4b-it-nvfp4": {Params: 25.2, Active: 3.8, EncoderParams: 0.55, Heads: 16, Ctx: 262144, NativeQuant: "fp4"},
 }
 
 func getJSON(c *http.Client, url string, v any) error {
@@ -636,13 +654,19 @@ func main() {
 // mergeModels 只用新数据更新同 ID 条目，永远不因本次限流、筛选或解析失败删除旧数据。
 func mergeModels(fresh, old []outModel) ([]outModel, int) {
 	seen := make(map[string]bool, len(fresh)+len(old))
-	for _, m := range fresh {
-		seen[m.ID] = true
+	for i := range fresh {
+		if fresh[i].ParamSource == "" {
+			fresh[i].ParamSource = "unknown"
+		}
+		seen[fresh[i].ID] = true
 	}
 	carried := 0
 	for _, m := range old {
 		if seen[m.ID] {
 			continue
+		}
+		if m.ParamSource == "" {
+			m.ParamSource = "unknown"
 		}
 		fresh = append(fresh, m)
 		seen[m.ID] = true
@@ -686,6 +710,222 @@ func tagValue(tags []string, prefix string) string {
 	return ""
 }
 
+func attentionShape(cfg hfConfig) (kvh, dim int) {
+	kvh, dim = cfg.KVHeads, cfg.HeadDim
+	if cfg.MultiQuery {
+		kvh = 1
+	} else if kvh == 0 {
+		kvh = cfg.Heads
+	}
+	if dim == 0 && cfg.Heads > 0 {
+		dim = int(cfg.Hidden) / cfg.Heads
+	}
+	return kvh, dim
+}
+
+func moeShape(cfg hfConfig) (experts, topk, shared, layers int) {
+	experts, topk, shared = cfg.NRouted, cfg.Topk, cfg.NShared
+	if experts == 0 {
+		experts = cfg.NumRouted
+	}
+	if experts == 0 {
+		experts = cfg.NumExperts
+	}
+	if experts == 0 {
+		experts = cfg.NumLocal
+	}
+	if topk == 0 {
+		topk = cfg.TopkAlt
+	}
+	if topk == 0 {
+		topk = cfg.MoeTopk
+	}
+	if topk == 0 {
+		topk = cfg.TopKExperts
+	}
+	if topk == 0 {
+		topk = cfg.ExpertsPerToken
+	}
+	if topk == 0 {
+		topk = cfg.NumSelectedExperts
+	}
+	if shared == 0 {
+		shared = cfg.NumShared
+	}
+	layers = cfg.Layers
+	if cfg.FirstKDense > 0 && cfg.FirstKDense < layers {
+		layers -= cfg.FirstKDense
+	}
+	freq := cfg.MoeLayerFreq
+	if freq == 0 {
+		freq = cfg.MoeLayerFrequency
+	}
+	if freq > 1 {
+		layers = (layers + freq - 1) / freq
+	}
+	if cfg.ExpertLayerPeriod > 1 {
+		layers = 0
+		for layer := cfg.ExpertLayerOffset; layer < cfg.Layers; layer += cfg.ExpertLayerPeriod {
+			layers++
+		}
+	}
+	return experts, topk, shared, layers
+}
+
+// logicalParams uses declared tensor shapes, so packed storage and tied aliases do not
+// masquerade as the model's trainable parameter count.
+func logicalParams(cfg hfConfig) float64 {
+	kvh, dim := attentionShape(cfg)
+	if cfg.Layers <= 0 || cfg.Hidden <= 0 || cfg.Heads <= 0 || kvh <= 0 || dim <= 0 || cfg.Vocab <= 0 {
+		return 0
+	}
+	h, q := cfg.Hidden, float64(cfg.Heads*dim)
+	attention := h * (2*q + 2*float64(kvh*dim))
+	experts, _, shared, moeLayers := moeShape(cfg)
+	mlp := 0.0
+	if experts > 1 {
+		expertDim := cfg.MoeIntermediate
+		if expertDim == 0 {
+			expertDim = cfg.Intermediate
+		}
+		if expertDim <= 0 {
+			return 0
+		}
+		mlp += float64(moeLayers*(experts+shared)) * 3 * h * expertDim
+		if denseLayers := cfg.Layers - moeLayers; denseLayers > 0 {
+			if cfg.Intermediate <= 0 {
+				return 0
+			}
+			mlp += float64(denseLayers) * 3 * h * cfg.Intermediate
+		}
+	} else {
+		if cfg.Intermediate <= 0 {
+			return 0
+		}
+		mlp = float64(cfg.Layers) * 3 * h * cfg.Intermediate
+	}
+	embeddingCopies := 2.0
+	if cfg.TieWordEmbeddings != nil && *cfg.TieWordEmbeddings {
+		embeddingCopies = 1
+	}
+	return (float64(cfg.Layers)*attention + mlp + embeddingCopies*cfg.Vocab*h) / 1e9
+}
+
+type quantEvidence struct {
+	bits         int
+	storage      bool
+	floatWeights bool
+	labels       []string
+}
+
+func scanQuant(v any, path string, evidence *quantEvidence) {
+	switch value := v.(type) {
+	case map[string]any:
+		for key, child := range value {
+			lower := strings.ToLower(key)
+			childPath := path + "." + lower
+			switch lower {
+			case "config_groups":
+				if groups, ok := child.(map[string]any); ok && len(groups) > 0 {
+					evidence.storage = true
+				}
+			case "quant_method", "method", "format", "quant_algo", "weight_format":
+				if text, ok := child.(string); ok && text != "" &&
+					!strings.Contains(childPath, "kv") && !strings.Contains(childPath, "activation") {
+					evidence.labels = append(evidence.labels, strings.ToLower(text))
+					if lower == "format" || lower == "quant_algo" || lower == "weight_format" {
+						evidence.storage = true
+					}
+				}
+			case "type":
+				if text, ok := child.(string); ok && strings.Contains(childPath, "weight") && strings.EqualFold(text, "float") {
+					evidence.floatWeights = true
+				}
+			case "bits", "num_bits", "weight_bits":
+				if !strings.Contains(childPath, "kv") && !strings.Contains(childPath, "activation") {
+					if bits, ok := child.(float64); ok && int(bits) > evidence.bits {
+						evidence.bits = int(bits)
+						evidence.storage = true
+					}
+				}
+			}
+			scanQuant(child, childPath, evidence)
+		}
+	case []any:
+		for _, child := range value {
+			scanQuant(child, path, evidence)
+		}
+	}
+}
+
+func quantFormat(raw hfQuantConfig) (string, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", false
+	}
+	var decoded any
+	if json.Unmarshal(raw, &decoded) != nil {
+		return "", false
+	}
+	var evidence quantEvidence
+	scanQuant(decoded, "", &evidence)
+	text := strings.Join(evidence.labels, " ")
+	switch {
+	case strings.Contains(text, "mxfp4"):
+		return "mxfp4", true
+	case strings.Contains(text, "nvfp4") || strings.Contains(text, "fp4"):
+		return "fp4", true
+	case strings.Contains(text, "gptq") || strings.Contains(text, "awq") || strings.Contains(text, "int4"):
+		return "int4", true
+	case strings.Contains(text, "w8a8") || strings.Contains(text, "int8"):
+		return "int8", true
+	case evidence.bits > 0 && evidence.bits <= 4 && evidence.floatWeights:
+		return "fp4", true
+	case evidence.bits > 0 && evidence.bits <= 4:
+		return "int4", true
+	case evidence.bits > 0 && evidence.bits <= 8:
+		return "int8", true
+	case evidence.storage && strings.Contains(text, "fp8"):
+		return "fp8", true
+	default:
+		return "", false
+	}
+}
+
+func quantFromDType(dtype string) string {
+	switch strings.ToLower(dtype) {
+	case "bfloat16", "float16", "half", "bf16", "fp16":
+		return "fp16"
+	case "float8", "float8_e4m3fn", "float8_e5m2", "fp8":
+		return "fp8"
+	default:
+		return ""
+	}
+}
+
+func contextLengths(cfg hfConfig) (native, extended int) {
+	native = cfg.MaxPos
+	if len(cfg.RopeScaling) == 0 || string(cfg.RopeScaling) == "null" {
+		return native, 0
+	}
+	var scaling map[string]any
+	if json.Unmarshal(cfg.RopeScaling, &scaling) != nil {
+		return native, 0
+	}
+	original, _ := scaling["original_max_position_embeddings"].(float64)
+	factor, _ := scaling["factor"].(float64)
+	if original > 0 {
+		native = int(original)
+		extended = cfg.MaxPos
+		if factor > 1 {
+			extended = max(extended, int(original*factor))
+		}
+	}
+	if extended <= native {
+		extended = 0
+	}
+	return native, extended
+}
+
 func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outModel, bool, string) {
 	var m outModel
 	var notePre string
@@ -693,29 +933,41 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 	if provider == "" {
 		provider = "hf"
 	}
-	rawBase, sourceURL, sourceLabel := host+"/"+e.ID+"/resolve/main/", "https://huggingface.co/"+e.ID, "HF"
+	sourceURL, sourceLabel := "https://huggingface.co/"+e.ID, "HF"
+	rawBase := ""
 	if provider == "modelscope" {
 		rawBase = host + "/models/" + e.ID + "/resolve/master/"
 		sourceURL = host + "/models/" + e.ID
 		sourceLabel = "ModelScope"
-	} else if e.Safetensors == nil || e.Safetensors.Total == 0 {
-		// HF 详情接口给出与存储 dtype 无关的 safetensors 精确张量数。
-		var info hfEntry
-		if err := getJSON(c, host+"/api/models/"+e.ID, &info); err == nil {
-			info.Official = e.Official
-			e = info
+	} else {
+		if e.SHA == "" || e.Safetensors == nil || e.Safetensors.Total == 0 {
+			var info hfEntry
+			if err := getJSON(c, host+"/api/models/"+e.ID, &info); err == nil {
+				info.Official = e.Official
+				e = info
+			}
 		}
+		revision := "main"
+		if e.SHA != "" {
+			revision = url.PathEscape(e.SHA)
+		}
+		rawBase = host + "/" + e.ID + "/resolve/" + revision + "/"
 	}
 	var cfg hfConfig
 	if err := getJSON(c, rawBase+"config.json", &cfg); err != nil {
 		return m, false, "无 config.json"
 	}
-	// 多模态包装配置：下潜到文本塔，同时保留包装层量化信息。
+	// Multimodal wrappers use the text tower for KV geometry, but retain the
+	// wrapper identity so unsupported execution families remain identifiable.
+	wrapperModelType, wrapperArchitectures, wrapperDType := cfg.ModelType, cfg.Architectures, cfg.DType
+	if wrapperDType == "" {
+		wrapperDType = cfg.TorchDType
+	}
 	multimodal := false
 	if (cfg.Layers == 0 || cfg.Hidden == 0) && cfg.TextConfig != nil {
 		outerQuant := cfg.QuantConfig
 		cfg = *cfg.TextConfig
-		if cfg.QuantConfig == nil {
+		if len(cfg.QuantConfig) == 0 {
 			cfg.QuantConfig = outerQuant
 		}
 		multimodal = true
@@ -788,8 +1040,12 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 		if provider == "modelscope" {
 			checkpointGB = modelScopeCheckpointSize(c, host, e.ID)
 		} else {
+			infoURL := host + "/api/models/" + e.ID
+			if e.SHA != "" {
+				infoURL += "/revision/" + url.PathEscape(e.SHA)
+			}
 			var info hfEntry
-			if err := getJSON(c, host+"/api/models/"+e.ID+"?blobs=true", &info); err == nil {
+			if err := getJSON(c, infoURL+"?blobs=true", &info); err == nil {
 				var total int64
 				for _, f := range info.Siblings {
 					if strings.HasSuffix(strings.ToLower(f.RFilename), ".safetensors") {
@@ -800,187 +1056,122 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 			}
 		}
 	}
-	nativeQuant, bytesPer := "fp16", 2.0
-	quantStorage := false
-	if qc := cfg.QuantConfig; qc != nil {
-		format := strings.ToLower(qc.Method + " " + qc.Format)
-		quantStorage = qc.Format != "" || len(qc.ConfigGroups) > 0
-		bits, weightType := 0, ""
-		for _, group := range qc.ConfigGroups {
-			format += " " + strings.ToLower(group.Format)
-			if group.Weights.NumBits > 0 {
-				bits, weightType = group.Weights.NumBits, strings.ToLower(group.Weights.Type)
-			}
-		}
-		switch {
-		case strings.Contains(format, "mxfp4"):
-			nativeQuant, bytesPer = "mxfp4", 0.5
-		case strings.Contains(format, "nvfp4") || strings.Contains(format, "fp4"):
-			nativeQuant, bytesPer = "fp4", 0.5
-		case strings.Contains(format, "fp8"):
-			nativeQuant, bytesPer = "fp8", 1
-		case bits > 0 && bits <= 4 && weightType == "float":
-			nativeQuant, bytesPer = "fp4", 0.5
-		case bits > 0 && bits <= 4:
-			nativeQuant, bytesPer = "int4", 0.55
-		case bits > 0 && bits <= 8:
-			nativeQuant, bytesPer = "int8", 1.05
-		case strings.Contains(format, "int8") || strings.Contains(format, "w8a8"):
-			nativeQuant, bytesPer = "int8", 1.05
-		case strings.Contains(format, "awq") || strings.Contains(format, "gptq") || strings.Contains(format, "int4"):
-			nativeQuant, bytesPer = "int4", 0.55
-			quantStorage = true
-		}
-	}
+	repoID := strings.ToLower(e.ID)
+	published, verified := verifiedModels[repoID]
+	nativeQuant, quantStorage := quantFormat(cfg.QuantConfig)
+	paramSource := "unknown"
 	var params float64
-	if e.ParameterCount > 0 {
-		params = float64(e.ParameterCount) / 1e9
-	} else if e.Safetensors != nil && e.Safetensors.Total > 0 {
-		params = float64(e.Safetensors.Total) / 1e9
-	} else if idx.Metadata.TotalSize > 0 {
-		params = idx.Metadata.TotalSize / bytesPer / 1e9
-	} else {
+	switch {
+	case verified && published.Params > 0:
+		params, paramSource = published.Params, "model_card"
+	case e.ParameterCount > 0:
+		params, paramSource = float64(e.ParameterCount)/1e9, "unknown"
+		notePre += "参数量取源目录元数据，未由 config 验证；"
+	case quantStorage && !multimodal:
+		params, paramSource = logicalParams(cfg), "config"
+	case cfg.TieWordEmbeddings != nil && *cfg.TieWordEmbeddings && !multimodal:
+		params, paramSource = logicalParams(cfg), "config"
+	case !quantStorage && e.Safetensors != nil && e.Safetensors.Total > 0:
+		params, paramSource = float64(e.Safetensors.Total)/1e9, "safetensors"
+		if multimodal && cfg.TieWordEmbeddings != nil && *cfg.TieWordEmbeddings && cfg.Vocab > 0 {
+			// HF tensor metadata includes the serialized lm_head alias; logical
+			// trainable parameters count a tied embedding once.
+			params -= cfg.Vocab * cfg.Hidden / 1e9
+			paramSource = "config"
+		}
+	case !multimodal:
+		params, paramSource = logicalParams(cfg), "config"
+	}
+	if params == 0 {
 		name := e.ID[strings.IndexByte(e.ID, '/')+1:]
 		if s := sizeRe.FindStringSubmatch(name); len(s) > 1 {
 			params, _ = strconv.ParseFloat(s[1], 64)
 		} else if s := sizeRe2.FindStringSubmatch(name); len(s) > 1 {
 			params, _ = strconv.ParseFloat(s[1], 64)
 		}
+		if params > 0 {
+			paramSource = "name"
+			notePre += "参数量仅取仓库名，未经验证；"
+		}
 	}
 	if params < minParams || params > 3000 {
 		return m, false, "参数量越界或未知"
 	}
 	params = math.Round(params*10) / 10
-	// 只有包含具体打包格式/分组的量化配置能证明仓库存储格式；否则 payload/参数量优先，
-	// 避免把仅声明运行时能力的 BF16 权重误标为 FP8。
-	if checkpointGB > 0 && !quantStorage {
-		bpp := checkpointGB / params
-		switch {
-		case bpp >= 1.45:
-			nativeQuant = "fp16"
-		case bpp >= 0.72:
-			if nativeQuant != "int8" {
-				nativeQuant = "fp8"
-			}
-		default:
-			switch nativeQuant {
-			case "mxfp4", "fp4":
-			default:
-				nativeQuant = "int4"
-			}
-		}
-	}
 
-	// 注意力结构
-	kvt, kvh, dim, mla := "mha", cfg.KVHeads, cfg.HeadDim, 0.0
+	// MQA is the one-KV-head case of GQA in the calculator schema. A missing
+	// num_key_value_heads declaration means ordinary MHA, never fabricated GQA-8.
+	kvt, mla := "mha", 0.0
+	kvh, dim := attentionShape(cfg)
 	if cfg.KvLoraRank > 0 {
 		kvt = "mla"
 		mla = cfg.KvLoraRank + cfg.QkRopeDim
-	} else if cfg.KVHeads > 0 && cfg.KVHeads < cfg.Heads {
+	} else if kvh > 0 && kvh < cfg.Heads {
 		kvt = "gqa"
 	}
-	if kvh == 0 && cfg.Heads > 0 {
-		// 有的仓库 config 里 num_key_value_heads 为 null（如 Nemotron 系），
-		// 按 GQA-8 兜底估算并标注，比当 MHA 更接近现实。
-		kvh = cfg.Heads / 8
-		if kvh < 1 {
-			kvh = 1
-		}
-		kvt = "gqa"
-		notePre = "KV 头数缺省按 GQA-8 估算；"
-	}
-	if dim == 0 && cfg.Heads > 0 {
-		dim = int(cfg.Hidden) / cfg.Heads
-	}
-	if kvh == 0 || dim == 0 {
-		return m, false, "KV 头/维度未知"
+	if cfg.Heads == 0 || kvh == 0 || dim == 0 {
+		return m, false, "注意力头/维度未知"
 	}
 
 	// MoE
-	moe := false
-	active := params
-	experts, topk := cfg.NRouted, cfg.Topk
-	if experts == 0 {
-		experts = cfg.NumRouted
-	}
-	if experts == 0 {
-		experts = cfg.NumExperts
-	}
-	if experts == 0 {
-		experts = cfg.NumLocal
-	}
-	if topk == 0 {
-		topk = cfg.TopkAlt
-	}
-	if topk == 0 {
-		topk = cfg.MoeTopk
-	}
-	if topk == 0 {
-		topk = cfg.ExpertsPerToken
-	}
-	if topk == 0 {
-		topk = cfg.NumSelectedExperts
-	}
-	sharedExperts := cfg.NShared
-	if sharedExperts == 0 {
-		sharedExperts = cfg.NumShared
-	}
-	moeLayers := cfg.Layers
-	if cfg.FirstKDense > 0 && cfg.FirstKDense < moeLayers {
-		moeLayers -= cfg.FirstKDense
-	}
-	freq := cfg.MoeLayerFreq
-	if freq == 0 {
-		freq = cfg.MoeLayerFrequency
-	}
-	if freq > 1 {
-		moeLayers = (moeLayers + freq - 1) / freq
-	}
-	if cfg.ExpertLayerPeriod > 1 {
-		moeLayers = 0
-		for layer := cfg.ExpertLayerOffset; layer < cfg.Layers; layer += cfg.ExpertLayerPeriod {
-			moeLayers++
-		}
-	}
-	activeNote := ""
-	if experts > 1 {
-		moe = true
-		if topk == 0 {
-			topk = 8
-		}
-		name := e.ID[strings.IndexByte(e.ID, '/')+1:]
-		if v, ok := officialActive[strings.ToLower(e.ID)]; ok {
+	experts, topk, sharedExperts, moeLayers := moeShape(cfg)
+	moe := experts > 1
+	active, activeNote := params, ""
+	switch {
+	case verified && published.Active > 0:
+		active = published.Active
+		activeNote = "激活参数取官方模型卡；"
+	case moe:
+		if v, ok := officialActive[repoID]; ok {
 			active = v
 			activeNote = "激活参数取官方模型卡；"
-		} else {
-			expertDim := cfg.MoeIntermediate
-			if expertDim == 0 {
-				expertDim = cfg.Intermediate
-			}
-			routed := float64(moeLayers*experts) * 3 * cfg.Hidden * expertDim / 1e9
-			if routed > 0 && routed < params {
-				active = params - routed + routed*float64(topk)/float64(experts)
-				activeNote = "激活参数由 MoE 结构推导；"
-			} else if s := activeRe.FindStringSubmatch(name); len(s) > 1 {
+			break
+		}
+		expertDim := cfg.MoeIntermediate
+		if expertDim == 0 {
+			expertDim = cfg.Intermediate
+		}
+		routed := float64(moeLayers*experts) * 3 * cfg.Hidden * expertDim / 1e9
+		switch {
+		case topk > 0 && routed > 0 && routed < params:
+			active = params - routed + routed*float64(topk)/float64(experts)
+			activeNote = "激活参数由 MoE 结构推导；"
+		default:
+			name := e.ID[strings.IndexByte(e.ID, '/')+1:]
+			if s := activeRe.FindStringSubmatch(name); len(s) > 1 {
 				active, _ = strconv.ParseFloat(s[1], 64)
-				activeNote = "激活参数取模型名；"
+				activeNote = "激活参数仅取仓库名，未经验证；"
 			} else {
-				active = params * (0.04 + 0.9*float64(topk)/float64(experts))
-				activeNote = "激活参数为启发式估算；"
+				active = params
+				activeNote = "MoE 激活参数未知，active 暂记总参数上限；"
 			}
-			active = math.Round(active*10) / 10
 		}
 	}
+	active = math.Round(min(active, params)*10) / 10
 	if !moe {
 		moeLayers = 0
 	}
 
-	ctx := cfg.MaxPos
-	if ctx <= 0 {
-		ctx = 8192
-	}
-	if v, ok := officialCtx[strings.ToLower(e.ID)]; ok {
+	ctx, extendedCtx := contextLengths(cfg)
+	if v, ok := officialCtx[repoID]; ok {
 		ctx = v
+	}
+	encoderParams := 0.0
+	if verified {
+		if published.Ctx > 0 {
+			ctx = published.Ctx
+		}
+		extendedCtx = published.ExtendedCtx
+		encoderParams = published.EncoderParams
+		if published.NativeQuant != "" {
+			nativeQuant = published.NativeQuant
+		}
+	}
+	if ctx <= 0 {
+		return m, false, "上下文长度未知"
+	}
+	if multimodal && encoderParams == 0 {
+		notePre += "encoder 参数未知；"
 	}
 	year := 2024
 	if len(e.CreatedAt) >= 4 {
@@ -991,14 +1182,23 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 
 	parts := strings.SplitN(e.ID, "/", 2)
 	architecture := ""
-	if len(cfg.Architectures) > 0 {
+	if multimodal && len(wrapperArchitectures) > 0 {
+		architecture = wrapperArchitectures[0]
+	} else if len(cfg.Architectures) > 0 {
 		architecture = cfg.Architectures[0]
 	} else if len(e.Config.Architectures) > 0 {
 		architecture = e.Config.Architectures[0]
 	}
+	modelType := cfg.ModelType
+	if multimodal && wrapperModelType != "" {
+		modelType = wrapperModelType
+	}
 	dtype := cfg.TorchDType
 	if dtype == "" {
 		dtype = cfg.DType
+	}
+	if dtype == "" && multimodal {
+		dtype = wrapperDType
 	}
 	if dtype == "" && e.Safetensors != nil {
 		var largest int64
@@ -1016,6 +1216,9 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 			}
 		}
 	}
+	if nativeQuant == "" && !quantStorage {
+		nativeQuant = quantFromDType(dtype)
+	}
 	license := e.License
 	if license == "" {
 		license = tagValue(e.Tags, "license:")
@@ -1024,15 +1227,20 @@ func parseOne(c *http.Client, host string, e hfEntry, minParams float64) (outMod
 	if len(tasks) == 0 && e.PipelineTag != "" {
 		tasks = []string{e.PipelineTag}
 	}
+	heads := cfg.Heads
+	if verified && published.Heads > 0 {
+		heads = published.Heads
+	}
 	m = outModel{
 		ID:   strings.ToLower(strings.ReplaceAll(e.ID, "/", "--")),
 		Name: parts[1], Org: parts[0], Year: year,
-		Params: params, Active: active, Layers: cfg.Layers, Hidden: cfg.Hidden,
-		ModelType: cfg.ModelType, Architecture: architecture, DType: dtype, RopeTheta: cfg.RopeTheta,
+		Params: params, Active: active, Heads: heads, Layers: cfg.Layers, Hidden: cfg.Hidden,
+		ModelType: modelType, Architecture: architecture, DType: dtype, RopeTheta: cfg.RopeTheta,
 		Intermediate: cfg.Intermediate, MoEIntermediate: cfg.MoeIntermediate,
 		KVT: kvt, KVH: kvh, Dim: dim, MLA: mla, KVLayers: kvLayers, LocalLayers: localLayers, Window: window, StateMB: stateMB,
 		Experts: experts, TopK: topk, SharedExperts: sharedExperts, MoELayers: moeLayers,
-		Ctx: ctx, MoE: moe, Multimodal: multimodal, Sparse: officialSparse[strings.ToLower(e.ID)], Conf: "fetched", Official: e.Official, Src: provider,
+		Ctx: ctx, ExtendedCtx: extendedCtx, MoE: moe, EncoderParams: encoderParams, Multimodal: multimodal || encoderParams > 0,
+		Sparse: officialSparse[repoID], Conf: "fetched", Official: e.Official, Src: provider, Revision: e.SHA, ParamSource: paramSource,
 		MTP: cfg.NextN > 0 || cfg.MTP > 0, MTPHeads: max(cfg.NextN, cfg.MTP),
 		CheckpointGB: checkpointGB, NativeQuant: nativeQuant, SourceURL: sourceURL, Downloads: e.Downloads,
 		License: license, Tasks: tasks, CreatedAt: e.CreatedAt, UpdatedAt: e.LastModified,

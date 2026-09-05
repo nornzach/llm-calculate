@@ -6,6 +6,7 @@ package calc
 // 都是算法 bug,必须修到零异常。
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"sort"
@@ -107,11 +108,22 @@ func TestAudit10Matrix(t *testing.T) {
 				// 找最小能装下的卡数(1/2/4/8),并审计单卡不装下的结果
 				pf1 := ThroughputWorkload(h, m, q, auditWorkload, 1, 1, o)
 				check := func(tag string, pf Perf, batch, n int) {
-					if pf.Fit {
-						if pf.Mem.P999Total > pf.Mem.Cap*1.001 {
-							t.Errorf("%s %s %s b%d n%d: fit 但 P999 %.1f > 物理 %.1f", m.ID, h.ID, q.ID, batch, n, pf.Mem.P999Total, pf.Mem.Cap)
+					if pf.Fit && pf.Mem.P999Total > pf.Mem.Cap*1.001 {
+						t.Errorf("%s %s %s b%d n%d: fit 但 P999 %.1f > 物理 %.1f", m.ID, h.ID, q.ID, batch, n, pf.Mem.P999Total, pf.Mem.Cap)
+						bad++
+					}
+					if !pf.Fit && !math.IsNaN(pf.Mem.P999Total) && pf.Mem.P999Total > 0 && pf.Mem.P999Total <= pf.Mem.Cap*0.8 {
+						t.Errorf("%s %s %s b%d n%d: 不 fit 但 P999 %.1f 远低于物理 %.1f(矛盾)", m.ID, h.ID, q.ID, batch, n, pf.Mem.P999Total, pf.Mem.Cap)
+						bad++
+					}
+					if !pf.EstimateValid {
+						if pf.Deployable || pf.SingleTPS != 0 || pf.AggTPS != 0 || pf.TTFTms != 0 || pf.TPOTms != 0 || pf.ReqS != 0 {
+							t.Errorf("%s %s %s b%d n%d: 无效估算仍输出性能: %+v", m.ID, h.ID, q.ID, batch, n, pf)
 							bad++
 						}
+						return
+					}
+					if pf.Fit {
 						for name, v := range map[string]float64{
 							"single": pf.SingleTPS, "agg": pf.AggTPS, "ttft": pf.TTFTms,
 							"tpot": pf.TPOTms, "req": pf.ReqMs, "pre": pf.PreTPS,
@@ -136,19 +148,16 @@ func TestAudit10Matrix(t *testing.T) {
 							bad++
 						}
 						if !pf.TopologyOK {
-							t.Errorf("%s %s %s b%d n%d: 拓扑不可用但未拦截 (%s)", m.ID, h.ID, q.ID, batch, n, pf.Topology)
+							t.Errorf("%s %s %s b%d n%d: 有效估算的拓扑不可用 (%s)", m.ID, h.ID, q.ID, batch, n, pf.Topology)
 							bad++
 						}
-					} else if !math.IsNaN(pf.Mem.P999Total) && pf.Mem.P999Total > 0 && pf.Mem.P999Total <= pf.Mem.Cap*0.8 {
-						t.Errorf("%s %s %s b%d n%d: 不 fit 但 P999 %.1f 远低于物理 %.1f(矛盾)", m.ID, h.ID, q.ID, batch, n, pf.Mem.P999Total, pf.Mem.Cap)
-						bad++
 					}
 				}
 				check("单卡", pf1, 1, 1)
 				for _, n := range []int{2, 4, 8} {
 					pf := ThroughputWorkload(h, m, q, auditWorkload, 1, n, o)
 					check("多卡", pf, 1, n)
-					if pf.Fit {
+					if pf.Fit && pf.EstimateValid {
 						pfb := ThroughputWorkload(h, m, q, auditWorkload, 32, n, o)
 						check("并发32", pfb, 32, n)
 						break // 找到最小可行 n 即可
@@ -167,7 +176,7 @@ func TestAudit10FitMatrix(t *testing.T) {
 	hws, models := auditPick(auditLoad(t))
 	o := Opts{Engine: "auto", Spec: "none", KVQuant: "fp16"}
 	for _, h := range hws {
-		rows := FitMatrix(h, models, 1, 8192, 8, o)
+		rows := FitMatrix(h, models, 1, singleWorkload(8192, 512), 8, o)
 		if len(rows) != len(models) {
 			t.Errorf("%s: fit 矩阵行数 %d ≠ %d", h.ID, len(rows), len(models))
 		}
@@ -249,7 +258,9 @@ func TestAudit10Recommend(t *testing.T) {
 			if p.Score < -1e-9 || p.Score > 1.0001 || math.IsNaN(p.Score) {
 				t.Errorf("%s: 处方分数越界 %.4f", m.ID, p.Score)
 			}
-			key := p.Plan.HW.ID + "|" + p.Plan.Quant + "|" + p.Plan.EngName
+			key := fmt.Sprintf("%s|%s|%s|%s|%s|%d|%d|%d|%s",
+				p.Plan.HW.ID, p.Plan.Quant, p.EngineID, p.KVQuant, p.SpecID,
+				p.Plan.N, p.Plan.Replicas, p.Plan.MaxConc, p.Topology)
 			if seen[key] {
 				t.Errorf("%s: 处方重复 %s", m.ID, key)
 			}
@@ -300,7 +311,7 @@ func TestAudit10Special(t *testing.T) {
 	ds31 := dsv32
 	ds31.Sparse = 0
 	pfDense := ThroughputWorkload(h200, ds31, q, []WorkloadBucket{{Context: 131072, Output: 512, Share: 1}}, 1, 8, o)
-	if pfSparse.Fit && pfDense.Fit && pfSparse.SingleTPS <= pfDense.SingleTPS {
+	if pfSparse.EstimateValid && pfDense.EstimateValid && pfSparse.Fit && pfDense.Fit && pfSparse.SingleTPS <= pfDense.SingleTPS {
 		t.Errorf("DSA 未提速: 稀疏 %.1f ≤ 稠密 %.1f tok/s", pfSparse.SingleTPS, pfDense.SingleTPS)
 	}
 
@@ -330,65 +341,8 @@ func TestAudit10Special(t *testing.T) {
 	// MTP:qwen3-next-80b 标了 mtp,推测解码应可生效
 	qn := mm["qwen3-next-80b-a3b"]
 	pfMTP := ThroughputWorkload(hh["h200"], qn, QuantByID("fp8"), auditWorkload, 8, 4, Opts{Engine: "auto", Spec: "mtp", KVQuant: "fp16"})
-	if pfMTP.Fit && !pfMTP.SpecApplied {
+	if pfMTP.EstimateValid && pfMTP.Fit && !pfMTP.SpecApplied {
 		t.Errorf("qwen3-next MTP 未生效")
-	}
-}
-
-// TestAudit10Anchors 可信度锚点:与公开实测区间对照(打印 + 硬断言)。
-func TestAudit10Anchors(t *testing.T) {
-	hws, models := auditPick(auditLoad(t))
-	mm := map[string]Model{}
-	for _, m := range models {
-		mm[m.ID] = m
-	}
-	hh := map[string]HW{}
-	for _, h := range hws {
-		hh[h.ID] = h
-	}
-	type anchor struct {
-		model, hw, quant string
-		n                int
-		eng              string
-		ctx              int     // 0 = 混合工作负载
-		lo, hi           float64 // 公开实测单流 tok/s 区间
-		expectFit        bool
-		note             string
-	}
-	// 区间以核实来源为中心按 ±2× 放宽;来源与条件见 note。
-	anchors := []anchor{
-		{"qwen3-32b", "rtx4090", "q4km", 1, "llamacpp", 4096, 20, 45, true, "社区 25-35 tok/s(低置信,kunalganglani.com)"},
-		{"deepseek-r1-llama-70b", "h100-sxm", "fp8", 2, "vllm", 0, 25, 65, true, "70B FP8 单卡 80G 贴边,2×H100 为常规部署"},
-		{"gpt-oss-120b", "rtx4090", "mxfp4", 1, "auto", 0, 0, 0, false, "OpenAI 官方:需单卡 80GB,24G 纯 VRAM 装不下"},
-		{"qwen3-235b-a22b", "b200", "fp8", 8, "sglang", 0, 55, 140, true, "SGLang 官方 8×B200 concurrency=1: 96.65 tok/s"},
-		{"deepseek-v3.2", "h200", "fp8", 8, "sglang", 0, 30, 80, true, "同构 R1 8×H200 TP8 b1: 47.67 tok/s(verda,可复现)"},
-		{"kimi-k2-thinking", "h200", "int4", 8, "sglang", 0, 25, 80, true, "无单流公开数;按 DSv3 同构量级区间"},
-		{"gemma-3-27b", "apple-m3ultra", "mlx4", 1, "mlx", 8192, 18, 50, true, "社区演示 ~33 tok/s(低置信)"},
-		{"llama-4-maverick", "mi300x", "fp16", 8, "sglang", 0, 40, 90, true, "SGLang 官方 8×MI300X BF16 concurrency=1: 61.99 tok/s"},
-	}
-	for _, a := range anchors {
-		m, mok := mm[a.model]
-		h, hok := hh[a.hw]
-		if !mok || !hok {
-			t.Fatalf("锚点缺少 %s/%s", a.model, a.hw)
-		}
-		wl := auditWorkload
-		if a.ctx > 0 {
-			wl = []WorkloadBucket{{Context: a.ctx, Output: 512, Share: 1}}
-		}
-		pf := ThroughputWorkload(h, m, QuantByID(a.quant), wl, 1, a.n, Opts{Engine: a.eng, Spec: "none", KVQuant: "fp16"})
-		t.Logf("锚点 %s @ %d×%s %s [%s]: 单流 %.1f tok/s (实测区间 %.0f-%.0f) fit=%v — %s",
-			a.model, a.n, a.hw, a.quant, a.eng, pf.SingleTPS, a.lo, a.hi, pf.Fit, a.note)
-		if pf.Fit != a.expectFit {
-			t.Errorf("锚点 %s @ %d×%s %s: fit=%v 与预期 %v 不符 — %s", a.model, a.n, a.hw, a.quant, pf.Fit, a.expectFit, a.note)
-			continue
-		}
-		if !a.expectFit {
-			continue
-		}
-		if pf.SingleTPS < a.lo*0.5 || pf.SingleTPS > a.hi*2 {
-			t.Errorf("锚点 %s @ %s 单流 %.1f 偏离实测区间 [%.0f,%.0f] 超 2×", a.model, a.hw, pf.SingleTPS, a.lo, a.hi)
-		}
 	}
 }
 

@@ -107,6 +107,100 @@ func TestCompressedTensorFormatMapsToExecutableQuant(t *testing.T) {
 	}
 }
 
+func TestTiedEmbeddingsUseLogicalConfigParameters(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/acme/Tied-Model/resolve/abc123/config.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"num_hidden_layers":28,"hidden_size":1024,"intermediate_size":3072,"num_attention_heads":16,"num_key_value_heads":8,"head_dim":128,"vocab_size":151936,"tie_word_embeddings":true,"max_position_embeddings":32768}`))
+	})
+	mux.HandleFunc("/acme/Tied-Model/resolve/abc123/model.safetensors.index.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"metadata":{"total_size":1503300328}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	e := hfEntry{ID: "acme/Tied-Model", SHA: "abc123", Safetensors: &struct {
+		Total      int64            `json:"total"`
+		Parameters map[string]int64 `json:"parameters"`
+	}{Total: 751_632_384}}
+	m, ok, why := parseOne(srv.Client(), srv.URL, e, 0.1)
+	if !ok {
+		t.Fatalf("parseOne failed: %s", why)
+	}
+	if m.Params != 0.6 || m.ParamSource != "config" || m.Heads != 16 || m.Revision != "abc123" {
+		t.Fatalf("tied output alias must not inflate logical parameters: %+v", m)
+	}
+}
+
+func TestNestedNVFP4UsesLogicalShapesNotPackedTensorCount(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/acme/Packed/resolve/packed-revision/config.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"num_hidden_layers":36,"hidden_size":4096,"intermediate_size":12288,"num_attention_heads":32,"num_key_value_heads":8,"head_dim":128,"vocab_size":151936,"tie_word_embeddings":false,"max_position_embeddings":40960,"quantization_config":{"quant_method":"modelopt","producer":{"quantization":{"quant_algo":"NVFP4","kv_cache_quant_algo":"FP8"}}}}`))
+	})
+	mux.HandleFunc("/acme/Packed/resolve/packed-revision/model.safetensors.index.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"metadata":{"total_size":6396932352}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	e := hfEntry{ID: "acme/Packed", SHA: "packed-revision", Safetensors: &struct {
+		Total      int64            `json:"total"`
+		Parameters map[string]int64 `json:"parameters"`
+	}{Total: 4_717_851_648}}
+	m, ok, why := parseOne(srv.Client(), srv.URL, e, 1)
+	if !ok {
+		t.Fatalf("parseOne failed: %s", why)
+	}
+	if m.Params != 8.2 || m.ParamSource != "config" || m.NativeQuant != "fp4" {
+		t.Fatalf("nested NVFP4 evidence must beat packed tensor count and FP8 KV metadata: %+v", m)
+	}
+}
+
+func TestMultiQueryAndMissingKVHeads(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/acme/MQA/resolve/revision/config.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"num_hidden_layers":32,"hidden_size":4096,"num_attention_heads":32,"multi_query":true,"head_dim":128,"max_position_embeddings":2048}`))
+	})
+	mux.HandleFunc("/acme/MHA/resolve/revision/config.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"num_hidden_layers":32,"hidden_size":4096,"num_attention_heads":32,"head_dim":128,"max_position_embeddings":2048}`))
+	})
+	mux.HandleFunc("/acme/MQA/resolve/revision/model.safetensors.index.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"metadata":{"total_size":14000000000}}`))
+	})
+	mux.HandleFunc("/acme/MHA/resolve/revision/model.safetensors.index.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"metadata":{"total_size":14000000000}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	entry := func(id string) hfEntry {
+		return hfEntry{ID: id, SHA: "revision", Safetensors: &struct {
+			Total      int64            `json:"total"`
+			Parameters map[string]int64 `json:"parameters"`
+		}{Total: 7_000_000_000}}
+	}
+	mqa, ok, why := parseOne(srv.Client(), srv.URL, entry("acme/MQA"), 1)
+	if !ok {
+		t.Fatalf("MQA parse failed: %s", why)
+	}
+	mha, ok, why := parseOne(srv.Client(), srv.URL, entry("acme/MHA"), 1)
+	if !ok {
+		t.Fatalf("MHA parse failed: %s", why)
+	}
+	if mqa.KVT != "gqa" || mqa.KVH != 1 || mha.KVT != "mha" || mha.KVH != 32 {
+		t.Fatalf("declared MQA and absent-KV MHA were not preserved: mqa=%+v mha=%+v", mqa, mha)
+	}
+}
+
+func TestContextScalingKeepsNativeLimitSeparate(t *testing.T) {
+	native, extended := contextLengths(hfConfig{
+		MaxPos:      131072,
+		RopeScaling: []byte(`{"factor":4,"original_max_position_embeddings":32768}`),
+	})
+	if native != 32768 || extended != 131072 {
+		t.Fatalf("context scaling collapsed native and extended limits: native=%d extended=%d", native, extended)
+	}
+}
+
 func TestOfficialDiscoveryIncludesMultimodalAndDropsCommunityRepos(t *testing.T) {
 	hasMultimodal := false
 	for _, pipeline := range officialPipelines {
@@ -149,20 +243,20 @@ func TestParseOneUsesStructureBeforeRoundedModelName(t *testing.T) {
 	}
 }
 
-func TestParseOneInfersStoredPrecisionFromPayload(t *testing.T) {
+func TestPayloadRatioDoesNotInventStoredPrecision(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/acme/RuntimeFP8/resolve/main/config.json", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/acme/RuntimeFP8/resolve/revision/config.json", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"num_hidden_layers":32,"hidden_size":4096,"num_attention_heads":32,"num_key_value_heads":8,"head_dim":128,"quantization_config":{"quant_method":"fp8"}}`))
+		w.Write([]byte(`{"num_hidden_layers":32,"hidden_size":4096,"num_attention_heads":32,"num_key_value_heads":8,"head_dim":128,"max_position_embeddings":8192,"quantization_config":{"quant_method":"fp8"}}`))
 	})
-	mux.HandleFunc("/acme/RuntimeFP8/resolve/main/model.safetensors.index.json", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/acme/RuntimeFP8/resolve/revision/model.safetensors.index.json", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"metadata":{"total_size":200000000000}}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	e := hfEntry{ID: "acme/RuntimeFP8", Safetensors: &struct {
+	e := hfEntry{ID: "acme/RuntimeFP8", SHA: "revision", Safetensors: &struct {
 		Total      int64            `json:"total"`
 		Parameters map[string]int64 `json:"parameters"`
 	}{Total: 100_000_000_000}}
@@ -170,25 +264,25 @@ func TestParseOneInfersStoredPrecisionFromPayload(t *testing.T) {
 	if !ok {
 		t.Fatalf("parseOne failed: %s", why)
 	}
-	if m.NativeQuant != "fp16" || m.CheckpointGB != 200 {
-		t.Fatalf("200GB/100B 参数应识别为 BF16/FP16 payload，而非运行时 FP8: %+v", m)
+	if m.NativeQuant != "" || m.CheckpointGB != 200 {
+		t.Fatalf("payload size must not invent storage dtype; runtime-only FP8 is not storage evidence: %+v", m)
 	}
 }
 
 func TestParseOneCollectsSingleShardPayload(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/acme/SingleShard/resolve/main/config.json", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/acme/SingleShard/resolve/revision/config.json", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"num_hidden_layers":32,"hidden_size":4096,"num_attention_heads":32,"num_key_value_heads":8,"head_dim":128}`))
+		w.Write([]byte(`{"torch_dtype":"bfloat16","num_hidden_layers":32,"hidden_size":4096,"num_attention_heads":32,"num_key_value_heads":8,"head_dim":128,"max_position_embeddings":8192}`))
 	})
-	mux.HandleFunc("/api/models/acme/SingleShard", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/api/models/acme/SingleShard/revision/revision", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"siblings":[{"rfilename":"model.safetensors","size":16000000000},{"rfilename":"tokenizer.json","size":1234}]}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	e := hfEntry{ID: "acme/SingleShard", Safetensors: &struct {
+	e := hfEntry{ID: "acme/SingleShard", SHA: "revision", Safetensors: &struct {
 		Total      int64            `json:"total"`
 		Parameters map[string]int64 `json:"parameters"`
 	}{Total: 8_000_000_000}}
@@ -212,6 +306,9 @@ func TestMergeModelsNeverDeletesOldEntries(t *testing.T) {
 	for _, m := range got {
 		if m.ID == "qwen/shared" && m.Params != 14 {
 			t.Fatalf("fresh metadata must replace the matching old entry: %+v", m)
+		}
+		if m.ParamSource != "unknown" {
+			t.Fatalf("missing provenance must stay explicitly unknown: %+v", m)
 		}
 	}
 }

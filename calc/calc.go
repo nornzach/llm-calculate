@@ -39,6 +39,7 @@ type HW struct {
 	Svc       bool     `json:"svc,omitempty"`
 	Notes     string   `json:"notes,omitempty"`
 	SourceURL string   `json:"source_url,omitempty"`
+	PeakKind  string   `json:"peak_kind,omitempty"` // dense_matrix | vector | estimated；缺失表示来源未知
 }
 
 type Model struct {
@@ -52,6 +53,10 @@ type Model struct {
 	Hidden          float64 `json:"hidden"`
 	ModelType       string  `json:"model_type,omitempty"`
 	Architecture    string  `json:"architecture,omitempty"`
+	Heads           int     `json:"heads,omitempty"`
+	Revision        string  `json:"revision,omitempty"`
+	ExtendedCtx     int     `json:"extended_ctx,omitempty"`
+	ParamSource     string  `json:"param_source,omitempty"`
 	DType           string  `json:"dtype,omitempty"`
 	RopeTheta       float64 `json:"rope_theta,omitempty"`
 	Intermediate    float64 `json:"intermediate,omitempty"`
@@ -222,17 +227,105 @@ var Engines = []Engine{
 		Note:    "昇腾官方推理引擎"},
 }
 
-// EngineOK 该框架是否原生支持此硬件。厂商未知（空）时视为兼容。
+// EngineOK reports whether the runtime has at least a plausible path on this
+// device. Conditional plugin/version paths are distinguished by Perf.Support.
 func (e Engine) EngineOK(h HW) bool {
-	if len(e.Vendors) == 0 || h.Vendor == "" {
-		return true
+	status, _ := engineSupport(e, h, "")
+	return status == "supported" || status == "conditional"
+}
+
+func engineSupport(e Engine, h HW, lang string) (string, string) {
+	if h.Vendor == "" {
+		return "unknown", localText(lang, "Hardware vendor is unknown", "硬件厂商未知")
 	}
-	for _, v := range e.Vendors {
-		if v == h.Vendor {
-			return true
+	if h.Arch == "" {
+		return "unknown", localText(lang, "Hardware architecture is unknown", "硬件架构未知")
+	}
+	switch e.ID {
+	case "trtllm":
+		if h.Vendor != "nvidia" {
+			return "unsupported", localText(lang, "TensorRT-LLM requires NVIDIA hardware", "TensorRT-LLM 仅支持 NVIDIA 硬件")
 		}
+		switch h.Arch {
+		case "pascal", "volta", "turing":
+			return "unsupported", localText(lang, "TensorRT-LLM does not support this legacy GPU generation", "TensorRT-LLM 不支持该旧 GPU 代际")
+		case "ampere", "ada", "hopper", "blackwell":
+			return "supported", ""
+		case "":
+			return "unknown", localText(lang, "GPU generation is unknown", "GPU 代际未知")
+		default:
+			return "unknown", localText(lang, "TensorRT-LLM support is not established for this GPU generation", "TensorRT-LLM 尚未确认支持该 GPU 代际")
+		}
+	case "llamacpp":
+		if h.Vendor == "qualcomm" || h.Arch == "aic100" {
+			return "unsupported", localText(lang, "llama.cpp has no Cloud AI 100 backend", "llama.cpp 没有 Cloud AI 100 后端")
+		}
+		if h.Vendor == "nvidia" && (h.Arch == "pascal" || h.Arch == "volta") {
+			return "conditional", localText(lang, "Legacy NVIDIA GPU offload uses llama.cpp kernels and may require checkpoint conversion; verify the deployed build", "旧代 NVIDIA GPU offload 使用 llama.cpp 内核，且可能需要转换检查点；需核对部署版本")
+		}
+		switch h.Vendor {
+		case "nvidia", "amd", "intel", "apple":
+			return "supported", ""
+		default:
+			return "unsupported", localText(lang, "llama.cpp has no modeled backend for this accelerator", "llama.cpp 没有该加速器的已建模后端")
+		}
+	case "mlx":
+		if h.Vendor == "apple" {
+			return "supported", ""
+		}
+		return "unsupported", localText(lang, "MLX requires Apple Silicon", "MLX 仅支持 Apple Silicon")
+	case "exllama", "lmdeploy":
+		if h.Vendor != "nvidia" {
+			return "unsupported", localText(lang, "The selected runtime requires NVIDIA hardware", "所选运行时仅支持 NVIDIA 硬件")
+		}
+		switch h.Arch {
+		case "ampere", "ada", "hopper", "blackwell":
+			return "supported", ""
+		case "":
+			return "unknown", localText(lang, "GPU generation is unknown", "GPU 代际未知")
+		default:
+			return "conditional", localText(lang, "Runtime support depends on generation-specific kernels", "运行时支持取决于该代际内核")
+		}
+	case "mindie":
+		if h.Vendor == "huawei" {
+			return "supported", ""
+		}
+		return "unsupported", localText(lang, "MindIE requires Ascend hardware", "MindIE 仅支持昇腾硬件")
+	case "vllm", "sglang":
+		switch h.Vendor {
+		case "nvidia":
+			switch h.Arch {
+			case "ampere", "ada", "hopper", "blackwell":
+				return "supported", ""
+			case "pascal", "volta":
+				return "unsupported", localText(lang, "This runtime no longer supports the legacy NVIDIA generation", "该运行时已不支持此旧代 NVIDIA GPU")
+			case "":
+				return "unknown", localText(lang, "GPU generation is unknown", "GPU 代际未知")
+			default:
+				return "conditional", localText(lang, "Runtime support for this NVIDIA generation requires version verification", "该 NVIDIA 代际需核对运行时版本")
+			}
+		case "amd":
+			switch h.Arch {
+			case "cdna2", "cdna3", "cdna4":
+				return "supported", ""
+			case "":
+				return "unknown", localText(lang, "GPU generation is unknown", "GPU 代际未知")
+			default:
+				return "conditional", localText(lang, "ROCm runtime support for this generation requires version verification", "该代际 ROCm 运行时支持需核对版本")
+			}
+		case "intel":
+			if strings.HasPrefix(h.Arch, "gaudi") {
+				return "conditional", localText(lang, "Gaudi uses a vendor plugin whose model and version support must be verified", "Gaudi 依赖厂商插件，需核对模型与版本支持")
+			}
+			return "conditional", localText(lang, "This runtime uses a non-mainline Intel backend", "该运行时依赖非主线 Intel 后端")
+		case "huawei", "hygon", "metax", "mthreads", "enflame", "biren", "iluvatar", "kunlunxin", "cambricon":
+			return "conditional", localText(lang, "This hardware requires a vendor plugin or fork", "该硬件依赖厂商插件或分支")
+		default:
+			return "unsupported", localText(lang, "The selected runtime has no modeled backend for this vendor", "所选运行时没有该厂商的已建模后端")
+		}
+	default:
+		return "unknown", localText(lang, "Runtime support is unknown", "运行时支持未知")
 	}
-	return false
 }
 
 // resolveEngine 处理 auto：量化家族优先（GGUF→llama.cpp，MLX→MLX，EXL→ExLlama），
@@ -252,6 +345,12 @@ func resolveEngine(id string, h HW, q Quant) Engine {
 				id = "mlx"
 			case "huawei":
 				id = "mindie"
+			case "nvidia":
+				if h.Arch == "pascal" || h.Arch == "volta" {
+					id = "llamacpp"
+				} else {
+					id = "vllm"
+				}
 			default:
 				id = "vllm"
 			}
@@ -262,7 +361,7 @@ func resolveEngine(id string, h HW, q Quant) Engine {
 			return e
 		}
 	}
-	return Engines[1] // vllm
+	return Engine{ID: id, Name: id}
 }
 
 // SpecMethod 推测/并行解码方法。
@@ -326,7 +425,7 @@ func (s SpecMethod) gain(batch int) float64 {
 	return g
 }
 
-// Opts 同时承载部署、缓存、媒体和实测校准。零值保持原有简单模式。
+// Opts 同时承载部署、缓存、媒体和用户场景系数。零值保持原有简单模式。
 type Opts struct {
 	Engine  string  `json:"engine"`
 	Spec    string  `json:"spec"`
@@ -345,10 +444,10 @@ type Opts struct {
 	AdapterGB    float64 `json:"adapter_gb,omitempty"`    // 整个副本加载的 adapter 权重 GB
 	DraftGB      float64 `json:"draft_gb,omitempty"`      // 整个副本额外 draft/head 权重 GB
 	MemUtil      float64 `json:"mem_util,omitempty"`      // 可用显存比例
-	BWUtil       float64 `json:"bw_util,omitempty"`       // 实测 HBM 带宽利用率
-	FlopsUtil    float64 `json:"flops_util,omitempty"`    // 实测 dense 峰值利用率
-	LinkUtil     float64 `json:"link_util,omitempty"`     // 实测互联带宽利用率
-	ScheduleMS   float64 `json:"schedule_ms,omitempty"`   // 每 decode step 实测调度开销
+	BWUtil       float64 `json:"bw_util,omitempty"`       // 用户场景 HBM 带宽利用率
+	FlopsUtil    float64 `json:"flops_util,omitempty"`    // 用户场景 dense 峰值利用率
+	LinkUtil     float64 `json:"link_util,omitempty"`     // 用户场景互联带宽利用率
+	ScheduleMS   float64 `json:"schedule_ms,omitempty"`   // 用户场景每 decode step 调度开销
 
 	KVOverhead   float64 `json:"kv_overhead,omitempty"` // block/allocator 容量系数
 	KVOffload    float64 `json:"kv_offload,omitempty"`  // 卸载到 CPU/远端的 KV 比例
@@ -356,8 +455,8 @@ type Opts struct {
 	PrefillChunk int     `json:"prefill_chunk,omitempty"`
 	MediaTokens  int     `json:"media_tokens,omitempty"` // 视觉/音频 encoder 输入 token
 	RouterSkew   float64 `json:"router_skew,omitempty"`  // EP 最忙 rank / 平均负载
-	SpecTau      float64 `json:"spec_tau,omitempty"`     // 实测每步接受 token
-	SpecOvh      float64 `json:"spec_ovh,omitempty"`     // 实测 draft/verify 相对开销
+	SpecTau      float64 `json:"spec_tau,omitempty"`     // 用户场景每步接受 token
+	SpecOvh      float64 `json:"spec_ovh,omitempty"`     // 用户场景 draft/verify 相对开销
 	Lang         string  `json:"lang,omitempty"`         // en（默认）| zh；仅影响展示文本
 	skipTrace    bool
 }
@@ -392,12 +491,12 @@ func (o Opts) norm() Opts {
 	if o.LinkUtil > 0 {
 		o.LinkUtil = math.Max(o.LinkUtil, 1e-6)
 	}
-	const maxCalibratedGB = 1_000_000
-	o.WeightGB = clamp(o.WeightGB, 0, maxCalibratedGB)
-	o.RuntimeGB = clamp(o.RuntimeGB, 0, maxCalibratedGB)
-	o.ActivationGB = clamp(o.ActivationGB, 0, maxCalibratedGB)
-	o.AdapterGB = clamp(o.AdapterGB, 0, maxCalibratedGB)
-	o.DraftGB = clamp(o.DraftGB, 0, maxCalibratedGB)
+	const maxScenarioGB = 1_000_000
+	o.WeightGB = clamp(o.WeightGB, 0, maxScenarioGB)
+	o.RuntimeGB = clamp(o.RuntimeGB, 0, maxScenarioGB)
+	o.ActivationGB = clamp(o.ActivationGB, 0, maxScenarioGB)
+	o.AdapterGB = clamp(o.AdapterGB, 0, maxScenarioGB)
+	o.DraftGB = clamp(o.DraftGB, 0, maxScenarioGB)
 	o.ScheduleMS = clamp(o.ScheduleMS, 0, 10_000)
 	o.OffloadBW = clamp(o.OffloadBW, 0, 1_000_000)
 	if o.KVOffload > 0 && o.OffloadBW <= 0 {
@@ -414,23 +513,48 @@ func (o Opts) norm() Opts {
 	}
 	return o
 }
+func (o Opts) hasScenarioInputs() bool {
+	return o.WeightGB > 0 || o.RuntimeGB > 0 || o.ActivationGB > 0 ||
+		o.AdapterGB > 0 || o.DraftGB > 0 || o.MemUtil > 0 ||
+		o.BWUtil > 0 || o.FlopsUtil > 0 || o.LinkUtil > 0 ||
+		o.ScheduleMS > 0 || o.KVOverhead != 1 || o.KVOffload > 0 ||
+		o.OffloadBW > 0 || o.RouterSkew > 1 || o.MediaTokens > 0 ||
+		o.HitRate > 0
+}
 
-// kvSupported 只接受当前计算器明确建模的运行时路径；不把“能存更小”
-// 与“所选引擎能执行该 KV 格式”混为一谈。
-func (o Opts) kvSupported(h HW, eng Engine) bool {
+// kvSupport separates cache storage/dequantization from native low-precision
+// arithmetic. In particular, Ampere can store FP8 KV through supported
+// backends even though it has no native FP8 tensor arithmetic.
+func (o Opts) kvSupport(h HW, eng Engine) (string, string, bool) {
 	switch o.KVQuant {
 	case "", "fp16":
-		return true
+		return "supported", "", true
 	case "fp8":
-		return precHas(h, "fp8") && (eng.ID == "vllm" || eng.ID == "sglang" || eng.ID == "trtllm")
+		if eng.ID != "vllm" && eng.ID != "sglang" && eng.ID != "trtllm" {
+			return "unsupported", localText(o.Lang, "The selected runtime does not model FP8 KV storage", "所选运行时未建模 FP8 KV 存储"), false
+		}
+		if precHas(h, "fp8") {
+			return "supported", "", true
+		}
+		if h.Vendor == "nvidia" && h.Arch == "ampere" {
+			return "conditional", localText(o.Lang, "FP8 KV storage on Ampere uses backend dequantization, not native FP8 arithmetic; verify the deployed version", "Ampere 的 FP8 KV 依赖后端反量化而非原生 FP8 算术；需核对部署版本"), true
+		}
+		return "unsupported", localText(o.Lang, "This hardware/runtime path does not support FP8 KV storage", "该硬件/运行时路径不支持 FP8 KV 存储"), false
 	case "fp4":
-		return precHas(h, "fp4") && eng.ID == "sglang"
+		if precHas(h, "fp4") && eng.ID == "sglang" {
+			return "conditional", localText(o.Lang, "FP4 KV storage is experimental and version-dependent", "FP4 KV 存储仍为实验性且依赖版本"), true
+		}
+		return "unsupported", localText(o.Lang, "This hardware/runtime path does not support FP4 KV storage", "该硬件/运行时路径不支持 FP4 KV 存储"), false
 	default:
-		return false
+		return "unsupported", localText(o.Lang, "Unknown KV cache format", "未知 KV cache 格式"), false
 	}
 }
 
-// kvMemF 返回可执行 KV 格式的容量比；不支持的组合按 FP16 保守计算。
+func (o Opts) kvSupported(h HW, eng Engine) bool {
+	_, _, ok := o.kvSupport(h, eng)
+	return ok
+}
+
 func (o Opts) kvMemF(h HW, eng Engine) float64 {
 	if !o.kvSupported(h, eng) {
 		return 1
@@ -464,6 +588,9 @@ func LoadHW(b []byte) ([]HW, error) {
 		if !h.Svc && (h.VRAM <= 0 || h.BW <= 0 || h.TF <= 0 || len(h.Prec) == 0) {
 			return nil, fmt.Errorf("hardware %q lacks roofline inputs", h.ID)
 		}
+		if h.PeakKind != "" && h.PeakKind != "dense_matrix" && h.PeakKind != "vector" && h.PeakKind != "estimated" {
+			return nil, fmt.Errorf("hardware %q has unknown peak kind %q", h.ID, h.PeakKind)
+		}
 	}
 	return v, nil
 }
@@ -491,6 +618,16 @@ func LoadModels(b []byte) ([]Model, error) {
 		}
 		if m.KVLayers > m.Layers || m.LocalLayers > m.kvLayers() || (m.LocalLayers > 0 && m.Window <= 0) {
 			return nil, fmt.Errorf("model %q has invalid attention layers", m.ID)
+		}
+		if m.Heads < 0 || m.ExtendedCtx < 0 || (m.ExtendedCtx > 0 && m.ExtendedCtx < m.Ctx) {
+			return nil, fmt.Errorf("model %q has invalid head/context metadata", m.ID)
+		}
+		if m.Heads > 0 && (m.KVT == "mha" || m.KVT == "gqa") {
+			if (m.standardHeadShape() && math.Abs(float64(m.Heads*m.Dim)-m.Hidden) > 1e-9) ||
+				(m.KVT == "mha" && m.KVH != m.Heads) ||
+				(m.KVT == "gqa" && (m.Heads < m.KVH || m.Heads%m.KVH != 0)) {
+				return nil, fmt.Errorf("model %q has inconsistent attention heads", m.ID)
+			}
 		}
 		if m.NativeQuant != "" {
 			if _, ok := LookupQuant(m.NativeQuant); !ok {
@@ -546,6 +683,9 @@ func (h HW) PeakTF(q Quant) float64 {
 }
 
 func (h HW) peakExact(q Quant) bool {
+	if h.PeakKind != "dense_matrix" || h.SourceURL == "" {
+		return false
+	}
 	switch q.ID {
 	case "fp8":
 		return h.TF8 > 0
@@ -564,36 +704,267 @@ type topology struct {
 
 func (o Opts) topology(cards int) topology {
 	cards = max(1, cards)
-	fallback := topology{tp: cards, pp: 1, ep: 1, cp: 1}
 	if o.TP == 0 && o.PP == 0 && o.EP == 0 && o.CP == 0 {
-		fallback.valid = true
-		return fallback
-	}
-	if o.TP < 0 || o.PP < 0 || o.EP < 0 || o.CP < 0 ||
-		o.TP > cards || o.PP > cards || o.EP > cards || o.CP > cards {
-		return fallback
+		return topology{tp: cards, pp: 1, ep: 1, cp: 1, valid: true}
 	}
 	t := topology{tp: max(1, o.TP), pp: max(1, o.PP), ep: max(1, o.EP), cp: max(1, o.CP)}
+	if o.TP < 0 || o.PP < 0 || o.EP < 0 || o.CP < 0 ||
+		t.tp > cards || t.pp > cards || t.ep > cards || t.cp > cards {
+		return t
+	}
 	product := 1
 	for _, rank := range []int{t.tp, t.pp, t.ep, t.cp} {
 		if product > cards/rank {
-			return fallback
+			return t
 		}
 		product *= rank
 	}
-	if product != cards {
-		return fallback
-	}
-	t.valid = true
+	t.valid = product == cards
 	return t
 }
 
 func (o Opts) topologyFor(m Model, cards int) topology {
 	t := o.topology(cards)
 	if t.ep > 1 && !m.MoE {
-		return topology{tp: max(1, cards), pp: 1, ep: 1, cp: 1, valid: false}
+		t.valid = false
 	}
 	return t
+}
+
+type supportAssessment struct {
+	status        string
+	reason        string
+	estimateValid bool
+}
+
+func (a *supportAssessment) add(status, reason string, valid bool) {
+	rank := func(s string) int {
+		switch s {
+		case "unsupported":
+			return 3
+		case "unknown":
+			return 2
+		case "conditional":
+			return 1
+		default:
+			return 0
+		}
+	}
+	if rank(status) > rank(a.status) {
+		a.status = status
+	}
+	if reason != "" && !strings.Contains(a.reason, reason) {
+		a.reason = joinWarn(a.reason, reason)
+	}
+	a.estimateValid = a.estimateValid && valid
+}
+
+func (m Model) standardHeadShape() bool {
+	family := executionFamily(m)
+	return strings.Contains(family, "llama") || strings.Contains(family, "qwen2") ||
+		strings.Contains(family, "falcon")
+}
+
+func (m Model) queryHeads() (int, bool) {
+	if m.Heads > 0 {
+		return m.Heads, true
+	}
+	if (m.standardHeadShape() || m.ParamSource == "user-supplied") &&
+		(m.KVT == "mha" || m.KVT == "gqa") && m.Dim > 0 && m.Hidden > 0 {
+		heads := m.Hidden / float64(m.Dim)
+		if heads == math.Trunc(heads) && heads >= 1 {
+			return int(heads), true
+		}
+	}
+	return 0, false
+}
+
+func (m Model) attentionWidth() float64 {
+	if (m.KVT == "mha" || m.KVT == "gqa") && m.Dim > 0 {
+		if heads, ok := m.queryHeads(); ok {
+			return float64(heads * m.Dim)
+		}
+	}
+	return m.Hidden
+}
+
+func executionFamily(m Model) string {
+	return strings.ToLower(m.ModelType + " " + m.Architecture)
+}
+
+func quantSupport(h HW, q Quant, eng Engine, lang string) (string, string, bool) {
+	switch q.Fam {
+	case "mlx":
+		if h.Vendor != "apple" || eng.ID != "mlx" {
+			return "unsupported", localText(lang, "MLX weights require MLX on Apple Silicon", "MLX 权重需在 Apple Silicon 上使用 MLX"), false
+		}
+	case "exl":
+		if h.Vendor != "nvidia" || eng.ID != "exllama" {
+			return "unsupported", localText(lang, "EXL3 weights require ExLlama on NVIDIA", "EXL3 权重需在 NVIDIA 上使用 ExLlama"), false
+		}
+	case "gguf":
+		if eng.ID != "llamacpp" {
+			return "conditional", localText(lang, "GGUF support outside llama.cpp is experimental and version-dependent", "llama.cpp 之外的 GGUF 支持为实验性且依赖版本"), true
+		}
+	}
+	switch q.ID {
+	case "mxfp4":
+		if eng.ID != "vllm" && eng.ID != "sglang" {
+			return "unsupported", localText(lang, "MXFP4 has no modeled load path in this runtime", "该运行时没有已建模的 MXFP4 加载路径"), false
+		}
+		modeled := h.Vendor == "nvidia" && (h.Arch == "hopper" || h.Arch == "blackwell") ||
+			h.Vendor == "amd" && (h.Arch == "cdna3" || h.Arch == "cdna4")
+		if !modeled {
+			return "unknown", localText(lang, "MXFP4 runtime support is not established for this accelerator generation", "该加速器代际的 MXFP4 运行时支持尚未确认"), false
+		}
+		if !h.Accel(q) {
+			return "conditional", localText(lang, "MXFP4 uses a generation-specific runtime dequantization path without native FP4 arithmetic", "MXFP4 使用该代际特定的运行时反量化路径，但没有原生 FP4 算术"), true
+		}
+	case "fp8":
+		if !h.Accel(q) {
+			if h.Vendor == "nvidia" || h.Vendor == "amd" {
+				return "conditional", localText(lang, "FP8 weights require runtime dequantization because this device lacks a native FP8 arithmetic path", "该设备缺少原生 FP8 算术路径，FP8 权重需运行时反量化"), true
+			}
+			return "unsupported", localText(lang, "FP8 weights have no modeled load path on this platform", "该平台没有已建模的 FP8 权重加载路径"), false
+		}
+	case "fp4":
+		if !h.Accel(q) {
+			return "unsupported", localText(lang, "NVFP4 weights require a native NVIDIA FP4 path", "NVFP4 权重需要 NVIDIA 原生 FP4 路径"), false
+		}
+	}
+	return "supported", "", true
+}
+
+func assessSupport(h HW, m Model, q Quant, eng Engine, t topology, cards, ctx int, o Opts) supportAssessment {
+	a := supportAssessment{status: "supported", estimateValid: true}
+	if h.Svc || h.Cls == "supernode" {
+		a.add("unsupported", localText(o.Lang, "Aggregate service or supernode rows are not single-device roofline inputs", "聚合服务或超节点条目不能作为单设备 roofline 输入"), false)
+	}
+	if h.VRAM <= 0 || h.BW <= 0 || h.TF <= 0 {
+		a.add("unknown", localText(o.Lang, "Hardware lacks per-device memory, bandwidth, or dense compute inputs", "硬件缺少单设备显存、带宽或 dense 算力输入"), false)
+	}
+	switch h.PeakKind {
+	case "dense_matrix":
+		if h.SourceURL == "" {
+			a.add("conditional", localText(o.Lang, "Dense matrix peak is declared without a source", "dense 矩阵峰值已声明但缺少来源"), true)
+		}
+	case "vector":
+		a.add("conditional", localText(o.Lang, "Vector peak is used as a compute ceiling; matrix-kernel efficiency is not certified", "使用向量峰值作为计算上限；矩阵内核效率未经核验"), true)
+	case "estimated":
+		a.add("conditional", localText(o.Lang, "Dense compute peak is estimated rather than a sourced specification", "dense 算力峰值为估计值而非有来源的规格"), true)
+	default:
+		a.add("conditional", localText(o.Lang, "Dense compute peak provenance is unknown; TF is treated as a scenario input", "dense 算力峰值来源未知；TF 仅作为场景输入"), true)
+	}
+	status, reason := engineSupport(eng, h, o.Lang)
+	a.add(status, reason, status == "supported" || status == "conditional")
+	status, reason, valid := quantSupport(h, q, eng, o.Lang)
+	a.add(status, reason, valid)
+
+	family := executionFamily(m)
+	if strings.Contains(family, "diffusion") || strings.Contains(family, "llada") ||
+		strings.Contains(family, "dflashdraft") || strings.Contains(family, "efficientdlm") ||
+		strings.Contains(family, "diffcoder") || strings.Contains(family, "sdlm") {
+		a.add("unsupported", localText(o.Lang, "This diffusion/block-diffusion family has no autoregressive execution model", "该扩散/块扩散家族没有自回归执行模型"), false)
+	}
+	switch m.ParamSource {
+	case "config", "safetensors", "model_card":
+	case "name", "unknown":
+		a.add("unknown", localText(o.Lang, "Logical parameter count is unverified", "逻辑参数量未经核验"), false)
+	case "user-supplied":
+		a.add("conditional", localText(o.Lang, "User-supplied model metadata is a what-if scenario", "用户输入的模型元数据仅作为假设场景"), true)
+	case "":
+		if m.Conf == "fetched" {
+			a.add("unknown", localText(o.Lang, "Fetched model parameter provenance is missing", "抓取模型缺少参数来源"), false)
+		} else {
+			a.add("conditional", localText(o.Lang, "Model parameter provenance is not revision-scoped", "模型参数来源未绑定版本"), true)
+		}
+	default:
+		a.add("unknown", localText(o.Lang, "Model parameter provenance is unknown", "模型参数来源未知"), false)
+	}
+	if m.Revision == "" {
+		a.add("conditional", localText(o.Lang, "Model revision is not pinned", "模型版本未固定"), true)
+	}
+	if m.ModelType == "" && m.Architecture == "" && m.Conf != "" && m.ParamSource != "user-supplied" {
+		a.add("unknown", localText(o.Lang, "Model architecture is unknown", "模型架构未知"), false)
+	}
+	if m.Multimodal && m.EncoderParams <= 0 {
+		if o.MediaTokens > 0 {
+			a.add("unknown", localText(o.Lang, "Multimodal encoder geometry is unknown", "多模态 encoder 几何信息未知"), false)
+		} else {
+			a.add("conditional", localText(o.Lang, "Only the text tower is modeled because encoder geometry is unknown", "encoder 几何信息未知，仅建模文本塔"), true)
+		}
+	}
+	switch m.KVT {
+	case "mha", "gqa":
+		if m.KVH <= 0 || m.Dim <= 0 {
+			a.add("unknown", localText(o.Lang, "Attention head geometry is incomplete", "attention 头几何信息不完整"), false)
+		}
+		if heads, ok := m.queryHeads(); ok {
+			if m.standardHeadShape() && math.Abs(float64(heads*m.Dim)-m.Hidden) > 1e-9 {
+				a.add("unknown", localText(o.Lang, "Query heads, head dimension, and hidden size disagree", "query heads、head dimension 与 hidden size 不一致"), false)
+			}
+			if m.KVT == "mha" && m.KVH != heads {
+				a.add("unknown", localText(o.Lang, "MHA query and KV head counts disagree", "MHA 的 query 与 KV 头数不一致"), false)
+			}
+			if m.KVT == "gqa" && (heads < m.KVH || heads%m.KVH != 0) {
+				a.add("unknown", localText(o.Lang, "GQA query/KV head grouping is invalid", "GQA 的 query/KV 头分组无效"), false)
+			}
+		} else {
+			a.add("unknown", localText(o.Lang, "Query head count is unavailable for this attention family", "该 attention 家族缺少 query 头数"), false)
+		}
+	case "mla":
+		if m.MLA <= 0 {
+			a.add("unknown", localText(o.Lang, "MLA latent cache geometry is incomplete", "MLA latent cache 几何信息不完整"), false)
+		}
+	default:
+		a.add("unknown", localText(o.Lang, "Attention execution geometry is unknown", "attention 执行几何信息未知"), false)
+	}
+
+	if !t.valid {
+		a.add("unsupported", localText(o.Lang, "TP×PP×EP×CP must exactly match the requested card count", "TP×PP×EP×CP 必须精确匹配请求卡数"), false)
+	}
+	if cards > 1 {
+		if h.Link.Dom <= 0 || h.Link.B <= 0 || h.Link.T == "" || h.Link.T == "none" {
+			a.add("unknown", localText(o.Lang, "Cross-card topology is not described", "未描述跨卡拓扑"), false)
+		} else if cards > h.Link.Dom {
+			a.add("unknown", localText(o.Lang, "Requested cards exceed the described full-bandwidth link domain", "请求卡数超过已描述的全带宽互联域"), false)
+		} else if h.Link.T == "bridge" && cards > 2 {
+			a.add("unsupported", localText(o.Lang, "Point-to-point bridges do not form a multi-card full mesh", "点对点桥接不能构成多卡全互联"), false)
+		}
+	}
+	if t.tp > 1 {
+		heads, ok := m.queryHeads()
+		if !ok {
+			a.add("unknown", localText(o.Lang, "Query head count is required to validate tensor parallelism", "验证 tensor parallel 需要 query 头数"), false)
+		} else if heads%t.tp != 0 {
+			a.add("unsupported", localText(o.Lang, "Query head count is not divisible by tensor parallel degree", "query 头数不能被 tensor parallel 度整除"), false)
+		}
+		if (m.KVT == "mha" || m.KVT == "gqa") && m.KVH > 0 && m.KVH%t.tp != 0 && t.tp%m.KVH != 0 {
+			a.add("unsupported", localText(o.Lang, "KV heads can be neither evenly divided nor evenly replicated across tensor-parallel ranks", "KV 头无法在 tensor-parallel ranks 间均匀切分或复制"), false)
+		}
+	}
+	if t.cp > 1 {
+		if eng.ID == "vllm" {
+			a.add("unsupported", localText(o.Lang, "Context parallelism is not vLLM decode-context parallelism and is not modeled on this path", "context parallel 并非 vLLM decode-context parallel，本路径未建模"), false)
+		} else {
+			a.add("conditional", localText(o.Lang, "Context-parallel execution depends on runtime-specific sequence partitioning", "context parallel 执行取决于运行时的序列切分实现"), true)
+		}
+	}
+	status, reason, valid = o.kvSupport(h, eng)
+	a.add(status, reason, valid)
+	if m.Ctx <= 0 {
+		a.add("unknown", localText(o.Lang, "Native context limit is unknown", "原生上下文上限未知"), false)
+	} else if ctx > m.Ctx {
+		switch {
+		case m.ExtendedCtx <= 0:
+			a.add("unknown", localText(o.Lang, "Requested context exceeds the native limit and no verified extended limit is available", "请求上下文超过原生上限，且没有已核验的扩展上限"), false)
+		case ctx > m.ExtendedCtx:
+			a.add("unsupported", localText(o.Lang, "Requested context exceeds the verified extended limit", "请求上下文超过已核验的扩展上限"), false)
+		default:
+			a.add("conditional", localText(o.Lang, "Requested context uses an extended rather than native limit", "请求上下文使用扩展上限而非原生上限"), true)
+		}
+	}
+	return a
 }
 
 func (t topology) String() string {
@@ -674,9 +1045,9 @@ func (o Opts) activationGB(m Model, ctx, batch int, t topology) float64 {
 	if o.ActivationGB > 0 {
 		return o.ActivationGB
 	}
-	tokens := float64(batch * min(ctx, o.PrefillChunk))
+	tokens := float64(batch) * float64(min(ctx, o.PrefillChunk))
 	// FlashAttention 不保存 O(n²) attention matrix；保留 residual、QKV/MLP workspace 的一阶上界。
-	return tokens * m.Hidden * 2 * 4 / 1e9 / float64(t.tp*t.cp)
+	return tokens * m.Hidden * 2 * 4 / 1e9 / (float64(t.tp) * float64(t.cp))
 }
 
 // kvLayers 返回持有逐 token KV 的 attention 层数。
@@ -738,13 +1109,19 @@ func (m Model) KVBatchBytes(ctx, batch int, hit float64) float64 {
 	return (float64(full*fullTokens) + float64(local*localTokens)) * m.kvLayerBytes()
 }
 
-// kvRankFactor 是每个 TP rank 持有的逐 token KV 比例。KV head 少于 TP
-// 时会复制，不能把 KV 无条件除以 TP；MLA latent cache 默认在 TP ranks 间复制。
+// kvRankFactor is defined only for divisible head sharding or whole-head
+// replication; assessSupport rejects every other TP geometry.
 func (m Model) kvRankFactor(tp int) float64 {
 	if tp <= 1 || m.KVT == "mla" || m.KVH <= 0 {
 		return 1
 	}
-	return math.Ceil(float64(m.KVH)/float64(tp)) / float64(m.KVH)
+	if m.KVH%tp == 0 {
+		return 1 / float64(tp)
+	}
+	if tp%m.KVH == 0 {
+		return 1 / float64(m.KVH)
+	}
+	return 1
 }
 
 // CapGB 返回当前引擎的单卡可用显存预算。vLLM/SGLang/TRT 类服务引擎
@@ -793,13 +1170,13 @@ func Memory(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) MemDetail {
 	}
 	textWeight := math.Max(0, weightTotal-encoderWeight)
 	weights := encoderWeight/float64(t.tp) +
-		textWeight*(parts.baseTotal/math.Max(textParams, 1e-9)/float64(t.tp*t.pp)+
-			parts.expertTotal/math.Max(textParams, 1e-9)/float64(t.tp*t.ep*t.pp))
+		textWeight*(parts.baseTotal/math.Max(textParams, 1e-9)/(float64(t.tp)*float64(t.pp))+
+			parts.expertTotal/math.Max(textParams, 1e-9)/(float64(t.tp)*float64(t.ep)*float64(t.pp)))
 
 	kvRaw := m.KVBatchBytes(ctx, batch, o.HitRate) / 1e9 * o.kvMemF(h, eng) * o.KVOverhead *
-		m.kvRankFactor(t.tp) / float64(t.pp*t.cp)
+		m.kvRankFactor(t.tp) / (float64(t.pp) * float64(t.cp))
 	offloadedKV := kvRaw * o.KVOffload
-	state := m.StateMB / 1000 * float64(batch) / float64(t.tp*t.pp)
+	state := m.StateMB / 1000 * float64(batch) / (float64(t.tp) * float64(t.pp))
 	kv := kvRaw - offloadedKV + state
 
 	runtime := eng.FwMem
@@ -813,7 +1190,7 @@ func Memory(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) MemDetail {
 			draft = weightTotal * 0.05
 		}
 	}
-	adapter := (o.AdapterGB + draft) / float64(t.tp*t.pp)
+	adapter := (o.AdapterGB + draft) / (float64(t.tp) * float64(t.pp))
 	act := o.activationGB(m, ctx, batch, t)
 	allocated := weights + kv + runtime + act + adapter
 	budget := o.capGB(h, eng)
@@ -887,7 +1264,7 @@ type Perf struct {
 	KVSupported     bool           `json:"kv_supported"`
 	SpecApplied     bool           `json:"spec_applied"`
 	EngName         string         `json:"eng_name"`
-	EngOK           bool           `json:"eng_ok"` // 框架是否原生支持该硬件
+	EngOK           bool           `json:"eng_ok"` // 框架是否有 supported/conditional 硬件路径
 	SpecName        string         `json:"spec_name"`
 	Bottleneck      string         `json:"bottleneck"`        // memory | compute
 	DecodeMemMs     float64        `json:"decode_mem_ms"`     // 每 decode step 的显存 roof
@@ -899,9 +1276,13 @@ type Perf struct {
 	EncoderMs       float64        `json:"encoder_ms"`
 	PeakTF          float64        `json:"peak_tf"`
 	PeakExact       bool           `json:"peak_exact"`
-	Accuracy        string         `json:"accuracy"` // analytical | calibrated
+	Accuracy        string         `json:"accuracy"` // analytical | scenario
 	Topology        string         `json:"topology"`
 	TopologyOK      bool           `json:"topology_ok"`
+	Support         string         `json:"support"` // supported | conditional | unsupported | unknown
+	SupportReason   string         `json:"support_reason"`
+	EstimateValid   bool           `json:"estimate_valid"`
+	Deployable      bool           `json:"deployable"`
 	Trace           []TraceRow     `json:"trace"`
 	Workload        *WorkloadStats `json:"workload,omitempty"`
 	tPre            float64        // 纯 prefill 耗时 ms（内部复用，不序列化）
@@ -1015,7 +1396,7 @@ func specDescription(s SpecMethod, lang string) string {
 	case "none":
 		return "Standard one-token-at-a-time autoregressive decoding"
 	case "mtp":
-		return "Requires model metadata for MTP heads; acceptance and gain must be calibrated for the workload"
+		return "Requires model metadata for MTP heads; acceptance and gain are user-supplied scenario inputs"
 	case "eagle3":
 		return "Requires a compatible trained draft head; built-in coefficients are scenario inputs only"
 	case "medusa":
@@ -1156,16 +1537,30 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	t := o.topologyFor(m, cards)
 	kvmf, kvrf := o.kvMemF(h, eng), o.kvReadF(h, eng)
 	mem := Memory(h, m, q, ctx, batch, cards, o)
-	topologyOK := t.valid
+	engineStatus, _ := engineSupport(eng, h, o.Lang)
+	assessment := assessSupport(h, m, q, eng, t, max(1, cards), ctx, o)
 	p := Perf{
 		Fit: mem.Fit, Mem: mem, QuantID: q.ID, QuantLocked: quantLocked,
 		KVSupported: o.kvSupported(h, eng), Accel: h.Accel(q),
-		EngName: engineDisplay(eng, o.Lang), EngOK: eng.EngineOK(h), SpecName: specDisplay(spec, o.Lang),
+		EngName: engineDisplay(eng, o.Lang), EngOK: engineStatus == "supported" || engineStatus == "conditional", SpecName: specDisplay(spec, o.Lang),
 		PeakTF: h.PeakTF(q), PeakExact: h.peakExact(q),
-		Accuracy: "analytical", Topology: t.String(), TopologyOK: topologyOK,
+		Accuracy: "analytical", Topology: t.String(), TopologyOK: t.valid,
+		Support: assessment.status, SupportReason: assessment.reason, EstimateValid: assessment.estimateValid,
 	}
-	if o.BWUtil > 0 && o.FlopsUtil > 0 && o.ScheduleMS > 0 && (cards == 1 || o.LinkUtil > 0) {
-		p.Accuracy = "calibrated"
+	p.Deployable = p.EstimateValid && p.Support == "supported" && p.Fit
+	if h.PeakKind != "dense_matrix" || o.hasScenarioInputs() {
+		p.Accuracy = "scenario"
+	}
+	if !p.EstimateValid {
+		if !o.skipTrace {
+			p.Trace = []TraceRow{
+				tr(localText(o.Lang, "Estimate status", "估算级别"), p.Accuracy, localText(o.Lang, "Performance is withheld because the requested execution path is not modeled", "请求执行路径未建模，因此不输出性能")),
+				tr(localText(o.Lang, "Support", "支持状态"), p.Support, p.SupportReason),
+				tr(localText(o.Lang, "Parallel topology", "并行拓扑"), p.Topology, localText(o.Lang, "The requested topology is preserved; no fallback estimate is substituted", "保留请求拓扑，不替换为回退估算")),
+				tr(localText(o.Lang, "Inference engine", "推理框架"), engineDisplay(eng, o.Lang), p.SupportReason),
+			}
+		}
+		return p
 	}
 
 	parts := m.weights(batch)
@@ -1215,7 +1610,7 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 		localKeys = math.Min(localKeys, m.Sparse)
 	}
 	decodeF := 2*linearActive*1e9*float64(batch) +
-		4*float64(batch)*m.Hidden*(float64(fullL)*fullKeys+float64(localL)*localKeys)/float64(t.cp)
+		4*float64(batch)*m.attentionWidth()*(float64(fullL)*fullKeys+float64(localL)*localKeys)/float64(t.cp)
 	tCompute := decodeF / (peakTF * 1e12 * float64(t.tp) * flopsUtil) * 1000
 	tpComm := tpCommMs(h, m, float64(batch), t, o)
 	epComm := epCommMs(h, m, float64(batch), t, o)
@@ -1239,6 +1634,7 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	p.CommMs = round2(tComm)
 	p.LayerMs = round2(tLayer)
 	p.OffloadMs = round2(tOffload)
+	p.ScheduleMs = round2(tFixed)
 
 	specScenario := spec
 	if o.SpecTau > 0 {
@@ -1249,12 +1645,16 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	}
 	g := specScenario.gain(batch)
 	modelSpecOK := spec.ID != "mtp" || m.MTP || m.MTPHeads > 0
-	// 档位自带论文口径的 τ/Ovh 预设,模型支持即生效;用户实测值优先覆盖。
+	// 内置 τ/Ovh 与用户覆盖值都是场景输入，不代表同条件实测基准。
 	specOK := spec.ID == "none" || modelSpecOK
 	if !specOK {
 		g = 1
 	}
-	p.SpecApplied = spec.ID != "none" && specOK
+	decodeTokens := math.Max(0, float64(o.OutLen-1))
+	p.SpecApplied = decodeTokens > 0 && spec.ID != "none" && specOK
+	if p.SpecApplied {
+		p.Accuracy = "scenario"
+	}
 	single := 1000 / tStep * g
 	agg := float64(batch) * 1000 / tStep * g
 
@@ -1273,15 +1673,15 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	tLinCompute := 2 * preActive * preTokens / (peakTF * float64(t.tp) * flopsUtil)
 	preWeightGB := preRead*bytesPerParam/float64(t.tp) + o.AdapterGB/float64(t.tp)
 	tWeight := preWeightGB / (h.BW * eta) * 1000
-	chunks := math.Max(1, math.Ceil(inEff/float64(o.PrefillChunk)))
+	chunks := math.Max(1, math.Ceil(preTokens/float64(o.PrefillChunk)))
 	tLin := math.Max(tLinCompute, tWeight*chunks)
 
 	var attnF float64
 	if fullL > 0 {
 		if m.Sparse > 0 {
-			attnF += 4 * float64(fullL) * inEff * math.Min(float64(ctx), m.Sparse) * m.Hidden
+			attnF += 4 * float64(fullL) * inEff * math.Min(float64(ctx), m.Sparse) * m.attentionWidth()
 		} else {
-			attnF += 2 * float64(fullL) * inEff * (2*float64(ctx) - inEff) * m.Hidden
+			attnF += 2 * float64(fullL) * inEff * (2*float64(ctx) - inEff) * m.attentionWidth()
 		}
 	}
 	if localL > 0 {
@@ -1292,7 +1692,7 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 		prefix := float64(ctx) - inEff
 		ramp := math.Min(inEff, math.Max(0, window-prefix))
 		keyPairs := ramp*(2*prefix+ramp)/2 + (inEff-ramp)*window
-		attnF += 4 * float64(localL) * keyPairs * m.Hidden
+		attnF += 4 * float64(localL) * keyPairs * m.attentionWidth()
 	}
 	tAttn := attnF / float64(t.cp) / (peakTF * 1e12 * float64(t.tp) * flopsUtil) * 1000
 	tPreComm := commMs(h, m, preTokens, t, o)
@@ -1318,7 +1718,6 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	if tPre > 0 {
 		p.PreTPS = round1(inEff / tPre * 1000)
 	}
-	decodeTokens := math.Max(0, float64(o.OutLen-1))
 	if agg > 0 {
 		p.reqSec = decodeTokens/agg + tPre/1000
 		reqS := 1 / p.reqSec
@@ -1329,14 +1728,20 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	p.TTFTms = round1(tPre)
 	p.ReqMs = round1(tPre + decodeTokens*tStep/g)
 	p.tPre = tPre
-	kvScale := m.kvRankFactor(t.tp) / float64(t.pp*t.cp) * kvmf * o.KVOverhead * (1 - o.KVOffload) / 1e9
+	kvScale := m.kvRankFactor(t.tp) / (float64(t.pp) * float64(t.cp)) * kvmf * o.KVOverhead * (1 - o.KVOffload) / 1e9
 	kvOne := m.KVBatchBytes(ctx, 1, o.HitRate) * kvScale
 	kvPerReq := (m.KVBatchBytes(ctx, 2, o.HitRate)-m.KVBatchBytes(ctx, 1, o.HitRate))*kvScale +
-		m.StateMB/1000/float64(t.tp*t.pp)
+		m.StateMB/1000/(float64(t.tp)*float64(t.pp))
 	actPerReq := mem.Act / float64(max(1, batch))
 	fixed := mem.Weights + mem.Fw + mem.Adapter + math.Max(0, kvOne-kvPerReq)
 	if perRequest := kvPerReq + actPerReq; perRequest > 0 {
 		p.MaxBatch = max(0, int((mem.Budget-fixed)/perRequest))
+	}
+	if decodeTokens == 0 {
+		p.SingleTPS, p.AggTPS, p.TPOTms, p.TPM = 0, 0, 0, 0
+		p.DecodeMemMs, p.DecodeComputeMs, p.CommMs = 0, 0, 0
+		p.ScheduleMs, p.LayerMs, p.OffloadMs = 0, 0, 0
+		p.Bottleneck, p.SpecApplied = "prefill", false
 	}
 
 	if o.skipTrace {
@@ -1357,10 +1762,11 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 	}
 	p.Trace = []TraceRow{
 		tr(localText(o.Lang, "Estimate status", "估算级别"), p.Accuracy,
-			localText(o.Lang, "analytical is an uncalibrated roofline; calibrated means key measured utilization inputs were supplied", "analytical 为未校准 roofline；calibrated 表示已提供关键实测利用率")),
+			localText(o.Lang, "analytical is an uncalibrated roofline; scenario means user-supplied utilization inputs were applied", "analytical 为未校准 roofline；scenario 表示应用了用户输入的利用率参数")),
+		tr(localText(o.Lang, "Support", "支持状态"), p.Support, p.SupportReason),
 		tr(localText(o.Lang, "Parallel topology", "并行拓扑"), p.Topology,
 			localText(o.Lang, fmt.Sprintf("%d cards; the product must match", cards), fmt.Sprintf("%d cards；乘积必须相等", cards))),
-		tr(localText(o.Lang, "Inference engine", "推理框架"), engineDisplay(eng, o.Lang), engNote(eng, h, p.EngOK, p.Accuracy == "calibrated", o.Lang)),
+		tr(localText(o.Lang, "Inference engine", "推理框架"), engineDisplay(eng, o.Lang), engNote(eng, h, p.EngOK, p.Accuracy == "scenario", o.Lang)),
 		tr(localText(o.Lang, "Quantization path", "量化路径"), fmt.Sprintf("W%s · A%s · KV %s", q.W, q.A, strings.ToUpper(o.KVQuant)), quantNote(h, q, eng, peakTF/h.TF, o.Lang)),
 		tr(localText(o.Lang, "Weight memory", "权重显存"), gb(mem.Weights), weightNote),
 		tr(localText(o.Lang, "KV / state", "KV / 状态"), gb(mem.KV), kvNote(m, ctx, batch, t, o, kvrf)),
@@ -1385,12 +1791,12 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 				fmt.Sprintf("%.0f%% of KV reread through a %.0f GB/s tier; %.1f GB external capacity", o.KVOffload*100, o.OffloadBW, mem.OffloadedKV),
 				fmt.Sprintf("%.0f%% KV 经 %.0f GB/s 层级回读；外部容量 %.1f GB", o.KVOffload*100, o.OffloadBW, mem.OffloadedKV))))
 	}
-	if spec.ID != "none" {
+	if decodeTokens > 0 && spec.ID != "none" {
 		note := specNote(specScenario, batch, o.Lang)
 		if !modelSpecOK {
 			note = localText(o.Lang, "⚠ The model has no MTP-head metadata; acceleration is not applied", "⚠ 模型没有 MTP 头元数据，本次不应用加速")
 		} else if o.SpecTau <= 0 || o.SpecOvh <= 0 {
-			note = localText(o.Lang, "Using the method's paper-grade τ/overhead preset; measured values can override", "使用档位论文口径 τ/开销预设，可填实测值覆盖")
+			note = localText(o.Lang, "Using the method's built-in scenario τ/overhead; validate it on the target workload", "使用档位内置的场景 τ/开销；需在目标 workload 上验证")
 		}
 		p.Trace = append(p.Trace,
 			tr(localText(o.Lang, "Speculative decoding", "推测解码"), fmt.Sprintf("%s ×%.2f", specDisplay(spec, o.Lang), g), note),
@@ -1411,9 +1817,9 @@ func Throughput(h HW, m Model, q Quant, ctx, batch, cards int, o Opts) Perf {
 		tr(localText(o.Lang, "Mixed TPM", "混合 TPM"), fmt.Sprintf("%.0f tok/min", p.TPMMixed),
 			localText(o.Lang, fmt.Sprintf("%.2f req/s × (%d raw input + %d output) × 60", p.ReqS, ctx, o.OutLen), fmt.Sprintf("%.2f req/s ×（%d 原始输入 + %d 输出）× 60", p.ReqS, ctx, o.OutLen))),
 	)
-	if !topologyOK {
+	if !t.valid {
 		p.Trace = append(p.Trace, tr(localText(o.Lang, "⚠ Invalid topology", "⚠ 拓扑无效"), p.Topology,
-			localText(o.Lang, "TP×PP×EP×CP must equal cards, and EP only applies to MoE; reverted to full TP", "TP×PP×EP×CP 必须等于 cards，且 EP 仅适用于 MoE；已回退全 TP")))
+			localText(o.Lang, "TP×PP×EP×CP must equal cards, and EP only applies to MoE; no performance fallback is emitted", "TP×PP×EP×CP 必须等于 cards，且 EP 仅适用于 MoE；不输出性能回退")))
 	}
 	if m.Multimodal && m.EncoderParams == 0 {
 		p.Trace = append(p.Trace, tr(localText(o.Lang, "⚠ Multimodal encoder", "⚠ 多模态 encoder"), localText(o.Lang, "Unknown parameter count", "参数量未知"),
@@ -1496,16 +1902,18 @@ func ThroughputWorkload(h HW, m Model, q Quant, workload []WorkloadBucket, batch
 	}
 
 	p := runs[0].perf
+	combined := supportAssessment{status: p.Support, reason: p.SupportReason, estimateValid: p.EstimateValid}
 	p.Workload = &WorkloadStats{}
 	if !o.skipTrace {
 		p.Workload.Buckets = make([]WorkloadBucketPerf, len(runs))
 	}
 	var meanCtx, meanOut, effectiveInput, preSeconds, reqSeconds, reqLatency, ttft float64
-	var decodeTokens, singleSeconds, aggregateSeconds, decodeMem, decodeCompute, comm, schedule, offload, encoder float64
+	var decodeTokens, singleSeconds, aggregateSeconds, decodeMem, decodeCompute, comm, schedule, layer, offload, encoder float64
 	maxProfileContext := 0
+	p.SpecApplied = false
 	for _, run := range runs {
 		share := run.bucket.Share
-		outTokens := math.Max(1, float64(run.bucket.Output-1))
+		outTokens := math.Max(0, float64(run.bucket.Output-1))
 		meanCtx += share * float64(run.bucket.Context)
 		meanOut += share * float64(run.bucket.Output)
 		maxProfileContext = max(maxProfileContext, run.bucket.Context)
@@ -1521,32 +1929,67 @@ func ThroughputWorkload(h HW, m Model, q Quant, workload []WorkloadBucket, batch
 		decodeCompute += share * outTokens * run.perf.DecodeComputeMs
 		comm += share * outTokens * run.perf.CommMs
 		schedule += share * outTokens * run.perf.ScheduleMs
+		layer += share * outTokens * run.perf.LayerMs
 		offload += share * outTokens * run.perf.OffloadMs
 		encoder += share * run.perf.EncoderMs
+		p.SpecApplied = p.SpecApplied || outTokens > 0 && run.perf.SpecApplied
+		combined.add(run.perf.Support, run.perf.SupportReason, run.perf.EstimateValid)
 	}
-	p.SingleTPS = round1(decodeTokens / math.Max(singleSeconds, 1e-9))
-	p.AggTPS = round1(decodeTokens / math.Max(aggregateSeconds, 1e-9))
-	p.PreTPS = round1(effectiveInput / math.Max(preSeconds, 1e-9))
-	p.reqSec = reqSeconds
-	reqRate := 1 / math.Max(reqSeconds, 1e-9)
+	p.Support, p.SupportReason, p.EstimateValid = combined.status, combined.reason, combined.estimateValid
+	if p.SpecApplied {
+		p.Accuracy = "scenario"
+	}
+	if !p.EstimateValid {
+		for i := range runs {
+			runs[i].occupancy = runs[i].bucket.Share
+		}
+	}
+	if p.EstimateValid && decodeTokens > 0 {
+		p.SingleTPS = round1(decodeTokens / singleSeconds)
+		p.AggTPS = round1(decodeTokens / aggregateSeconds)
+		p.TPOTms = round1(singleSeconds / decodeTokens * 1000)
+		p.DecodeMemMs = round2(decodeMem / decodeTokens)
+		p.DecodeComputeMs = round2(decodeCompute / decodeTokens)
+		p.CommMs = round2(comm / decodeTokens)
+		p.ScheduleMs = round2(schedule / decodeTokens)
+		p.LayerMs = round2(layer / decodeTokens)
+		p.OffloadMs = round2(offload / decodeTokens)
+	} else {
+		p.SingleTPS, p.AggTPS, p.TPOTms = 0, 0, 0
+		p.DecodeMemMs, p.DecodeComputeMs, p.CommMs = 0, 0, 0
+		p.ScheduleMs, p.LayerMs, p.OffloadMs = 0, 0, 0
+	}
+	if p.EstimateValid && preSeconds > 0 {
+		p.PreTPS = round1(effectiveInput / preSeconds)
+	} else {
+		p.PreTPS = 0
+	}
+	p.reqSec = 0
+	reqRate := 0.0
+	if p.EstimateValid && reqSeconds > 0 {
+		p.reqSec = reqSeconds
+		reqRate = 1 / reqSeconds
+		p.TTFTms = round1(ttft)
+		p.ReqMs = round1(reqLatency)
+		p.tPre = preSeconds * 1000
+		p.EncoderMs = round2(encoder)
+	} else {
+		p.TTFTms, p.ReqMs, p.tPre, p.EncoderMs = 0, 0, 0, 0
+	}
 	p.ReqS = round4(reqRate)
 	p.TPM = round1(p.AggTPS * 60)
 	p.TPMMixed = round1(reqRate * (meanCtx + meanOut) * 60)
-	p.TTFTms = round1(ttft)
-	p.TPOTms = round1(singleSeconds / math.Max(decodeTokens, 1e-9) * 1000)
-	p.ReqMs = round1(reqLatency)
-	p.tPre = preSeconds * 1000
-	p.DecodeMemMs = round2(decodeMem / math.Max(decodeTokens, 1e-9))
-	p.DecodeComputeMs = round2(decodeCompute / math.Max(decodeTokens, 1e-9))
-	p.CommMs = round2(comm / math.Max(decodeTokens, 1e-9))
-	p.ScheduleMs = round2(schedule / math.Max(decodeTokens, 1e-9))
-	p.OffloadMs = round2(offload / math.Max(decodeTokens, 1e-9))
-	p.EncoderMs = round2(encoder)
-	p.Bottleneck = "memory"
-	if p.DecodeComputeMs > p.DecodeMemMs {
-		p.Bottleneck = "compute"
-	} else if p.OffloadMs > p.DecodeMemMs-p.OffloadMs && p.OffloadMs > p.DecodeComputeMs {
-		p.Bottleneck = "offload"
+	p.Bottleneck = "unmodeled"
+	if p.EstimateValid {
+		p.Bottleneck = "prefill"
+		if decodeTokens > 0 {
+			p.Bottleneck = "memory"
+			if p.DecodeComputeMs > p.DecodeMemMs {
+				p.Bottleneck = "compute"
+			} else if p.OffloadMs > p.DecodeMemMs-p.OffloadMs && p.OffloadMs > p.DecodeComputeMs {
+				p.Bottleneck = "offload"
+			}
+		}
 	}
 
 	mix := MemDetail{Cap: runs[0].mem1.Cap, Budget: runs[0].mem1.Budget}
@@ -1584,10 +2027,13 @@ func ThroughputWorkload(h HW, m Model, q Quant, workload []WorkloadBucket, batch
 	}
 	mix.Total = meanFirst + float64(batch-1)*meanInc
 	mix.P999Total = guardAt(batch)
-	mix.HeadPct = (mix.Cap - mix.P999Total) / mix.Cap
+	if mix.Cap > 0 {
+		mix.HeadPct = (mix.Cap - mix.P999Total) / mix.Cap
+	}
 	mix.Fit = allOneFit && mix.P999Total <= mix.Cap
 	p.Mem, p.Fit = mix, mix.Fit
-	if allOneFit {
+	p.Deployable = p.EstimateValid && p.Support == "supported" && p.Fit
+	if allOneFit && p.EstimateValid {
 		lo, hi := 0, 4096
 		for lo < hi {
 			mid := (lo + hi + 1) / 2
@@ -1602,6 +2048,17 @@ func ThroughputWorkload(h HW, m Model, q Quant, workload []WorkloadBucket, batch
 		p.MaxBatch = 0
 	}
 
+	decodeRuns := make([]workloadRun, 0, len(runs))
+	decodeShare := 0.0
+	for _, run := range runs {
+		if run.bucket.Output > 1 {
+			decodeRuns = append(decodeRuns, run)
+			decodeShare += run.bucket.Share
+		}
+	}
+	for i := range decodeRuns {
+		decodeRuns[i].bucket.Share /= decodeShare
+	}
 	ctx95 := workloadQuantile(runs, .95, func(r workloadRun) float64 { return float64(r.bucket.Context) })
 	ctx99 := workloadQuantile(runs, .99, func(r workloadRun) float64 { return float64(r.bucket.Context) })
 	ctx999 := workloadQuantile(runs, .999, func(r workloadRun) float64 { return float64(r.bucket.Context) })
@@ -1611,20 +2068,34 @@ func ThroughputWorkload(h HW, m Model, q Quant, workload []WorkloadBucket, batch
 	req95 := workloadQuantile(runs, .95, func(r workloadRun) float64 { return r.perf.ReqMs })
 	req99 := workloadQuantile(runs, .99, func(r workloadRun) float64 { return r.perf.ReqMs })
 	req999 := workloadQuantile(runs, .999, func(r workloadRun) float64 { return r.perf.ReqMs })
-	tpsFloor95 := workloadQuantile(runs, .05, func(r workloadRun) float64 { return r.perf.SingleTPS })
+	var tpsFloor95 workloadRun
+	if len(decodeRuns) > 0 {
+		tpsFloor95 = workloadQuantile(decodeRuns, .05, func(r workloadRun) float64 { return r.perf.SingleTPS })
+	}
 	stats := p.Workload
 	stats.MeanContext, stats.MeanOutput = round1(meanCtx), round1(meanOut)
 	stats.P95Context, stats.P99Context, stats.P999Context, stats.MaxContext = ctx95.bucket.Context, ctx99.bucket.Context, ctx999.bucket.Context, maxProfileContext
-	stats.P95TTFTms, stats.P99TTFTms, stats.P999TTFTms = ttft95.perf.TTFTms, ttft99.perf.TTFTms, ttft999.perf.TTFTms
-	stats.P95ReqMs, stats.P99ReqMs, stats.P999ReqMs = req95.perf.ReqMs, req99.perf.ReqMs, req999.perf.ReqMs
-	stats.P95SingleTPS = tpsFloor95.perf.SingleTPS
+	if p.EstimateValid {
+		stats.P95TTFTms, stats.P99TTFTms, stats.P999TTFTms = ttft95.perf.TTFTms, ttft99.perf.TTFTms, ttft999.perf.TTFTms
+		stats.P95ReqMs, stats.P99ReqMs, stats.P999ReqMs = req95.perf.ReqMs, req99.perf.ReqMs, req999.perf.ReqMs
+		if len(decodeRuns) > 0 {
+			stats.P95SingleTPS = tpsFloor95.perf.SingleTPS
+		}
+	}
 	if !o.skipTrace {
 		for i, run := range runs {
 			stats.Buckets[i] = WorkloadBucketPerf{
 				Context: run.bucket.Context, Output: run.bucket.Output, Share: run.bucket.Share,
-				Occupancy: run.occupancy, PrefixHit: run.bucket.PrefixHit, SingleTPS: run.perf.SingleTPS,
-				TTFTms: run.perf.TTFTms, TPOTms: run.perf.TPOTms, ReqMs: run.perf.ReqMs,
+				Occupancy: run.occupancy, PrefixHit: run.bucket.PrefixHit,
 				BatchMemory: run.perf.Mem.Total, Fit: run.perf.Fit,
+			}
+			if p.EstimateValid {
+				stats.Buckets[i].TTFTms = run.perf.TTFTms
+				stats.Buckets[i].ReqMs = run.perf.ReqMs
+				if run.bucket.Output > 1 {
+					stats.Buckets[i].SingleTPS = run.perf.SingleTPS
+					stats.Buckets[i].TPOTms = run.perf.TPOTms
+				}
 			}
 		}
 	}
@@ -1633,6 +2104,15 @@ func ThroughputWorkload(h HW, m Model, q Quant, workload []WorkloadBucket, batch
 	}
 
 	metadata := min(4, len(p.Trace))
+	if len(p.Trace) > 0 {
+		p.Trace[0].V = p.Accuracy
+		if !p.EstimateValid {
+			p.Trace[0].N = localText(o.Lang, "Performance is withheld because at least one workload bucket is not modeled", "至少一个 workload 桶未建模，因此不输出性能")
+		}
+	}
+	if len(p.Trace) > 1 {
+		p.Trace[1].V, p.Trace[1].N = p.Support, p.SupportReason
+	}
 	p.Trace = append([]TraceRow(nil), p.Trace[:metadata]...)
 	p.Trace = append(p.Trace,
 		tr(localText(o.Lang, "Workload distribution", "工作负载分布"), fmt.Sprintf("%d buckets", len(runs)),
@@ -1646,21 +2126,21 @@ func ThroughputWorkload(h HW, m Model, q Quant, workload []WorkloadBucket, batch
 		tr(localText(o.Lang, "TTFT distribution", "TTFT 分布"), fmt.Sprintf("mean %.0f · P95 %.0f · P99 %.0f ms", p.TTFTms, stats.P95TTFTms, stats.P99TTFTms),
 			localText(o.Lang, "each bucket is evaluated by the same prefill roofline", "每个桶使用同一 prefill roofline 独立计算")),
 		tr(localText(o.Lang, "Request latency distribution", "请求时延分布"), fmt.Sprintf("mean %.0f · P95 %.0f · P99 %.0f ms", p.ReqMs, stats.P95ReqMs, stats.P99ReqMs),
-			localText(o.Lang, "TTFT + bucket output length × TPOT", "TTFT + 各桶输出长度 × TPOT")),
+			localText(o.Lang, "TTFT + subsequent decode intervals × TPOT", "TTFT + 后续 decode 间隔 × TPOT")),
 		tr(localText(o.Lang, "Steady-state mixed rate", "混合稳态速率"), fmt.Sprintf("%.2f req/s · %.0f tok/min", p.ReqS, p.TPMMixed),
 			localText(o.Lang, "harmonic aggregation of per-bucket serial service demand", "按各桶串行服务预算做调和聚合")),
 	)
 	return p
 }
 
-func engNote(eng Engine, h HW, ok, calibrated bool, lang string) string {
+func engNote(eng Engine, h HW, ok, scenario bool, lang string) string {
 	if !ok {
 		return localText(lang,
-			fmt.Sprintf("⚠ %s does not list native %s support; performance is a generic baseline", eng.Name, h.Vendor),
-			fmt.Sprintf("⚠ %s 未列出 %s 原生支持；性能数字仅为通用基线", eng.Name, h.Vendor))
+			fmt.Sprintf("⚠ %s does not list native %s support; no performance estimate is emitted", eng.Name, h.Vendor),
+			fmt.Sprintf("⚠ %s 未列出 %s 原生支持；不输出性能估算", eng.Name, h.Vendor))
 	}
-	if calibrated {
-		return engineDescription(eng, lang) + localText(lang, "; using measurements from this deployment", "；使用当前部署实测校准参数")
+	if scenario {
+		return engineDescription(eng, lang) + localText(lang, "; using user-supplied scenario coefficients", "；使用用户输入的场景系数")
 	}
 	return engineDescription(eng, lang) + localText(lang, "; performance coefficients are not calibrated against a matching benchmark", "；性能系数未做同条件基准校准")
 }
@@ -1691,7 +2171,7 @@ func quantNote(h HW, q Quant, eng Engine, fmul float64, lang string) string {
 }
 
 func kvNote(m Model, ctx, batch int, t topology, o Opts, readF float64) string {
-	rank := m.kvRankFactor(t.tp) / float64(t.pp*t.cp)
+	rank := m.kvRankFactor(t.tp) / (float64(t.pp) * float64(t.cp))
 	base := localText(o.Lang,
 		fmt.Sprintf("%.1f MB raw KV/request × %d concurrent × %.3f rank ratio", m.KVBytes(ctx)/1e6, batch, rank),
 		fmt.Sprintf("%.1f MB/请求原始 KV × %d 并发 × rank比例 %.3f", m.KVBytes(ctx)/1e6, batch, rank))
@@ -1795,7 +2275,7 @@ func capNote(h HW, eng Engine, o Opts) string {
 }
 
 func commNote(h HW, t topology, o Opts) string {
-	if t.tp*t.pp*t.ep*t.cp <= 1 {
+	if t.tp <= 1 && t.pp <= 1 && t.ep <= 1 && t.cp <= 1 {
 		return localText(o.Lang, "single card; no communication", "单卡无通信")
 	}
 	path := fmt.Sprintf("%s %.0f GB/s", h.Link.T, o.linkBW(h))
@@ -1825,11 +2305,13 @@ func round4(v float64) float64 {
 // ---------- 模式 1：能装什么 ----------
 
 type FitCell struct {
-	Quant      string  `json:"quant"`
-	Fit        int     `json:"fit"` // 0=❌ 1=⚠️ 2=✅
-	TPS        float64 `json:"tps"`
-	Accel      bool    `json:"accel"`
-	Applicable bool    `json:"applicable"`
+	Quant         string  `json:"quant"`
+	Fit           int     `json:"fit"` // 0=❌ 1=⚠️ 2=✅
+	TPS           float64 `json:"tps"`
+	Accel         bool    `json:"accel"`
+	Applicable    bool    `json:"applicable"`
+	Support       string  `json:"support"`
+	SupportReason string  `json:"support_reason"`
 }
 
 type FitRow struct {
@@ -1837,27 +2319,38 @@ type FitRow struct {
 	Cells []FitCell `json:"cells"`
 }
 
-func FitMatrix(h HW, models []Model, n, ctx, batch int, o Opts) []FitRow {
+func FitMatrix(h HW, models []Model, n int, workload []WorkloadBucket, batch int, o Opts) []FitRow {
+	o.skipTrace = true
+	quants := MainQuants()
 	rows := make([]FitRow, 0, len(models))
 	for _, m := range models {
 		row := FitRow{Model: m}
-		for _, q := range MainQuants() {
+		for _, q := range quants {
 			if fixed := m.FixedQuantID(); fixed != "" && fixed != q.ID {
 				row.Cells = append(row.Cells, FitCell{Quant: q.ID})
 				continue
 			}
-			mem := Memory(h, m, q, ctx, batch, n, o)
-			st := 0
-			if mem.Fit && mem.HeadPct > 0.10 {
+			p := ThroughputWorkload(h, m, q, workload, batch, n, o)
+			st, reason := 0, p.SupportReason
+			switch {
+			case !p.EstimateValid || p.Support == "unsupported" || p.Support == "unknown":
+			case !p.Fit:
+				reason = joinWarn(reason, localText(o.Lang, "Workload exceeds the memory budget", "工作负载超过显存预算"))
+			case p.Support == "conditional":
+				st = 1
+			case p.Mem.HeadPct > 0.10:
 				st = 2
-			} else if mem.Fit {
+			default:
 				st = 1
 			}
 			tps := 0.0
-			if st > 0 {
-				tps = Throughput(h, m, q, ctx, batch, n, o).SingleTPS
+			if st > 0 && p.EstimateValid {
+				tps = p.SingleTPS
 			}
-			row.Cells = append(row.Cells, FitCell{Quant: q.ID, Fit: st, TPS: tps, Accel: h.Accel(q), Applicable: true})
+			row.Cells = append(row.Cells, FitCell{
+				Quant: q.ID, Fit: st, TPS: tps, Accel: p.Accel, Applicable: true,
+				Support: p.Support, SupportReason: reason,
+			})
 		}
 		rows = append(rows, row)
 	}
@@ -1877,39 +2370,43 @@ type PlanOpts struct {
 }
 
 type Plan struct {
-	HW           HW      `json:"hw"`
-	N            int     `json:"n"`        // 单副本卡数
-	Replicas     int     `json:"replicas"` // 副本（节点）数
-	Quant        string  `json:"quant"`
-	QName        string  `json:"qname"`
-	EngName      string  `json:"eng_name"`
-	SpecName     string  `json:"spec_name"`
-	Strategy     string  `json:"strategy"`
-	Single       float64 `json:"single_tps"`
-	Agg          float64 `json:"agg_tps"`      // 单副本聚合 tok/s（容量场景并发口径）
-	TPM          float64 `json:"tpm"`          // 集群混合 tok/min 容量
-	CapacityQPS  float64 `json:"capacity_qps"` // 集群最大稳定请求/s
-	ArrivalQPS   float64 `json:"arrival_qps"`  // 目标 TPM 换算的到达请求/s
-	MaxConc      int     `json:"max_conc"`     // 容量场景的单副本并发
-	UtilPct      float64 `json:"util_pct"`     // 目标负载 / 集群服务能力
-	WaitAvgMs    float64 `json:"wait_avg_ms"`  // M/M/c 平均排队等待
-	WaitP95Ms    float64 `json:"wait_p95_ms"`  // M/M/c 无条件 p95 排队等待
-	QueueModel   string  `json:"queue_model"`  // none | M/M/c
-	TTFTms       float64 `json:"ttft_ms"`
-	TPOTms       float64 `json:"tpot_ms"`
-	P95SingleTPS float64 `json:"p95_single_tps"` // 95% 请求可达到的单流 TPS 下限
-	TTFTP95ms    float64 `json:"p95_ttft_ms"`
-	ReqP95ms     float64 `json:"p95_req_ms"`
-	ReqP99ms     float64 `json:"p99_req_ms"`
-	MeanContext  float64 `json:"mean_context"`
-	P99Context   int     `json:"p99_context"`
-	P999Context  int     `json:"p999_context"`
-	MaxContext   int     `json:"max_context"`
-	MemoryP999   float64 `json:"p999_memory"`
-	CostCNY      float64 `json:"cost_cny"`
-	Monthly      float64 `json:"monthly"`
-	PerMtok      float64 `json:"per_mtok"` // 每百万 token 成本（按集群实际容量满负载）
-	Warn         string  `json:"warn,omitempty"`
+	HW            HW      `json:"hw"`
+	N             int     `json:"n"`        // 单副本卡数
+	Replicas      int     `json:"replicas"` // 副本（节点）数
+	Quant         string  `json:"quant"`
+	Topology      string  `json:"topology"`
+	QName         string  `json:"qname"`
+	EngName       string  `json:"eng_name"`
+	SpecName      string  `json:"spec_name"`
+	Strategy      string  `json:"strategy"`
+	Single        float64 `json:"single_tps"`
+	Agg           float64 `json:"agg_tps"`      // 单副本聚合 tok/s（容量场景并发口径）
+	TPM           float64 `json:"tpm"`          // 集群混合 tok/min 容量
+	CapacityQPS   float64 `json:"capacity_qps"` // 集群最大稳定请求/s
+	ArrivalQPS    float64 `json:"arrival_qps"`  // 目标 TPM 换算的到达请求/s
+	MaxConc       int     `json:"max_conc"`     // 容量场景的单副本并发
+	UtilPct       float64 `json:"util_pct"`     // 目标负载 / 集群服务能力
+	WaitAvgMs     float64 `json:"wait_avg_ms"`  // M/M/c 平均排队等待
+	WaitP95Ms     float64 `json:"wait_p95_ms"`  // M/M/c 无条件 p95 排队等待
+	QueueModel    string  `json:"queue_model"`  // none | M/M/c
+	TTFTms        float64 `json:"ttft_ms"`
+	TPOTms        float64 `json:"tpot_ms"`
+	P95SingleTPS  float64 `json:"p95_single_tps"` // 95% 请求可达到的单流 TPS 下限
+	TTFTP95ms     float64 `json:"p95_ttft_ms"`
+	ReqP95ms      float64 `json:"p95_req_ms"`
+	ReqP99ms      float64 `json:"p99_req_ms"`
+	MeanContext   float64 `json:"mean_context"`
+	P99Context    int     `json:"p99_context"`
+	P999Context   int     `json:"p999_context"`
+	MaxContext    int     `json:"max_context"`
+	MemoryP999    float64 `json:"p999_memory"`
+	CostCNY       float64 `json:"cost_cny"`
+	Monthly       float64 `json:"monthly"`
+	PerMtok       float64 `json:"per_mtok"` // 每百万 token 成本（按集群实际容量满负载）
+	Warn          string  `json:"warn,omitempty"`
+	Support       string  `json:"support"`
+	SupportReason string  `json:"support_reason"`
+	Deployable    bool    `json:"deployable"`
 }
 
 // ---------- 确定性处方推荐 ----------
@@ -2018,7 +2515,7 @@ func Planner(hws []HW, m Model, po PlanOpts, workload []WorkloadBucket, conc int
 			}
 			for n := 1; n <= maxN; n *= 2 {
 				pf := ThroughputWorkload(h, m, q, workload, conc, n, st)
-				if !pf.Fit {
+				if !pf.EstimateValid || pf.Support == "unsupported" || pf.Support == "unknown" || !pf.Fit {
 					continue
 				}
 				minSingle := pf.SingleTPS
@@ -2037,7 +2534,8 @@ func Planner(hws []HW, m Model, po PlanOpts, workload []WorkloadBucket, conc int
 					maxConc = max(maxConc, conc)
 					if maxConc > conc {
 						pc := ThroughputWorkload(h, m, q, workload, maxConc, n, st)
-						if pc.Fit {
+						if pc.EstimateValid && pc.Support != "unsupported" && pc.Support != "unknown" &&
+							pc.Fit && pc.Workload.P95SingleTPS >= po.MinTOS {
 							servicePerf = pc
 						} else {
 							maxConc = conc
@@ -2092,7 +2590,9 @@ func Planner(hws []HW, m Model, po PlanOpts, workload []WorkloadBucket, conc int
 					MeanContext: servicePerf.Workload.MeanContext, P99Context: servicePerf.Workload.P99Context,
 					P999Context: servicePerf.Workload.P999Context, MaxContext: servicePerf.Workload.MaxContext,
 					MemoryP999: servicePerf.Mem.P999Total,
-					CostCNY:    h.CNY * totalCards,
+					CostCNY:    h.CNY * totalCards, Support: servicePerf.Support,
+					Topology:      servicePerf.Topology,
+					SupportReason: servicePerf.SupportReason, Deployable: servicePerf.Deployable,
 				}
 				p.Strategy = strategy(h, n, st.Lang)
 				elec := h.TDP * totalCards * 0.6 * 24 * 30 / 1000 * 0.8 // 60% 负载，0.8 元/kWh
@@ -2101,6 +2601,7 @@ func Planner(hws []HW, m Model, po PlanOpts, workload []WorkloadBucket, conc int
 					p.PerMtok = p.Monthly / (clusterTPM * 60 * 24 * 30 / 1e6)
 				}
 				p.Warn = warnOf(h, m, q, pf, st.Lang)
+				p.Warn = joinWarn(p.Warn, p.SupportReason)
 				if m.Ctx > 0 && maxContext > m.Ctx {
 					p.Warn = joinWarn(p.Warn, localText(st.Lang,
 						fmt.Sprintf("The workload tail exceeds the model's native context (%dK>%dK); YaRN/RoPE extension required", maxContext/1024, m.Ctx/1024),
@@ -2113,7 +2614,7 @@ func Planner(hws []HW, m Model, po PlanOpts, workload []WorkloadBucket, conc int
 					p.Warn = joinWarn(p.Warn, localText(st.Lang, "The model has no MTP-head metadata; speculative acceleration is not applied", "模型无 MTP 头元数据，未应用推测加速"))
 				}
 				if st.Spec != "" && st.Spec != "none" && (st.SpecTau <= 0 || st.SpecOvh <= 0) {
-					p.Warn = joinWarn(p.Warn, localText(st.Lang, "Measured τ and draft/verify overhead were not supplied; speculative acceleration is not applied", "未提供实测 τ 与 draft/verify 开销，未应用推测加速"))
+					p.Warn = joinWarn(p.Warn, localText(st.Lang, "Using built-in speculative-decoding scenario coefficients; validate them on the target workload", "使用内置推测解码场景系数；需在目标 workload 上验证"))
 				}
 				if maxContext >= 32768 && n > 1 {
 					p.Warn = joinWarn(p.Warn, localText(st.Lang, "For long-context multi-card deployments, evaluate context parallelism or PD disaggregation; benefit depends on SLO and KV transfer", "长上下文多卡应评估 context parallel 或 PD 分离；收益取决于 SLO 与 KV 传输"))
@@ -2167,14 +2668,15 @@ func erlangC(lambda, mu float64, servers int) (util, avgMs, p95Ms float64) {
 	return util, avgMs, p95Ms
 }
 
-// dedupPlans 按（硬件 × 单副本卡数）去重：同一组合的不同量化档只保留
-// 当前优化目标下最优的一档，避免备选列表被同卡变体挤满。
+// dedupPlans 只合并完全相同的部署形状；卡数、副本、并发、拓扑或运行栈
+// 不同都代表用户可执行的不同配置，不能互相覆盖。
 func dedupPlans(plans []Plan, objective string) []Plan {
 	better := planBetter(objective)
 	at := map[string]int{}
 	out := plans[:0]
 	for _, p := range plans {
-		key := fmt.Sprintf("%s|%d", p.HW.ID, p.N)
+		key := fmt.Sprintf("%s|%s|%s|%s|%d|%d|%d|%s",
+			p.HW.ID, p.Quant, p.EngName, p.SpecName, p.N, p.Replicas, p.MaxConc, p.Topology)
 		if i, ok := at[key]; ok {
 			if better(p, out[i]) {
 				out[i] = p
@@ -2192,6 +2694,9 @@ func planCost(p Plan) float64 {
 		return 1e12
 	}
 	return p.Monthly
+}
+func planP95(p Plan) float64 {
+	return p.ReqP95ms + p.WaitP95Ms
 }
 
 func availScoreOf(p Plan) float64 {
@@ -2217,9 +2722,8 @@ func planBetter(objective string) func(a, b Plan) bool {
 	switch objective {
 	case "latency":
 		return func(a, b Plan) bool {
-			la, lb := a.TTFTms+a.TPOTms, b.TTFTms+b.TPOTms
-			if la != lb {
-				return la < lb
+			if planP95(a) != planP95(b) {
+				return planP95(a) < planP95(b)
 			}
 			return planCost(a) < planCost(b)
 		}
@@ -2237,7 +2741,7 @@ func planBetter(objective string) func(a, b Plan) bool {
 			if ca != cb {
 				return ca < cb
 			}
-			return a.TTFTms+a.TPOTms < b.TTFTms+b.TPOTms
+			return planP95(a) < planP95(b)
 		}
 	}
 }
@@ -2275,11 +2779,11 @@ func recommendPlanningObjective(objectives []string) string {
 		return "cost"
 	}
 	switch objectives[0] {
-	case "tpm":
+	case "tos", "tpm":
 		return "latency"
 	case "avail":
 		return "avail"
-	default: // cost/tos 都以单流下限硬约束 + 成本排序最稳
+	default:
 		return "cost"
 	}
 }
@@ -2296,13 +2800,15 @@ func rankPrescriptions(items []Prescription, objectives []string) {
 	if len(items) == 0 {
 		return
 	}
-	costVals := make([]float64, len(items))
-	tosVals := make([]float64, len(items))
+	costVals := make([]float64, 0, len(items))
+	latencyVals := make([]float64, len(items))
 	tpmVals := make([]float64, len(items))
 	availVals := make([]float64, len(items))
 	for i := range items {
-		costVals[i] = planMonthly(items[i].Plan)
-		tosVals[i] = items[i].Plan.P95SingleTPS
+		if cost := items[i].Plan.Monthly; cost > 0 {
+			costVals = append(costVals, cost)
+		}
+		latencyVals[i] = planP95(items[i].Plan)
 		tpmVals[i] = items[i].Plan.TPM
 		availVals[i] = availScoreOf(items[i].Plan)
 	}
@@ -2311,9 +2817,11 @@ func rankPrescriptions(items []Prescription, objectives []string) {
 		for _, obj := range objectives {
 			switch obj {
 			case "cost":
-				score += normalizeLower(costVals, planMonthly(items[i].Plan))
+				if cost := items[i].Plan.Monthly; cost > 0 {
+					score += normalizeLower(costVals, cost)
+				}
 			case "tos":
-				score += normalizeHigher(tosVals, items[i].Plan.P95SingleTPS)
+				score += normalizeLower(latencyVals, planP95(items[i].Plan))
 			case "tpm":
 				score += normalizeHigher(tpmVals, items[i].Plan.TPM)
 			case "avail":
@@ -2332,6 +2840,9 @@ func rankPrescriptions(items []Prescription, objectives []string) {
 		items[i].Score = round4(score)
 		wins := 0
 		for _, obj := range objectives {
+			if obj == "cost" && items[i].Plan.Monthly <= 0 {
+				continue
+			}
 			best := true
 			for j := range items {
 				if j == i {
@@ -2406,11 +2917,19 @@ func prescriptionAdvice(p Prescription, st Opts, lang string) string {
 }
 
 func prescriptionFromPlan(p Plan, st Opts, lang string) Prescription {
+	eng := resolveEngine(st.Engine, p.HW, QuantByID(p.Quant))
+	kvQuant, specID := st.KVQuant, st.Spec
+	if kvQuant == "" {
+		kvQuant = "fp16"
+	}
+	if specID == "" {
+		specID = "none"
+	}
 	return Prescription{
 		Plan:           p,
-		EngineID:       st.Engine,
-		KVQuant:        st.KVQuant,
-		SpecID:         st.Spec,
+		EngineID:       eng.ID,
+		KVQuant:        kvQuant,
+		SpecID:         specID,
 		QuantLocked:    false,
 		HWAccel:        false,
 		EngineOK:       true,
@@ -2433,9 +2952,13 @@ func prescriptionReason(p Prescription, objectives []string, lang string) string
 	for _, obj := range objectives {
 		switch obj {
 		case "cost":
-			parts = append(parts, localText(lang, fmt.Sprintf("cost-first (monthly %.1f CNY)", planMonthly(p.Plan)), fmt.Sprintf("成本优先（月租 %.1f 元）", planMonthly(p.Plan))))
+			if p.Plan.Monthly > 0 {
+				parts = append(parts, localText(lang, fmt.Sprintf("cost-first (estimated monthly %.1f CNY)", p.Plan.Monthly), fmt.Sprintf("成本优先（估算月成本 %.1f 元）", p.Plan.Monthly)))
+			} else {
+				parts = append(parts, localText(lang, "price unknown; cost cannot be ranked", "价格未知，无法比较成本"))
+			}
 		case "tos":
-			parts = append(parts, localText(lang, fmt.Sprintf("latency-first (P95 %.1f tok/s)", p.Plan.P95SingleTPS), fmt.Sprintf("单流优先（P95 %.1f tok/s）", p.Plan.P95SingleTPS)))
+			parts = append(parts, localText(lang, fmt.Sprintf("latency-first (end-to-end request P95 %.1f ms)", planP95(p.Plan)), fmt.Sprintf("时延优先（端到端请求 P95 %.1f ms）", planP95(p.Plan))))
 		case "tpm":
 			parts = append(parts, localText(lang, fmt.Sprintf("throughput-first (%.1f tok/min)", p.Plan.TPM), fmt.Sprintf("吞吐优先（%.1f tok/min）", p.Plan.TPM)))
 		case "avail":
@@ -2490,14 +3013,11 @@ func recommendForModel(hws []HW, m Model, workload []WorkloadBucket, opts Recomm
 		if h.Svc {
 			continue
 		}
-		if locked := QuantByID(m.FixedQuantID()); locked.ID != "" && !h.Accel(locked) {
-			continue // 预量化检查点需要硬件原生路径，不能用“省显存”掩盖不兼容
-		}
 		// 先按现有 Planner 求一个合规集合，再补处方所需的 Perf 细节。
 		plans := Planner([]HW{h}, m, po, workload, max(1, opts.Conc), st)
 		for _, p := range plans {
 			pf := ThroughputWorkload(h, m, QuantByID(p.Quant), workload, p.MaxConc, p.N, st)
-			if !pf.Fit || pf.Workload == nil {
+			if !pf.EstimateValid || pf.Support == "unsupported" || pf.Support == "unknown" || !pf.Fit || pf.Workload == nil {
 				continue
 			}
 			pres := prescriptionFromPlan(p, st, st.Lang)
@@ -2515,7 +3035,7 @@ func recommendForModel(hws []HW, m Model, workload []WorkloadBucket, opts Recomm
 
 // recommendForCard 从硬件出发，枚举模型×量化×栈，返回可部署的处方集合。
 func recommendForCard(models []Model, h HW, workload []WorkloadBucket, opts RecommendOpts, st Opts) []Prescription {
-	_ = parseRecommendObjectives(opts.Objectives)
+	objectives := parseRecommendObjectives(opts.Objectives)
 	if opts.Cards <= 0 {
 		opts.Cards = 1
 	}
@@ -2523,9 +3043,6 @@ func recommendForCard(models []Model, h HW, workload []WorkloadBucket, opts Reco
 	for _, m := range models {
 		if m.Conf != "official" {
 			continue // 卡片模式只推荐人工收录的官方模型，避免采集仓库噪声
-		}
-		if fixed := QuantByID(m.FixedQuantID()); fixed.ID != "" && !h.Accel(fixed) {
-			continue // 预量化检查点需要硬件原生路径，不能用“省显存”掩盖不兼容
 		}
 		quants := Quants
 		if fixed := m.FixedQuantID(); fixed != "" {
@@ -2547,16 +3064,18 @@ func recommendForCard(models []Model, h HW, workload []WorkloadBucket, opts Reco
 				continue
 			}
 			pf := ThroughputWorkload(h, m, q, workload, max(1, opts.Conc), opts.Cards, st)
-			if !pf.Fit || pf.Workload == nil {
+			if !pf.EstimateValid || pf.Support == "unsupported" || pf.Support == "unknown" || !pf.Fit || pf.Workload == nil {
 				continue
 			}
 			p := Plan{
 				HW: h, N: opts.Cards, Replicas: 1,
-				Quant: q.ID, QName: q.Name,
+				Strategy: strategy(h, opts.Cards, st.Lang),
+				Quant:    q.ID, QName: q.Name,
 				EngName: engineDisplay(eng, st.Lang), SpecName: specDisplay(SpecByID(st.Spec), st.Lang),
 				Single: pf.SingleTPS, Agg: pf.AggTPS, TPM: round1(pf.TPMMixed),
 				CapacityQPS: round4(1 / math.Max(pf.reqSec, 1e-9)), ArrivalQPS: 0,
-				MaxConc: opts.Conc, UtilPct: 0,
+				Topology: pf.Topology,
+				MaxConc:  max(1, opts.Conc), UtilPct: 0,
 				QueueModel: "none",
 				TTFTms:     pf.TTFTms, TPOTms: pf.TPOTms,
 				P95SingleTPS: pf.Workload.P95SingleTPS, TTFTP95ms: pf.Workload.P95TTFTms,
@@ -2564,7 +3083,8 @@ func recommendForCard(models []Model, h HW, workload []WorkloadBucket, opts Reco
 				MeanContext: pf.Workload.MeanContext, P99Context: pf.Workload.P99Context,
 				P999Context: pf.Workload.P999Context, MaxContext: pf.Workload.MaxContext,
 				MemoryP999: pf.Mem.P999Total,
-				CostCNY:    h.CNY * float64(opts.Cards),
+				CostCNY:    h.CNY * float64(opts.Cards), Support: pf.Support,
+				SupportReason: pf.SupportReason, Deployable: pf.Deployable,
 			}
 			elec := h.TDP * float64(opts.Cards) * 0.6 * 24 * 30 / 1000 * 0.8
 			if p.CostCNY > 0 {
@@ -2574,12 +3094,13 @@ func recommendForCard(models []Model, h HW, workload []WorkloadBucket, opts Reco
 				}
 			}
 			p.Warn = warnOf(h, m, q, pf, st.Lang)
+			p.Warn = joinWarn(p.Warn, p.SupportReason)
 			pres := prescriptionFromPlan(p, st, st.Lang)
 			pres.ModelID = m.ID
 			pres.ModelName = m.Name
 			pres.QuantLocked = m.FixedQuantID() != ""
 			fillPrescriptionPerf(&pres, pf)
-			pres.Reason = prescriptionReason(pres, parseRecommendObjectives(opts.Objectives), st.Lang)
+			pres.Reason = prescriptionReason(pres, objectives, st.Lang)
 			pres.Advice = prescriptionAdvice(pres, st, st.Lang)
 			out = append(out, pres)
 		}
@@ -2591,7 +3112,9 @@ func dedupePrescriptions(items []Prescription) []Prescription {
 	seen := map[string]int{}
 	out := items[:0]
 	for _, p := range items {
-		key := p.ModelID + "|" + p.Plan.HW.ID + "|" + p.Plan.Quant + "|" + p.Plan.EngName + "|" + p.Plan.SpecName
+		key := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d|%d|%d|%s",
+			p.ModelID, p.Plan.HW.ID, p.Plan.Quant, p.EngineID, p.KVQuant, p.SpecID,
+			p.Plan.N, p.Plan.Replicas, p.Plan.MaxConc, p.Topology)
 		if i, ok := seen[key]; ok {
 			if p.Plan.TPM > out[i].Plan.TPM || (p.Plan.TPM == out[i].Plan.TPM && planCost(p.Plan) < planCost(out[i].Plan)) {
 				out[i] = p
@@ -2642,8 +3165,8 @@ func Recommend(hws []HW, models []Model, m Model, workload []WorkloadBucket, opt
 		if planCost(items[i].Plan) != planCost(items[j].Plan) {
 			return planCost(items[i].Plan) < planCost(items[j].Plan)
 		}
-		if items[i].Plan.P95SingleTPS != items[j].Plan.P95SingleTPS {
-			return items[i].Plan.P95SingleTPS > items[j].Plan.P95SingleTPS
+		if planP95(items[i].Plan) != planP95(items[j].Plan) {
+			return planP95(items[i].Plan) < planP95(items[j].Plan)
 		}
 		if items[i].Plan.HW.ID != items[j].Plan.HW.ID {
 			return items[i].Plan.HW.ID < items[j].Plan.HW.ID
@@ -2706,7 +3229,7 @@ func prescriptionMetric(p Prescription, objective string) float64 {
 	case "cost":
 		return -planCost(p.Plan)
 	case "tos":
-		return p.Plan.P95SingleTPS
+		return -planP95(p.Plan)
 	case "tpm":
 		return p.Plan.TPM
 	case "avail":
@@ -2778,7 +3301,7 @@ type QuickRow struct {
 	MaxINT4 float64 `json:"max_int4"`
 }
 
-// QuickTable 每张卡能扛的最大模型参数（扣除底座/预留/8K 上下文 KV）。
+// QuickTable 给出扣除服务预留与固定 3.5 GB 后的权重预算，不含模型相关 KV/激活。
 func QuickTable(hws []HW) []QuickRow {
 	var rows []QuickRow
 	for _, h := range hws {
@@ -2786,7 +3309,7 @@ func QuickTable(hws []HW) []QuickRow {
 			continue
 		}
 		budget := h.CapGB(Engines[1]) - 3.5 // 按 vLLM 0.90 服务预算
-		rows = append(rows, QuickRow{HW: h, MaxFP16: budget / 2.0, MaxINT4: budget / 0.6})
+		rows = append(rows, QuickRow{HW: h, MaxFP16: math.Max(0, budget) / 2.0, MaxINT4: math.Max(0, budget) / 0.6})
 	}
 	return rows
 }

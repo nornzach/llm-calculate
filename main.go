@@ -95,6 +95,18 @@ func mustLoad() {
 }
 
 func enrichModel(dst *calc.Model, src calc.Model) {
+	if dst.Heads == 0 && dst.Hidden == src.Hidden && dst.Dim == src.Dim && dst.Layers == src.Layers {
+		dst.Heads = src.Heads
+	}
+	if dst.ParamSource == "" && dst.Params == src.Params {
+		dst.ParamSource = src.ParamSource
+	}
+	if dst.ExtendedCtx == 0 && dst.Ctx == src.Ctx {
+		dst.ExtendedCtx = src.ExtendedCtx
+	}
+	if dst.Revision == "" && dst.SourceURL == src.SourceURL && dst.Params == src.Params {
+		dst.Revision = src.Revision
+	}
 	if dst.ModelType == "" {
 		dst.ModelType = src.ModelType
 	}
@@ -172,14 +184,16 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 }
 
 type fitReq struct {
-	HW    string `json:"hw"`
-	N     int    `json:"n"`
-	Ctx   int    `json:"ctx"`
-	Batch int    `json:"batch"`
-	Eng   string `json:"eng"`
-	Spec  string `json:"spec"`
-	KVQ   string `json:"kvq"`
-	Lang  string `json:"lang"`
+	HW       string                `json:"hw"`
+	N        int                   `json:"n"`
+	Ctx      int                   `json:"ctx"`
+	Batch    int                   `json:"batch"`
+	Workload []calc.WorkloadBucket `json:"workload"`
+	Models   []string              `json:"models"`
+	Eng      string                `json:"eng"`
+	Spec     string                `json:"spec"`
+	KVQ      string                `json:"kvq"`
+	Lang     string                `json:"lang"`
 }
 
 type perfReq struct {
@@ -279,6 +293,7 @@ func sanitizeCustom(m *calc.Model, lang string) calc.Model {
 	}
 	m.KVH = clamp(m.KVH, 1, 256, 8)
 	m.Dim = clamp(m.Dim, 16, 1024, 128)
+	m.Heads = clamp(m.Heads, 0, 65536, 0)
 	if m.KVT == "mla" {
 		m.MLA = clampF(m.MLA, 64, 4096, 576)
 	}
@@ -304,6 +319,11 @@ func sanitizeCustom(m *calc.Model, lang string) calc.Model {
 	m.MTP = m.MTP || m.MTPHeads > 0
 	m.Multimodal = m.Multimodal || m.EncoderParams > 0
 	m.Ctx = clamp(m.Ctx, 512, 1048576, 131072)
+	m.ExtendedCtx = clamp(m.ExtendedCtx, 0, 1048576, 0)
+	if m.ExtendedCtx < m.Ctx {
+		m.ExtendedCtx = 0
+	}
+	m.ParamSource = "user-supplied"
 	kvLayers := m.KVLayers
 	if kvLayers == 0 {
 		kvLayers = m.Layers
@@ -471,7 +491,28 @@ func main() {
 		ctx := clamp(req.Ctx, 512, 1048576, 8192)
 		batch := clamp(req.Batch, 1, 256, 8)
 		o := calc.Opts{Engine: req.Eng, Spec: req.Spec, KVQuant: req.KVQ, Lang: req.Lang}
-		writeJSON(w, calc.FitMatrix(*h, models, n, ctx, batch, o))
+		workload := req.Workload
+		if workload == nil {
+			workload = []calc.WorkloadBucket{{Context: ctx, Output: 512, Share: 1}}
+		}
+		workload, err := sanitizeWorkload(workload)
+		if err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		selected := models
+		if req.Models != nil {
+			selected = make([]calc.Model, 0, len(req.Models))
+			for _, id := range req.Models {
+				m := findModel(id)
+				if m == nil {
+					writeErr(w, 404, "unknown model")
+					return
+				}
+				selected = append(selected, *m)
+			}
+		}
+		writeJSON(w, calc.FitMatrix(*h, selected, n, workload, batch, o))
 	})
 
 	mux.HandleFunc("POST /api/perf", func(w http.ResponseWriter, r *http.Request) {
@@ -510,7 +551,7 @@ func main() {
 			return
 		}
 		n := clamp(req.N, 1, 8, 1)
-		batch := clamp(req.Batch, 1, 256, 8)
+		batch := clamp(req.Batch, 1, 4096, 8)
 		if req.Quant == "" {
 			req.Quant = "fp16"
 		}
@@ -525,13 +566,17 @@ func main() {
 		p := calc.ThroughputWorkload(*h, m, q, workload, batch, n, o)
 		// 所有点复用同一计算函数；额外插入当前并发，避免图表与主指标口径分叉。
 		type pt struct {
-			B        int     `json:"b"`
-			Agg      float64 `json:"agg"`
-			Single   float64 `json:"single"`
-			Used     float64 `json:"used"`      // P99.9 concurrent memory guard
-			MeanUsed float64 `json:"mean_used"` // occupancy-weighted mean
-			Cap      float64 `json:"cap"`
-			Fit      bool    `json:"fit"`
+			B             int     `json:"b"`
+			Agg           float64 `json:"agg"`
+			Single        float64 `json:"single"`
+			Used          float64 `json:"used"`      // P99.9 concurrent memory guard
+			MeanUsed      float64 `json:"mean_used"` // occupancy-weighted mean
+			Cap           float64 `json:"cap"`
+			Fit           bool    `json:"fit"`
+			EstimateValid bool    `json:"estimate_valid"`
+			Deployable    bool    `json:"deployable"`
+			Support       string  `json:"support"`
+			SupportReason string  `json:"support_reason"`
 		}
 		batches := append([]int{1, 2, 4, 8, 16, 32, 64, 128}, batch)
 		slices.Sort(batches)
@@ -539,7 +584,12 @@ func main() {
 		curve := make([]pt, 0, len(batches))
 		for _, b := range batches {
 			pp := calc.ThroughputWorkload(*h, m, q, workload, b, n, o)
-			curve = append(curve, pt{B: b, Agg: pp.AggTPS, Single: pp.SingleTPS, Used: pp.Mem.P999Total, MeanUsed: pp.Mem.Total, Cap: pp.Mem.Cap, Fit: pp.Fit})
+			curve = append(curve, pt{
+				B: b, Agg: pp.AggTPS, Single: pp.SingleTPS,
+				Used: pp.Mem.P999Total, MeanUsed: pp.Mem.Total, Cap: pp.Mem.Cap, Fit: pp.Fit,
+				EstimateValid: pp.EstimateValid, Deployable: pp.Deployable,
+				Support: pp.Support, SupportReason: pp.SupportReason,
+			})
 		}
 		writeJSON(w, map[string]any{"perf": p, "curve": curve})
 	})

@@ -25,7 +25,7 @@
 
 <nav class="tabs" id="tabs">
   <button data-v="map" class="on">地图<small>MAP</small></button>
-  <button data-v="fit">能装什么<small>FEASIBILITY</small></button>
+  <button data-v="fit">能装什么<small>MEMORY FIT</small></button>
   <button data-v="perf">能跑多快<small>THROUGHPUT</small></button>
   <button data-v="rec">怎么配<small>PRESCRIBE</small></button>
   <button data-v="plan">方案库<small>PLANNER</small></button>
@@ -42,15 +42,17 @@
 <section class="view on" id="v-map">
   <div class="mapwrap">
     <div class="mapbar">
-      <div class="cs" id="map-model"></div>
-      <div class="cs" id="map-preset"></div>
+      <div><label class="lab" id="map-model-label">模型 · MODEL</label><div class="cs" id="map-model" aria-labelledby="map-model-label"></div></div>
+      <div><label class="lab" id="map-preset-label">工作负载模板 · WORKLOAD PRESET</label><div class="cs" id="map-preset" aria-labelledby="map-preset-label"></div></div>
       <label class="mapfield"><span>TPM</span><input type="number" id="map-tpm" value="6000" min="0" step="1000"></label>
       <label class="mapfield"><span>并发</span><input type="number" id="map-conc" value="16" min="1" max="256"></label>
     </div>
+    <p class="field-note" id="mapWorkloadNote"></p>
     <div class="mapgrid">
-      <div class="chart mapcard">
+      <div class="chart mapcard" id="mapScatterCard">
         <h3 id="mapScatterTitle">成本 × 单流速度</h3>
         <p id="mapScatterMeta"></p>
+        <div class="map-picks" id="mapPicks"></div>
         <div id="mapScatter"></div>
         <div class="chart-legend" id="mapScatterLegend"></div>
       </div>
@@ -61,8 +63,8 @@
         <div class="chart-legend" id="mapLandscapeLegend"></div>
       </div>
     </div>
-    <div class="chart mapcard">
-      <h3 id="mapHeatTitle">可部署矩阵</h3>
+    <div class="chart mapcard" id="mapHeatCard">
+      <h3 id="mapHeatTitle">显存适配矩阵</h3>
       <p id="mapHeatMeta"></p>
       <div class="tblwrap"><table class="tbl heat" id="mapHeat"></table></div>
       <div class="chart-legend" id="mapHeatLegend"></div>
@@ -78,7 +80,7 @@
       <div class="cs" id="f-hw"></div>
     </div>
     <div class="grp">
-      <label class="lab">数量 · CARDS <span class="mono val" id="f-n-v">1</span></label>
+      <label class="lab" for="f-n">数量 · CARDS <span class="mono val" id="f-n-v">1</span></label>
       <input type="range" id="f-n" min="1" max="8" step="1" value="1">
     </div>
     <div class="grp">
@@ -86,7 +88,7 @@
       <div class="cs" id="f-ctx"></div>
     </div>
     <div class="grp">
-      <label class="lab">并发 · BATCH <span class="mono val" id="f-b-v">8</span></label>
+      <label class="lab" for="f-b">并发 · BATCH <span class="mono val" id="f-b-v">8</span></label>
       <input type="range" id="f-b" min="1" max="128" step="1" value="8">
     </div>
     <div class="grp">
@@ -106,10 +108,11 @@
     <div class="grp">
       <label class="lab">筛选模型 · FILTER</label>
       <input type="text" id="f-q" placeholder="名字 / 机构…">
+      <label class="field-note"><input type="checkbox" id="f-only-fit"> 仅显示显存可容纳的模型</label>
     </div>
     <p class="hint">对该硬件枚举全部模型 × 量化档位。<br>
-    <i class="sq ok"></i>可部署　<i class="sq warn"></i>显存贴边　<i class="sq no"></i>装不下<br>
-    单元格数字为一阶容量估算，不是基准测试。<sup class="rep">R</sup> = 报道/推算；<sup class="rep">F</sup> = HF 自动解析。</p>
+    <i class="sq ok"></i>显存可容纳　<i class="sq warn"></i>显存贴边/有条件　<i class="sq no"></i>显存装不下<br>
+    单元格只表示显存容量，不代表可部署或性能。<sup class="rep">R</sup> = 报道/推算；<sup class="rep">F</sup> = HF 自动解析。</p>
   </aside>
   <div class="result">
     <div class="devline" id="f-devline"></div>
@@ -159,8 +162,12 @@
       <input type="number" id="rec-cards" value="1" min="1" max="8">
     </div>
     <div class="grp">
+      <label class="lab" for="rec-conc">并发 · CONCURRENCY</label>
+      <input type="number" id="rec-conc" value="16" min="1" max="256">
+    </div>
+    <div class="grp">
       <label class="lab" for="rec-tpm">目标吞吐 · TARGET TPM</label>
-      <input type="number" id="rec-tpm" value="6000" min="60" step="100">
+      <input type="number" id="rec-tpm" value="6000" min="0" step="100">
     </div>
     <div class="grp">
       <label class="lab" for="rec-tos">单流下限 · MIN TOS</label>
@@ -190,11 +197,11 @@
       </div>
     </div>
     <details class="grp advanced">
-      <summary>高级参数 · CALIBRATION <span>0 = 自动/解析值</span></summary>
+      <summary>高级参数 · SCENARIO <span>0 = 自动/解析值</span></summary>
       <div class="cgrid advgrid" id="rec-advanced"></div>
-      <p class="hint">校准值应用于所有候选；只在同一部署栈、模型和负载口径下填写。</p>
+      <p class="hint">场景值应用于所有候选；结果仍是 what-if 估算，不代表实测校准。</p>
     </details>
-    <p class="hint">推荐完全来自确定性规则：兼容性、显存、roofline、目标取舍与 Pareto 排序；不调用 AI。处方会给出硬件、量化、框架、并发和分桶建议，并用完整计算账本解释原因。</p>
+    <p class="hint">推荐来自确定性规则，但仅返回受支持或明确标为「有条件」的候选；有条件候选未确认可部署。处方会显示接口返回的支持依据。</p>
   </aside>
   <div class="result">
     <div class="devline" id="rec-line"></div>
@@ -214,7 +221,7 @@
       <div class="cs" id="p-hw"></div>
     </div>
     <div class="grp">
-      <label class="lab">数量 · CARDS <span class="lab-meta"><span class="sym">N<sub>GPU</sub></span><span class="mono val" id="p-n-v">4</span></span></label>
+      <label class="lab" for="p-n">数量 · CARDS <span class="lab-meta"><span class="sym">N<sub>GPU</sub></span><span class="mono val" id="p-n-v">4</span></span></label>
       <input type="range" id="p-n" min="1" max="8" step="1" value="4">
     </div>
     <div class="grp">
@@ -231,8 +238,8 @@
       <div class="workload-editor" id="p-workload"></div>
     </div>
     <div class="grp">
-      <label class="lab">并发 · BATCH <span class="lab-meta"><span class="sym">B</span><span class="mono val" id="p-b-v">4</span></span></label>
-      <input type="range" id="p-b" min="1" max="128" step="1" value="4">
+      <label class="lab" for="p-b">并发 · BATCH <span class="lab-meta"><span class="sym">B</span><span class="mono val" id="p-b-v">4</span></span></label>
+      <input type="range" id="p-b" min="1" max="256" step="1" value="4">
     </div>
     <div class="grp">
       <label class="lab">推理框架 · ENGINE</label>
@@ -249,20 +256,21 @@
       </div>
     </div>
     <details class="grp advanced">
-      <summary>高级参数 · CALIBRATION <span>0 = 自动/解析值</span></summary>
+      <summary>高级参数 · SCENARIO <span>0 = 自动/解析值</span></summary>
       <div class="cgrid advgrid" id="p-advanced"></div>
-      <p class="hint">带宽、算力、调度（多卡另含互联）均填写同口径实测值后标记 calibrated；否则是无统计置信区间的 analytical roofline。</p>
+      <p class="hint">用户输入会形成 what-if 场景，不是实测校准、置信区间或基准验证。</p>
     </details>
   </aside>
   <div class="result">
+    <div class="detail-callout" id="perfVerdict" role="status"></div>
     <div class="hero" id="perfHero"></div>
-    <div class="seclab">计算路径 · COMPUTATION PIPELINE<span>参数 → 容量 → roofline → 时延 → 吞吐</span></div>
+    <div class="seclab">计算路径 · COMPUTATION PIPELINE<span>支持 → 显存 → 场景性能</span></div>
     <div class="method-flow" id="perfFlow"></div>
-    <div class="seclab">分桶结果 · WORKLOAD BUCKETS<span>请求到达占比 ≠ 并发驻留占比</span></div>
+    <div class="seclab">分桶结果 · WORKLOAD BUCKETS<span>完整响应 E2E/P95；请求到达占比 ≠ 并发驻留占比</span></div>
     <div class="workload-results" id="perfBuckets"></div>
     <div class="seclab">显存分解 · MEMORY BREAKDOWN<span id="perfFitState"></span></div>
     <div id="vramBar"></div>
-    <div class="seclab">部署仿真 · CONCURRENCY SWEEP<span>同一公式逐点重算</span></div>
+    <div class="seclab">场景扫描 · CONCURRENCY SWEEP<span>无效性能会隐藏速度曲线</span></div>
     <div id="curveBox"></div>
     <div class="seclab">计算过程 · FORMULA TRACE</div>
     <div class="trace" id="perfTrace"></div>
@@ -312,7 +320,7 @@
     </div>
     <div class="grp">
       <label class="lab" for="pl-tpm">目标吞吐 · TARGET TPM <span class="dim2">输入+输出合计 tok/min</span></label>
-      <input type="number" id="pl-tpm" value="6000" min="60" step="100">
+      <input type="number" id="pl-tpm" value="6000" min="0" step="100">
     </div>
     <div class="grp">
       <label class="lab" for="pl-tos">单流下限 · MIN TOS <span class="dim2">tok/s · 0=不限</span></label>
@@ -321,7 +329,7 @@
     <div class="grp">
       <label class="lab">优化目标 · OBJECTIVE</label>
       <div class="seg seg3" id="pl-obj">
-        <button data-v="cost" class="on">最低成本</button><button data-v="latency">最低时延</button><button data-v="avail">最高可用</button>
+        <button data-v="cost" class="on">最低成本</button><button data-v="latency">最低完整响应 P95</button><button data-v="avail">最高可用</button>
       </div>
     </div>
     <div class="grp">
@@ -334,7 +342,7 @@
       <div class="workload-editor" id="pl-workload"></div>
     </div>
     <div class="grp">
-      <label class="lab">并发 · CONCURRENCY <span class="mono val" id="pl-c-v">16</span></label>
+      <label class="lab" for="pl-c">并发 · CONCURRENCY <span class="mono val" id="pl-c-v">16</span></label>
       <input type="range" id="pl-c" min="1" max="128" step="1" value="16">
     </div>
     <div class="grp">
@@ -361,14 +369,14 @@
       </div>
     </div>
     <details class="grp advanced">
-      <summary>高级参数 · CALIBRATION <span>0 = 自动/解析值</span></summary>
+      <summary>高级参数 · SCENARIO <span>0 = 自动/解析值</span></summary>
       <div class="cgrid advgrid" id="pl-advanced"></div>
-      <p class="hint">校准值应用于所有候选硬件；只在同一部署栈、模型和负载口径下填写。</p>
+      <p class="hint">场景值应用于所有候选硬件；结果仍是 what-if 估算，不代表实测校准。</p>
     </details>
-    <p class="hint">枚举硬件 × 数量 × 量化 × 副本数；结果是静态容量筛选，不替代生产压测。<br>
-    TPM 按原始输入+输出计数；前缀命中减少 prefill，并按共享 block 计算 KV 驻留。推测解码必须用匹配模型/负载的接受率校准。<br>
-    成本仅含参考采购价的 36 月摊销与假设电费（0.8 元/kWh、60% 负载），不含主机、网络、制冷、PUE、运维和实际利用率。<br>
-    开启排队后显示 M/M/c 的目标利用率及平均/p95 等待；其泊松到达、指数服务、独立副本假设不等于生产 SLA。</p>
+    <p class="hint">只列受支持候选与明确标为「有条件」的候选；有条件候选未确认可部署。显存适配不等于可部署。<br>
+    TPM 按原始输入+输出计数；推测解码参数须匹配模型与负载，结果仍是场景估算。<br>
+    成本使用未核价参考采购价的 36 月摊销与假设电费（0.8 元/kWh、60% 负载），不含主机、网络、制冷、PUE、运维和实际利用率；采购前须询价。<br>
+    排队使用简化 M/M/c 假设，不代表生产 SLA 或尾延迟保证。</p>
   </aside>
   <div class="result">
     <div class="devline" id="pl-line"></div>
@@ -393,13 +401,14 @@
       <div>
         <div class="eyebrow">CATALOG · 可筛选</div>
         <h2>推理硬件库</h2>
-        <p>对比显存、带宽、互联、低精度路径与参考价格，快速缩小部署候选范围。</p>
+        <p>对比显存、带宽、互联、标注精度与未核价参考价格；峰值类型和整柜聚合记录会单独提示。</p>
       </div>
     </div>
     <div class="filterbar">
       <input type="text" id="hw-q" placeholder="筛选型号…">
       <div class="cs cs-inline" id="hw-vendor"></div>
     </div>
+    <div class="glossary-meta" id="hw-meta" role="status"></div>
     <div class="tblwrap"><table class="tbl" id="hwTable"></table></div>
   </div>
 </section>
@@ -427,12 +436,12 @@
   <div class="result wide">
     <div class="library-head">
       <div>
-        <div class="eyebrow">DEPLOYMENT REFERENCE</div>
+        <div class="eyebrow">CAPACITY REFERENCE</div>
         <h2>单卡容量速查</h2>
-        <p>按相同预留口径快速比较不同硬件的大致模型容量上限。</p>
+        <p id="quickIntro"></p>
       </div>
     </div>
-    <div class="devline">每张卡「能扛的最大模型参数量」速查 —— 已扣除框架底座与系统预留，按 8K 上下文估算，实际以模式一为准。</div>
+    <div class="devline" id="quickBasis"></div>
     <div class="tblwrap"><table class="tbl" id="quickTable"></table></div>
   </div>
 </section>
@@ -467,7 +476,7 @@
 </div>
 
 <footer>
-  <span>一阶 roofline 与静态容量仿真；未建模 continuous batching 轨迹、kernel fusion、分层网络拥塞、cache 驱逐和生产尾延迟分布。采购或 SLA 前必须按目标 checkpoint、引擎和真实流量校准。</span>
+  <span>一阶 roofline 与静态容量仿真；场景值不是实测校准、置信区间或基准验证。采购或 SLA 前须对目标 checkpoint、引擎版本、kernel 与真实流量做外部基准测试。</span>
   <span class="mono" id="footMeta"></span>
 </footer>
 

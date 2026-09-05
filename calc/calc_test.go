@@ -8,24 +8,28 @@ import (
 )
 
 func hw(id string, vram, bw float64) HW {
-	return HW{ID: id, Name: id, VRAM: vram, BW: bw, TF: 300, Prec: []string{"fp16", "bf16", "fp8", "int8"}}
+	h := HW{ID: id, Name: id, Vendor: "nvidia", Arch: "ampere", VRAM: vram, BW: bw, TF: 300, Prec: []string{"fp16", "bf16", "int8"}, Link: Link{T: "nvlink", B: 600, Dom: 8}, PeakKind: "dense_matrix", SourceURL: "https://example.test/spec"}
+	if id == "mi300x" {
+		h.Vendor, h.Arch, h.Prec, h.Link = "amd", "cdna3", []string{"fp16", "bf16", "fp8", "int8"}, Link{T: "infinity-fabric", B: 896, Dom: 8}
+	}
+	return h
 }
 func singleWorkload(ctx, output int) []WorkloadBucket {
 	return []WorkloadBucket{{Context: ctx, Output: output, Share: 1}}
 }
 
 var (
-	hw4090  = HW{ID: "rtx4090", Vendor: "nvidia", VRAM: 24, BW: 1008, TF: 330, Prec: []string{"fp16", "bf16", "fp8", "int8"}}
-	h100    = HW{ID: "h100", Vendor: "nvidia", Arch: "hopper", VRAM: 80, BW: 3350, TF: 989, Prec: []string{"fp16", "bf16", "fp8", "int8"}}
-	h200    = HW{ID: "h200", Vendor: "nvidia", Arch: "hopper", VRAM: 141, BW: 4800, TF: 989, Prec: []string{"fp16", "bf16", "fp8", "int8"}, Link: Link{T: "nvlink", B: 900, Dom: 8}}
-	m3ultra = HW{ID: "m3u", Vendor: "apple", Arch: "apple-m3", VRAM: 512, BW: 819, TF: 68, Prec: []string{"fp16", "bf16"}, Unified: true}
+	hw4090  = HW{ID: "rtx4090", Vendor: "nvidia", Arch: "ada", VRAM: 24, BW: 1008, TF: 330, Prec: []string{"fp16", "bf16", "fp8", "int8"}, Link: Link{T: "pcie", B: 32, Dom: 2}, PeakKind: "dense_matrix", SourceURL: "https://example.test/spec"}
+	h100    = HW{ID: "h100", Vendor: "nvidia", Arch: "hopper", VRAM: 80, BW: 3350, TF: 989, Prec: []string{"fp16", "bf16", "fp8", "int8"}, PeakKind: "dense_matrix", SourceURL: "https://example.test/spec"}
+	h200    = HW{ID: "h200", Vendor: "nvidia", Arch: "hopper", VRAM: 141, BW: 4800, TF: 989, Prec: []string{"fp16", "bf16", "fp8", "int8"}, Link: Link{T: "nvlink", B: 900, Dom: 8}, PeakKind: "dense_matrix", SourceURL: "https://example.test/spec"}
+	m3ultra = HW{ID: "m3u", Vendor: "apple", Arch: "apple-m3", VRAM: 512, BW: 819, TF: 68, Prec: []string{"fp16", "bf16"}, Unified: true, PeakKind: "dense_matrix", SourceURL: "https://example.test/spec"}
 )
 
 var (
-	qwen7b  = Model{ID: "qwen2.5-7b", Params: 7.6, Active: 7.6, Layers: 28, Hidden: 3584, KVT: "gqa", KVH: 4, Dim: 128}
-	llama8b = Model{ID: "llama-3.1-8b", Params: 8, Active: 8, Layers: 32, Hidden: 4096, KVT: "gqa", KVH: 8, Dim: 128, Ctx: 131072}
-	llama70 = Model{ID: "llama-3.1-70b", Params: 70, Active: 70, Layers: 80, Hidden: 8192, KVT: "gqa", KVH: 8, Dim: 128}
-	r1      = Model{ID: "deepseek-r1", Params: 671, Active: 37, Layers: 61, Hidden: 7168, KVT: "mla", MLA: 576, MoE: true, Experts: 256, TopK: 8, MTP: true}
+	qwen7b  = Model{ID: "qwen2.5-7b", Params: 7.6, Active: 7.6, Layers: 28, Hidden: 3584, Heads: 28, KVT: "gqa", KVH: 4, Dim: 128, Ctx: 32768, ExtendedCtx: 1048576, ModelType: "qwen2", Architecture: "Qwen2ForCausalLM", ParamSource: "config", Revision: "test"}
+	llama8b = Model{ID: "llama-3.1-8b", Params: 8, Active: 8, Layers: 32, Hidden: 4096, Heads: 32, KVT: "gqa", KVH: 8, Dim: 128, Ctx: 131072, ExtendedCtx: 262144, ModelType: "llama", Architecture: "LlamaForCausalLM", ParamSource: "config", Revision: "test"}
+	llama70 = Model{ID: "llama-3.1-70b", Params: 70, Active: 70, Layers: 80, Hidden: 8192, Heads: 64, KVT: "gqa", KVH: 8, Dim: 128, Ctx: 131072, ExtendedCtx: 1048576, ModelType: "llama", Architecture: "LlamaForCausalLM", ParamSource: "config", Revision: "test"}
+	r1      = Model{ID: "deepseek-r1", Params: 671, Active: 37, Layers: 61, Hidden: 7168, Heads: 128, KVT: "mla", MLA: 576, MoE: true, Experts: 256, TopK: 8, MTP: true, Ctx: 163840, ExtendedCtx: 1048576, ModelType: "deepseek_v3", Architecture: "DeepseekV3ForCausalLM", ParamSource: "config", Revision: "test"}
 )
 
 func inRange(t *testing.T, name string, v, lo, hi float64) {
@@ -76,7 +80,7 @@ func TestMemoryFeasibility(t *testing.T) {
 	if !edge.Fit || edge.HeadPct > 0.10 {
 		t.Errorf("70B INT4 / 2×4090 应为贴边可行，得 fit=%v head=%.1f%%", edge.Fit, edge.HeadPct*100)
 	}
-	if got := FitMatrix(hw4090, []Model{llama70}, 2, 4096, 1, Opts{})[0].Cells[2].Fit; got != 1 {
+	if got := FitMatrix(hw4090, []Model{llama70}, 2, singleWorkload(4096, 512), 1, Opts{})[0].Cells[2].Fit; got != 1 {
 		t.Errorf("70B INT4 / 2×4090 应显示警告态，得 %d", got)
 	}
 	if !Memory(hw4090, llama70, QuantByID("exl3"), 4096, 1, 2, Opts{Engine: "exllama"}).Fit {
@@ -103,7 +107,7 @@ func TestKVTok(t *testing.T) {
 }
 
 func TestSlidingWindowKV(t *testing.T) {
-	m := Model{Params: 0.001, Active: 0.001, Layers: 6, Hidden: 2048, KVT: "gqa", KVH: 8, Dim: 128, LocalLayers: 5, Window: 1024}
+	m := Model{Params: 0.001, Active: 0.001, Layers: 6, Hidden: 2048, KVT: "gqa", KVH: 8, Dim: 128, LocalLayers: 5, Window: 1024, Ctx: 8192, ParamSource: "user-supplied", Revision: "test"}
 	wantTokens := 8192 + 5*1024
 	want := float64(wantTokens) * m.kvLayerBytes()
 	if got := m.KVBytes(8192); got != want {
@@ -142,17 +146,16 @@ func TestPlanner(t *testing.T) {
 	if len(q) == 0 {
 		t.Fatal("排队模式应有方案")
 	}
-	// 时延目标应按 TTFT+TPOT 升序
+	// 时延目标应按端到端请求 P95 升序
 	l := Planner(hws, r1, PlanOpts{TargetTPM: 6000, Objective: "latency"}, singleWorkload(8192, 512), 16, Opts{})
 	for i := 1; i < len(l); i++ {
-		li, lj := l[i].TTFTms+l[i].TPOTms, l[i-1].TTFTms+l[i-1].TPOTms
-		if li < lj {
-			t.Error("latency 目标下方案应按时延升序")
+		if l[i].ReqP95ms < l[i-1].ReqP95ms {
+			t.Error("latency 目标下方案应按端到端请求 P95 升序")
 		}
 	}
 }
 
-// 备选列表按（硬件×卡数）去重，不出现同卡变体重复行，条数上限 200
+// 备选列表只去除完全重复的部署配置，条数上限 200。
 func TestPlannerDedup(t *testing.T) {
 	hws := []HW{hw4090, h200, b200, hw("a100", 80, 2039), hw("mi300x", 192, 5300)}
 	for _, obj := range []string{"", "cost", "latency", "avail"} {
@@ -165,9 +168,10 @@ func TestPlannerDedup(t *testing.T) {
 		}
 		seen := map[string]bool{}
 		for _, p := range plans {
-			key := fmt.Sprintf("%s|%d", p.HW.ID, p.N)
+			key := fmt.Sprintf("%s|%s|%s|%s|%d|%d|%d|%s",
+				p.HW.ID, p.Quant, p.EngName, p.SpecName, p.N, p.Replicas, p.MaxConc, p.Topology)
 			if seen[key] {
-				t.Errorf("objective=%q 出现重复组合 %s（量化 %s）", obj, key, p.Quant)
+				t.Errorf("objective=%q 出现完全重复的部署配置 %s", obj, key)
 			}
 			seen[key] = true
 		}
@@ -177,7 +181,7 @@ func TestPlannerDedup(t *testing.T) {
 // ---------- 推理栈干涉因子 ----------
 
 var b200 = HW{ID: "b200", Vendor: "nvidia", Arch: "blackwell", VRAM: 192, BW: 8000, TF: 2250, TF8: 4500, TF4: 9000,
-	Prec: []string{"fp16", "bf16", "fp8", "fp4"}, Link: Link{T: "nvlink", B: 1800, Dom: 8}}
+	Prec: []string{"fp16", "bf16", "fp8", "fp4"}, Link: Link{T: "nvlink", B: 1800, Dom: 8}, PeakKind: "dense_matrix", SourceURL: "https://example.test/spec"}
 
 // 零值 Opts 必须与显式 vLLM+关闭推测 完全一致（默认等价性）
 func TestDefaultEquivalence(t *testing.T) {
@@ -228,8 +232,8 @@ func TestKVQuant(t *testing.T) {
 	if p8.AggTPS <= p0.AggTPS || !p8.KVSupported {
 		t.Errorf("受支持 FP8 KV 应降低读取量: %.1f vs %.1f", p8.AggTPS, p0.AggTPS)
 	}
-	if p4.AggTPS != p0.AggTPS || p4.KVSupported {
-		t.Errorf("不支持的 FP4 KV 不得改变结果: %.1f vs %.1f", p4.AggTPS, p0.AggTPS)
+	if p4.EstimateValid || p4.AggTPS != 0 || p4.KVSupported {
+		t.Errorf("不支持的 FP4 KV 不得输出性能估算: %+v", p4)
 	}
 	s0 := Throughput(b200, llama70, QuantByID("int4"), 32768, 8, 1, Opts{Engine: "sglang"})
 	s4 := Throughput(b200, llama70, QuantByID("int4"), 32768, 8, 1, Opts{Engine: "sglang", KVQuant: "fp4"})
@@ -240,7 +244,7 @@ func TestKVQuant(t *testing.T) {
 
 // 前缀缓存仍须让新 query 读取并关注缓存 prefix，attention 不能按未命中比例线性缩放。
 func TestPrefixHit(t *testing.T) {
-	attn := Model{Params: 0.001, Active: 0.001, Layers: 80, Hidden: 8192, KVT: "gqa", KVH: 8, Dim: 128}
+	attn := Model{Params: 0.001, Active: 0.001, Layers: 80, Hidden: 8192, KVT: "gqa", KVH: 8, Dim: 128, Ctx: 8192, ParamSource: "user-supplied", Revision: "test"}
 	p0 := Throughput(h100, attn, QuantByID("fp16"), 8192, 1, 1, Opts{})
 	p8 := Throughput(h100, attn, QuantByID("fp16"), 8192, 1, 1, Opts{HitRate: 0.8})
 	ratio := p8.TTFTms / p0.TTFTms
@@ -327,8 +331,9 @@ func TestLongCtxQuadratic(t *testing.T) {
 
 // DSA 稀疏注意力：长上下文 decode/prefill 双受益，KV 存储不变
 func TestSparseAttention(t *testing.T) {
-	v32 := Model{ID: "ds-v32", Params: 671, Active: 37, Layers: 61, Hidden: 7168, KVT: "mla", MLA: 576, MoE: true, Sparse: 2048, Ctx: 163840}
-	v31 := Model{ID: "ds-v31", Params: 671, Active: 37, Layers: 61, Hidden: 7168, KVT: "mla", MLA: 576, MoE: true, Ctx: 163840}
+	v31 := r1
+	v32 := v31
+	v32.Sparse = 2048
 	d := Throughput(h200, v32, QuantByID("fp8"), 131072, 8, 8, Opts{})
 	n := Throughput(h200, v31, QuantByID("fp8"), 131072, 8, 8, Opts{})
 	if d.TTFTms >= n.TTFTms {
@@ -339,37 +344,6 @@ func TestSparseAttention(t *testing.T) {
 	}
 	if d.Mem.KV != n.Mem.KV {
 		t.Errorf("DSA 不应改变 KV 存储: %.1f vs %.1f", d.Mem.KV, n.Mem.KV)
-	}
-}
-
-// YaRN 警告：超原生上下文时 trace 应有外推提示
-func TestYarnWarn(t *testing.T) {
-	p := Throughput(h100, llama8b, QuantByID("fp16"), 262144, 1, 1, Opts{Lang: "zh"})
-	found := false
-	for _, r := range p.Trace {
-		if r.K == "⚠ 上下文外推" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("256K 超原生 128K 应有 YaRN 警告")
-	}
-}
-
-func TestLocalizedPresentation(t *testing.T) {
-	en := Throughput(h100, llama8b, QuantByID("fp16"), 4096, 1, 1, Opts{})
-	zh := Throughput(h100, llama8b, QuantByID("fp16"), 4096, 1, 1, Opts{Lang: "zh"})
-	if en.Trace[0].K != "Estimate status" {
-		t.Fatalf("default locale should be English, got %q", en.Trace[0].K)
-	}
-	if zh.Trace[0].K != "估算级别" {
-		t.Fatalf("Chinese locale not applied, got %q", zh.Trace[0].K)
-	}
-	if got := strategy(h100, 1, ""); got != "Single card / host" {
-		t.Fatalf("default strategy locale should be English, got %q", got)
-	}
-	if got := strategy(h100, 1, "zh"); got != "单卡 / 单机" {
-		t.Fatalf("Chinese strategy locale not applied, got %q", got)
 	}
 }
 
@@ -393,23 +367,15 @@ func TestQuantComputePath(t *testing.T) {
 	}
 }
 
-// GGUF/MLX 量化与非匹配框架组合时 trace 应有警告
+// GGUF/MLX 量化与引擎组合必须暴露明确的支持状态。
 func TestQuantEngineMismatch(t *testing.T) {
 	p := Throughput(h100, llama8b, QuantByID("q4km"), 4096, 1, 1, Opts{Engine: "vllm", Lang: "zh"})
-	found := false
-	for _, r := range p.Trace {
-		if r.K == "量化路径" && strings.HasPrefix(r.N, "⚠ GGUF") {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("GGUF×vLLM 应有错配警告")
+	if !p.EstimateValid || p.Support != "conditional" || p.SingleTPS <= 0 {
+		t.Errorf("GGUF×vLLM 只能作为有警告的版本相关场景: %+v", p)
 	}
 	p2 := Throughput(m3ultra, llama8b, QuantByID("mlx4"), 4096, 1, 1, Opts{Engine: "mlx", Lang: "zh"})
-	for _, r := range p2.Trace {
-		if r.K == "量化路径" && strings.HasPrefix(r.N, "⚠") {
-			t.Error("MLX×MLX 不应有警告")
-		}
+	if !p2.EstimateValid || p2.Support != "supported" {
+		t.Errorf("MLX×Apple 应为支持路径: %+v", p2)
 	}
 }
 
@@ -418,7 +384,7 @@ func TestMainQuants(t *testing.T) {
 	if n := len(MainQuants()); n != 6 {
 		t.Errorf("fit 矩阵应为 6 列，得 %d", n)
 	}
-	rows := FitMatrix(h100, []Model{llama8b}, 1, 4096, 1, Opts{})
+	rows := FitMatrix(h100, []Model{llama8b}, 1, singleWorkload(4096, 512), 1, Opts{})
 	if len(rows[0].Cells) != 6 {
 		t.Errorf("fit 行应有 6 个单元格，得 %d", len(rows[0].Cells))
 	}
@@ -471,7 +437,7 @@ func TestKVTPReplication(t *testing.T) {
 }
 
 func TestHybridStateMemory(t *testing.T) {
-	m := Model{Params: 35, Active: 3, Layers: 40, Hidden: 2048, KVT: "gqa", KVH: 2, Dim: 256, KVLayers: 10, StateMB: 32}
+	m := Model{Params: 35, Active: 3, Layers: 40, Hidden: 2048, KVT: "gqa", KVH: 2, Dim: 256, KVLayers: 10, StateMB: 32, Ctx: 8192, ParamSource: "user-supplied", Revision: "test"}
 	with := Memory(h100, m, QuantByID("fp8"), 8192, 2, 2, Opts{})
 	m.StateMB = 0
 	without := Memory(h100, m, QuantByID("fp8"), 8192, 2, 2, Opts{})
@@ -499,8 +465,8 @@ func TestMTPRequiresMetadataAndCalibration(t *testing.T) {
 }
 
 func TestDecodeComputeRoof(t *testing.T) {
-	m := Model{Params: 70, Active: 70, Layers: 80, Hidden: 8192, KVT: "gqa", KVH: 8, Dim: 128}
-	slow := HW{VRAM: 1e6, BW: 1e9, TF: 1, Prec: []string{"fp16"}}
+	m := Model{Params: 70, Active: 70, Layers: 80, Hidden: 8192, Heads: 64, KVT: "gqa", KVH: 8, Dim: 128, Ctx: 8192, ParamSource: "user-supplied", Revision: "test"}
+	slow := HW{ID: "slow", Vendor: "nvidia", Arch: "hopper", VRAM: 1e6, BW: 1e9, TF: 1, Prec: []string{"fp16"}, PeakKind: "dense_matrix", SourceURL: "https://example.test/spec"}
 	fast := slow
 	fast.TF = 100
 	a := Throughput(slow, m, QuantByID("fp16"), 4096, 64, 1, Opts{})
@@ -556,7 +522,7 @@ func TestNativeCheckpointLocksWeightQuantization(t *testing.T) {
 	if p.QuantID != "fp8" || !p.QuantLocked || p.Mem.Weights != 9.5 {
 		t.Fatalf("预量化 checkpoint 未锁定原生格式: %+v", p)
 	}
-	rows := FitMatrix(h100, []Model{m}, 1, 4096, 1, Opts{})
+	rows := FitMatrix(h100, []Model{m}, 1, singleWorkload(4096, 512), 1, Opts{})
 	applicable := 0
 	for _, cell := range rows[0].Cells {
 		if cell.Applicable {
@@ -616,27 +582,27 @@ func TestParallelTopologyContracts(t *testing.T) {
 		t.Errorf("EP 应分片专家权重并产生 All-to-All: ep=%+v one=%+v", ep, one)
 	}
 	cp := Throughput(h200, llama70, QuantByID("int4"), 32768, 4, 4, Opts{TP: 1, CP: 4})
-	single := Memory(h200, llama70, QuantByID("int4"), 32768, 4, 1, Opts{TP: 1})
-	if !cp.TopologyOK || cp.CommMs <= 0 || cp.Mem.KV >= single.KV/3 {
-		t.Errorf("CP4 应把 KV 约分成四份并产生通信: cp=%+v singleKV=%.2f", cp, single.KV)
+	if cp.EstimateValid || cp.Support != "unsupported" || cp.SingleTPS != 0 || cp.Topology != "TP1 · PP1 · EP1 · CP4" {
+		t.Errorf("vLLM CP 尚未建模，不得输出性能或回退拓扑: %+v", cp)
 	}
 	pp := Memory(h200, llama70, QuantByID("int4"), 8192, 1, 4, Opts{TP: 1, PP: 4})
+	single := Memory(h200, llama70, QuantByID("int4"), 32768, 4, 1, Opts{TP: 1})
 	if pp.Weights >= single.Weights/3 {
 		t.Errorf("PP4 应按 stage 分片文本权重: %.2f vs %.2f", pp.Weights, single.Weights)
 	}
 	bad := Throughput(h200, llama70, QuantByID("int4"), 8192, 1, 8, Opts{EP: 8})
-	if bad.TopologyOK || bad.Topology != "TP8 · PP1 · EP1 · CP1" {
-		t.Errorf("Dense EP 必须标记无效并回退全 TP: %+v", bad)
+	if bad.TopologyOK || bad.EstimateValid || bad.SingleTPS != 0 || bad.Topology != "TP1 · PP1 · EP8 · CP1" {
+		t.Errorf("Dense EP 必须保留请求拓扑并拒绝估算: %+v", bad)
 	}
 }
 
 func TestOffloadChunkCalibrationAndEncoder(t *testing.T) {
 	base := Throughput(h200, llama70, QuantByID("int4"), 32768, 8, 1, Opts{})
 	off := Throughput(h200, llama70, QuantByID("int4"), 32768, 8, 1, Opts{KVOffload: 0.75, OffloadBW: 25})
-	if off.Mem.KV >= base.Mem.KV || off.Mem.OffloadedKV <= 0 || off.OffloadMs <= 0 || off.SingleTPS >= base.SingleTPS {
+	if off.Accuracy != "scenario" || off.Mem.KV >= base.Mem.KV || off.Mem.OffloadedKV <= 0 || off.OffloadMs <= 0 || off.SingleTPS >= base.SingleTPS {
 		t.Errorf("KV offload 应以时延换显存: base=%+v off=%+v", base, off)
 	}
-	chunkModel := Model{Params: 100, Active: 1, MoE: true, Layers: 24, Hidden: 2048, KVT: "gqa", KVH: 4, Dim: 128}
+	chunkModel := Model{Params: 100, Active: 1, MoE: true, Layers: 24, Hidden: 2048, KVT: "gqa", KVH: 4, Dim: 128, Ctx: 8192, ParamSource: "user-supplied", Revision: "test"}
 	whole := Throughput(h100, chunkModel, QuantByID("fp16"), 8192, 1, 1, Opts{PrefillChunk: 8192})
 	chunk := Throughput(h100, chunkModel, QuantByID("fp16"), 8192, 1, 1, Opts{PrefillChunk: 512})
 	if chunk.TTFTms <= whole.TTFTms {
@@ -645,15 +611,19 @@ func TestOffloadChunkCalibrationAndEncoder(t *testing.T) {
 	uncal := Throughput(h100, llama8b, QuantByID("fp16"), 8192, 1, 1, Opts{})
 	cal := Throughput(h100, llama8b, QuantByID("fp16"), 8192, 1, 1,
 		Opts{BWUtil: 0.3, FlopsUtil: 0.2, ScheduleMS: 2})
-	if cal.Accuracy != "calibrated" || cal.SingleTPS == uncal.SingleTPS {
-		t.Errorf("完整单卡校准输入应改变输出并标记 calibrated: %+v", cal)
+	if cal.Accuracy != "scenario" || cal.SingleTPS == uncal.SingleTPS {
+		t.Errorf("完整用户系数应改变输出并标记 scenario: %+v", cal)
 	}
 	mm := llama8b
 	mm.Params, mm.Active, mm.EncoderParams, mm.Multimodal = 10, 8, 2, true
 	text := Throughput(h100, mm, QuantByID("fp16"), 8192, 1, 1, Opts{})
 	media := Throughput(h100, mm, QuantByID("fp16"), 8192, 1, 1, Opts{MediaTokens: 576})
-	if media.EncoderMs <= 0 || media.TTFTms <= text.TTFTms {
+	if media.Accuracy != "scenario" || media.EncoderMs <= 0 || media.TTFTms <= text.TTFTms {
 		t.Errorf("媒体 encoder 应增加 TTFT: text=%+v media=%+v", text, media)
+	}
+	override := Throughput(h100, llama8b, QuantByID("fp16"), 8192, 1, 1, Opts{WeightGB: 20})
+	if override.Accuracy != "scenario" {
+		t.Errorf("user-supplied memory inputs must be labeled scenario: %+v", override)
 	}
 }
 
@@ -701,6 +671,9 @@ func TestThroughputWorkloadLongTailReweightsOccupancy(t *testing.T) {
 		{Context: 1048576, Output: 512, Share: 0.001},
 	}
 	p := ThroughputWorkload(h200, qwen7b, QuantByID("fp16"), workload, 4, 1, Opts{})
+	if !p.EstimateValid {
+		t.Fatalf("verified long-context tail should remain estimable: %+v", p)
+	}
 	if p.Workload == nil {
 		t.Fatal("长尾工作负载缺少统计")
 	}
@@ -719,6 +692,49 @@ func TestThroughputWorkloadLongTailReweightsOccupancy(t *testing.T) {
 		t.Errorf("长尾必须抬高显存保护值和尾延迟: mean/p999 mem %.1f/%.1f mean/p99 req %.1f/%.1f",
 			p.Mem.Total, p.Mem.P999Total, p.ReqMs, p.Workload.P99ReqMs)
 	}
+}
+
+func TestDecisionConstraints(t *testing.T) {
+	t.Run("queue preserves single stream floor", func(t *testing.T) {
+		plans := Planner([]HW{h200}, llama8b,
+			PlanOpts{TargetTPM: 6000, MinTOS: 66.6, Queue: true, MaxQ: 64, QuantOnly: "fp16"},
+			singleWorkload(8192, 256), 4, Opts{})
+		if len(plans) == 0 {
+			t.Fatal("queueing must retain the feasible base concurrency")
+		}
+		for _, p := range plans {
+			if p.P95SingleTPS < 66.6 {
+				t.Fatalf("queueing violated the single-stream floor: %+v", p)
+			}
+		}
+	})
+	t.Run("unknown price cannot win cost objective", func(t *testing.T) {
+		items := []Prescription{{Plan: Plan{HW: h100}}, {Plan: Plan{HW: h200}}}
+		rankPrescriptions(items, []string{"cost"})
+		for _, p := range items {
+			if p.Score != 0 || p.ObjectiveWins != 0 {
+				t.Fatalf("missing prices must not earn cost points: %+v", p)
+			}
+		}
+	})
+	t.Run("fit rejects an incompatible engine", func(t *testing.T) {
+		rows := FitMatrix(m3ultra, []Model{llama8b}, 1, singleWorkload(4096, 512), 1, Opts{Engine: "vllm"})
+		for _, cell := range rows[0].Cells {
+			if cell.Fit != 0 || cell.TPS != 0 {
+				t.Fatalf("an unsupported engine must not look deployable: %+v", cell)
+			}
+		}
+	})
+	t.Run("fit retains rare memory-heavy requests", func(t *testing.T) {
+		mean := FitMatrix(hw4090, []Model{llama8b}, 1, singleWorkload(5140, 512), 1, Opts{})
+		tail := FitMatrix(hw4090, []Model{llama8b}, 1, []WorkloadBucket{
+			{Context: 4096, Output: 512, Share: .999},
+			{Context: 1048576, Output: 512, Share: .001},
+		}, 1, Opts{})
+		if mean[0].Cells[0].Fit == 0 || tail[0].Cells[0].Fit != 0 {
+			t.Fatal("averaging away a rare over-budget request must change the fit verdict")
+		}
+	})
 }
 
 func TestPlannerUsesWorkloadDistribution(t *testing.T) {
@@ -750,9 +766,10 @@ func TestWorkloadPercentilesUseTheirOwnMetric(t *testing.T) {
 	}
 	mixed := ThroughputWorkload(h100, llama8b, QuantByID("fp16"), workload, 4, 1, Opts{})
 	longContext := Throughput(h100, llama8b, QuantByID("fp16"), 32768, 4, 1, Opts{OutLen: 1})
+	normalDecode := Throughput(h100, llama8b, QuantByID("fp16"), 4096, 4, 1, Opts{OutLen: 512})
 	longOutput := Throughput(h100, llama8b, QuantByID("fp16"), 512, 4, 1, Opts{OutLen: 8192})
-	if mixed.Workload.P95SingleTPS != longContext.SingleTPS {
-		t.Errorf("95%% 请求吞吐下限应使用 TPS 的 P05: got %.1f want %.1f", mixed.Workload.P95SingleTPS, longContext.SingleTPS)
+	if mixed.Workload.P95SingleTPS != normalDecode.SingleTPS {
+		t.Errorf("decode TPS 下限应排除没有后续 decode 的请求: got %.1f want %.1f", mixed.Workload.P95SingleTPS, normalDecode.SingleTPS)
 	}
 	if mixed.Workload.P95TTFTms != longContext.TTFTms {
 		t.Errorf("TTFT P95 必须按 TTFT 自身排序: got %.1f want %.1f", mixed.Workload.P95TTFTms, longContext.TTFTms)
@@ -781,8 +798,14 @@ func TestExtremeCalibrationAndTopologyRemainFinite(t *testing.T) {
 	overflow := Throughput(h200, r1, QuantByID("fp8"), 4096, 4, 1, Opts{
 		TP: math.MaxInt, PP: math.MaxInt, EP: math.MaxInt, CP: math.MaxInt,
 	})
-	if overflow.TopologyOK || overflow.Topology != "TP1 · PP1 · EP1 · CP1" {
-		t.Errorf("overflowed topology must fall back safely: %+v", overflow)
+	if overflow.TopologyOK || overflow.EstimateValid || overflow.SingleTPS != 0 ||
+		math.IsNaN(overflow.Mem.Total) || math.IsInf(overflow.Mem.Total, 0) ||
+		!strings.Contains(overflow.Topology, fmt.Sprint(math.MaxInt)) {
+		t.Errorf("overflowed topology must be preserved and rejected safely: %+v", overflow)
+	}
+	pow2 := Throughput(h200, r1, QuantByID("fp8"), 4096, 4, 1, Opts{TP: 1 << 32, PP: 1 << 32, EP: 1 << 32, CP: 1 << 32})
+	if pow2.TopologyOK || pow2.EstimateValid || math.IsNaN(pow2.Mem.Total) || math.IsInf(pow2.Mem.Total, 0) {
+		t.Errorf("power-of-two topology overflow must remain finite and invalid: %+v", pow2)
 	}
 }
 
@@ -816,7 +839,7 @@ func TestRecommendModelObjectivePairs(t *testing.T) {
 }
 
 func TestRecommendCardSkipsUnsupportedCheckpointPrecision(t *testing.T) {
-	lockedFP8 := Model{ID: "locked-fp8", Name: "Locked FP8", Params: 8, Active: 8, Layers: 32, Hidden: 4096, KVT: "gqa", KVH: 8, Dim: 128, Ctx: 131072, NativeQuant: "fp8"}
+	lockedFP8 := Model{ID: "locked-fp8", Name: "Locked FP8", Org: "test", Conf: "official", Params: 8, Active: 8, Layers: 32, Hidden: 4096, Heads: 32, KVT: "gqa", KVH: 8, Dim: 128, Ctx: 131072, NativeQuant: "fp8", ModelType: "llama", Architecture: "LlamaForCausalLM", ParamSource: "config", Revision: "test"}
 	got := Recommend([]HW{m3ultra}, []Model{lockedFP8}, lockedFP8, singleWorkload(4096, 128),
 		RecommendOpts{Direction: "card", HW: "m3u", Cards: 1, Objectives: "tpm", Conc: 4, Limit: 5},
 		Opts{})
@@ -840,5 +863,318 @@ func TestCatalogLoadersRejectConflictingMetadata(t *testing.T) {
 	}
 	if _, err = LoadHW([]byte(`[{"id":"service","name":"Service","vendor":"x","svc":true}]`)); err != nil {
 		t.Fatalf("API-only hardware is exempt from roofline inputs: %v", err)
+	}
+}
+
+func TestSupportAssessmentRejectsUnmodeledPaths(t *testing.T) {
+	unknownVendor := h100
+	unknownVendor.Vendor = ""
+	unknownArch := h100
+	unknownArch.Arch = ""
+	legacy := h100
+	legacy.Arch = "volta"
+	ai100 := HW{ID: "ai100", Vendor: "qualcomm", Arch: "aic100", VRAM: 32, BW: 145, TF: 400, Prec: []string{"fp16"}}
+	badHeads := llama8b
+	badHeads.Heads = 30
+	diffusion := llama8b
+	diffusion.ModelType, diffusion.Architecture = "diffusion_gemma", "DiffusionGemmaForBlockDiffusion"
+	noLink := h200
+	noLink.Link = Link{}
+	service := h100
+	service.Svc = true
+
+	cases := []struct {
+		name  string
+		h     HW
+		m     Model
+		cards int
+		opts  Opts
+	}{
+		{"unknown vendor", unknownVendor, llama8b, 1, Opts{}},
+		{"unknown architecture", unknownArch, llama8b, 1, Opts{}},
+		{"legacy TensorRT", legacy, llama8b, 1, Opts{Engine: "trtllm"}},
+		{"AI100 llama.cpp", ai100, llama8b, 1, Opts{Engine: "llamacpp"}},
+		{"inconsistent heads", h100, badHeads, 1, Opts{}},
+		{"non-divisible TP", HW{ID: "tp3", Vendor: "nvidia", Arch: "hopper", VRAM: 80, BW: 3000, TF: 900, Prec: []string{"fp16"}, Link: Link{T: "nvlink", B: 900, Dom: 3}}, llama8b, 3, Opts{TP: 3}},
+		{"missing interconnect", noLink, llama8b, 2, Opts{}},
+		{"vLLM context parallel", h200, llama8b, 4, Opts{TP: 1, CP: 4}},
+		{"diffusion family", h100, diffusion, 1, Opts{}},
+		{"aggregate service", service, llama8b, 1, Opts{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := Throughput(tc.h, tc.m, QuantByID("fp16"), 4096, 1, tc.cards, tc.opts)
+			if p.EstimateValid || p.Deployable || p.SingleTPS != 0 || p.AggTPS != 0 || p.TTFTms != 0 || p.ReqS != 0 {
+				t.Fatalf("unsupported/unknown path emitted a believable estimate: %+v", p)
+			}
+		})
+	}
+}
+
+func TestAutoEngineUsesModeledLegacyPath(t *testing.T) {
+	v100 := HW{ID: "v100", Vendor: "nvidia", Arch: "volta", VRAM: 32, BW: 900, TF: 125, Prec: []string{"fp16"}, PeakKind: "vector"}
+	q := QuantByID("fp16")
+	if got := resolveEngine("", v100, q).ID; got != "llamacpp" {
+		t.Fatalf("legacy NVIDIA auto engine = %q, want llama.cpp", got)
+	}
+	auto := Throughput(v100, llama8b, q, 4096, 1, 1, Opts{})
+	if !auto.EstimateValid || auto.Support != "conditional" || auto.Deployable || auto.SingleTPS <= 0 {
+		t.Fatalf("legacy auto fallback must remain an explicit conditional estimate: %+v", auto)
+	}
+	explicit := Throughput(v100, llama8b, q, 4096, 1, 1, Opts{Engine: "vllm"})
+	if explicit.EstimateValid || explicit.Support != "unsupported" || explicit.SingleTPS != 0 {
+		t.Fatalf("explicit unsupported runtime must not silently switch: %+v", explicit)
+	}
+	if got := resolveEngine("not-an-engine", h100, q).ID; got != "not-an-engine" {
+		t.Fatalf("unknown explicit engine silently changed to %q", got)
+	}
+}
+
+func TestSupportMetadataAcrossDecisionAPIs(t *testing.T) {
+	supported := Throughput(h100, llama8b, QuantByID("fp16"), 4096, 1, 1, Opts{})
+	if supported.Support != "supported" || !supported.EstimateValid || !supported.Deployable {
+		t.Fatalf("verified modeled profile should be deployable: %+v", supported)
+	}
+	custom := llama8b
+	custom.Heads, custom.ModelType, custom.Architecture = 0, "", ""
+	custom.ParamSource, custom.Revision, custom.Conf = "user-supplied", "", "reported"
+	customPerf := Throughput(h100, custom, QuantByID("fp16"), 4096, 1, 1, Opts{})
+	if customPerf.Support != "conditional" || !customPerf.EstimateValid || customPerf.Deployable || customPerf.SingleTPS <= 0 {
+		t.Fatalf("user-supplied standard-shape model should remain a conditional scenario: %+v", customPerf)
+	}
+
+	conditional := llama8b
+	conditional.Revision = ""
+	p := Throughput(h100, conditional, QuantByID("fp16"), 4096, 1, 1, Opts{})
+	if p.Support != "conditional" || !p.EstimateValid || p.Deployable || p.SupportReason == "" {
+		t.Fatalf("unpinned revision must remain a conditional what-if estimate: %+v", p)
+	}
+	cells := FitMatrix(h100, []Model{conditional}, 1, singleWorkload(4096, 128), 1, Opts{})[0].Cells
+	for _, cell := range cells {
+		if cell.Applicable && cell.Fit != 0 && (cell.Fit != 1 || cell.Support != "conditional" || cell.SupportReason == "") {
+			t.Fatalf("conditional fit cell must warn rather than turn green: %+v", cell)
+		}
+	}
+	plans := Planner([]HW{h100}, conditional, PlanOpts{TargetTPM: 60, QuantOnly: "fp16"}, singleWorkload(4096, 128), 1, Opts{})
+	if len(plans) == 0 {
+		t.Fatal("conditional what-if profile should remain listable")
+	}
+	for _, plan := range plans {
+		if plan.Support != "conditional" || plan.Deployable || plan.SupportReason == "" {
+			t.Fatalf("plan lost conditional support metadata: %+v", plan)
+		}
+	}
+
+	extended := Throughput(h100, llama8b, QuantByID("fp16"), 200000, 1, 1, Opts{})
+	if extended.Support != "conditional" || !extended.EstimateValid || extended.Deployable {
+		t.Fatalf("verified extended context must remain conditional: %+v", extended)
+	}
+	beyond := Throughput(h100, llama8b, QuantByID("fp16"), 300000, 1, 1, Opts{})
+	if beyond.Support != "unsupported" || beyond.EstimateValid || beyond.SingleTPS != 0 {
+		t.Fatalf("context beyond the verified extended limit must be rejected: %+v", beyond)
+	}
+	mixedInvalid := ThroughputWorkload(h100, llama8b, QuantByID("fp16"), []WorkloadBucket{
+		{Context: 4096, Output: 128, Share: .9},
+		{Context: 300000, Output: 128, Share: .1},
+	}, 1, 1, Opts{})
+	if mixedInvalid.EstimateValid || mixedInvalid.SingleTPS != 0 || mixedInvalid.TTFTms != 0 ||
+		mixedInvalid.ReqMs != 0 || mixedInvalid.Workload.P95ReqMs != 0 || mixedInvalid.Mem.Total <= 0 {
+		t.Fatalf("one invalid workload bucket must withhold aggregate performance but retain memory: %+v", mixedInvalid)
+	}
+
+	unknown := llama8b
+	unknown.ParamSource = "name"
+	bad := Throughput(h100, unknown, QuantByID("fp16"), 4096, 1, 1, Opts{})
+	if bad.Support != "unknown" || bad.EstimateValid || bad.SingleTPS != 0 ||
+		len(Planner([]HW{h100}, unknown, PlanOpts{TargetTPM: 1}, singleWorkload(4096, 16), 1, Opts{})) != 0 {
+		t.Fatalf("unverified parameter counts must be memory-only and excluded from planning: %+v", bad)
+	}
+}
+
+func TestOutputOneDoesNotWeightDecode(t *testing.T) {
+	direct := Throughput(h100, llama8b, QuantByID("fp16"), 4096, 4, 1, Opts{OutLen: 1, ScheduleMS: 7})
+	if direct.SingleTPS != 0 || direct.TPOTms != 0 || direct.ScheduleMs != 0 ||
+		direct.LayerMs != 0 || direct.OffloadMs != 0 || direct.Bottleneck != "prefill" ||
+		direct.ReqS <= 0 || direct.TTFTms <= 0 || direct.ReqMs != direct.TTFTms {
+		t.Fatalf("single-point output=1 metrics must be prefill-only: %+v", direct)
+	}
+	one := ThroughputWorkload(h100, llama8b, QuantByID("fp16"), singleWorkload(4096, 1), 4, 1, Opts{ScheduleMS: 7})
+	if one.SingleTPS != 0 || one.AggTPS != 0 || one.TPOTms != 0 || one.DecodeMemMs != 0 ||
+		one.DecodeComputeMs != 0 || one.ScheduleMs != 0 || one.LayerMs != 0 || one.OffloadMs != 0 ||
+		one.Bottleneck != "prefill" || one.Workload.Buckets[0].SingleTPS != 0 {
+		t.Fatalf("one-token requests have no subsequent decode interval: %+v", one)
+	}
+	long := Throughput(h100, llama8b, QuantByID("fp16"), 4096, 4, 1, Opts{OutLen: 101, ScheduleMS: 7})
+	mixed := ThroughputWorkload(h100, llama8b, QuantByID("fp16"), []WorkloadBucket{
+		{Context: 4096, Output: 1, Share: .99},
+		{Context: 4096, Output: 101, Share: .01},
+	}, 4, 1, Opts{ScheduleMS: 7})
+	if mixed.SingleTPS != long.SingleTPS || mixed.AggTPS != long.AggTPS || mixed.ScheduleMs != long.ScheduleMs {
+		t.Fatalf("zero-decode buckets must not dilute decode metrics: mixed=%+v long=%+v", mixed, long)
+	}
+}
+func TestLocalizedPresentation(t *testing.T) {
+	p := Throughput(h100, llama8b, QuantByID("fp16"), 4096, 1, 1, Opts{Lang: "zh"})
+	found := false
+	for _, row := range p.Trace {
+		if row.K == "支持状态" {
+			found = true
+			break
+		}
+	}
+	if !found || strategy(h100, 1, "zh") == strategy(h100, 1, "en") {
+		t.Fatalf("Chinese presentation must localize support metadata and strategy: %+v", p.Trace)
+	}
+}
+
+func TestScheduleBreakdownMatchesIncludedStep(t *testing.T) {
+	p := Throughput(h100, llama8b, QuantByID("fp16"), 4096, 4, 1, Opts{OutLen: 32, ScheduleMS: 7})
+	if p.ScheduleMs != 7 || p.TPOTms < p.ScheduleMs || p.ReqMs < p.TTFTms+31*p.ScheduleMs {
+		t.Fatalf("schedule breakdown must report the component included in decode latency: %+v", p)
+	}
+}
+
+func TestLatencyRankingUsesEndToEndP95(t *testing.T) {
+	items := []Plan{
+		{HW: h100, TTFTms: 1, TPOTms: 1, ReqP95ms: 1000, Monthly: 1},
+		{HW: h200, TTFTms: 100, TPOTms: 100, ReqP95ms: 200, WaitP95Ms: 1200, Monthly: 2},
+	}
+	sortPlans(items, "latency")
+	if items[0].HW.ID != "h100" {
+		t.Fatalf("latency rank ignored queue-tail latency: %+v", items)
+	}
+	pres := []Prescription{{Plan: items[1]}, {Plan: items[0]}}
+	rankPrescriptions(pres, []string{"tos"})
+	if pres[1].Score <= pres[0].Score || prescriptionMetric(pres[1], "tos") <= prescriptionMetric(pres[0], "tos") {
+		t.Fatalf("recommendation TOS objective must reward lower end-to-end request P95: %+v", pres)
+	}
+}
+
+func TestPrescriptionDedupePreservesDeploymentShape(t *testing.T) {
+	base := Prescription{ModelID: "m", EngineID: "vllm", KVQuant: "fp16", SpecID: "none", Topology: "TP1", Plan: Plan{HW: h100, Quant: "fp16", N: 1, Replicas: 1, MaxConc: 1, TPM: 10}}
+	items := []Prescription{base, base}
+	for i := range 3 {
+		p := base
+		switch i {
+		case 0:
+			p.Plan.N, p.Topology = 2, "TP2"
+		case 1:
+			p.Plan.Replicas = 2
+		case 2:
+			p.Plan.MaxConc = 2
+		}
+		items = append(items, p)
+	}
+	if got := len(dedupePrescriptions(items)); got != 4 {
+		t.Fatalf("dedupe collapsed distinct deployment shapes: got %d", got)
+	}
+}
+
+func TestA100FP8KVIsStorageCompatibility(t *testing.T) {
+	a100 := hw("a100", 80, 2039)
+	base := Throughput(a100, llama8b, QuantByID("fp16"), 8192, 4, 1, Opts{KVQuant: "fp16"})
+	fp8 := Throughput(a100, llama8b, QuantByID("fp16"), 8192, 4, 1, Opts{KVQuant: "fp8"})
+	if !fp8.KVSupported || !fp8.EstimateValid || fp8.Support != "conditional" || fp8.Deployable ||
+		fp8.Mem.KV >= base.Mem.KV || fp8.SingleTPS <= 0 {
+		t.Fatalf("Ampere FP8 KV storage should be a conditional dequant path, not native arithmetic: base=%+v fp8=%+v", base, fp8)
+	}
+}
+
+func TestNativeMXFP4SupportIsConsistent(t *testing.T) {
+	m := llama8b
+	m.ID, m.Name, m.NativeQuant, m.CheckpointGB = "mxfp4", "MXFP4", "mxfp4", 5
+	p := Throughput(h100, m, QuantByID("int4"), 4096, 1, 1, Opts{})
+	if p.QuantID != "mxfp4" || !p.QuantLocked || p.Accel || !p.EstimateValid || p.Support != "conditional" || p.SingleTPS <= 0 {
+		t.Fatalf("MXFP4 must remain loadable without being labeled native acceleration: %+v", p)
+	}
+	cells := FitMatrix(h100, []Model{m}, 1, singleWorkload(4096, 128), 1, Opts{})[0].Cells
+	found := false
+	for _, cell := range cells {
+		if cell.Applicable {
+			found = true
+			if cell.Quant != "mxfp4" || cell.Support != p.Support || cell.Fit != 1 || cell.Accel {
+				t.Fatalf("fit matrix disagrees with throughput MXFP4 support: %+v", cell)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("fit matrix omitted the native MXFP4 checkpoint")
+	}
+	plans := Planner([]HW{h100}, m, PlanOpts{TargetTPM: 60}, singleWorkload(4096, 128), 1, Opts{})
+	if len(plans) == 0 || plans[0].Quant != "mxfp4" || plans[0].Support != p.Support || plans[0].Deployable {
+		t.Fatalf("planner disagrees with throughput MXFP4 support: %+v", plans)
+	}
+	got := Recommend([]HW{h100}, []Model{m}, m, singleWorkload(4096, 128),
+		RecommendOpts{Direction: "model", TargetTPM: 60, Conc: 1, Limit: 4}, Opts{})
+	if len(got.Picks) == 0 || got.Picks[0].Plan.Quant != "mxfp4" || got.Picks[0].Plan.Support != p.Support {
+		t.Fatalf("recommendation disagrees with throughput MXFP4 support: %+v", got.Picks)
+	}
+}
+
+func TestPeakExactRequiresDenseSourcedMetadata(t *testing.T) {
+	h := h100
+	h.SourceURL = "https://example.test/spec"
+	h.PeakKind = "vector"
+	if Throughput(h, llama8b, QuantByID("fp16"), 4096, 1, 1, Opts{}).PeakExact {
+		t.Fatal("sourced vector peak must not be labeled an exact dense matrix peak")
+	}
+	h.PeakKind = "dense_matrix"
+	if !Throughput(h, llama8b, QuantByID("fp16"), 4096, 1, 1, Opts{}).PeakExact {
+		t.Fatal("sourced dense matrix peak should be labeled exact")
+	}
+	h.SourceURL = ""
+	if Throughput(h, llama8b, QuantByID("fp16"), 4096, 1, 1, Opts{}).PeakExact {
+		t.Fatal("unsourced peak must remain estimated")
+	}
+	h.PeakKind = ""
+	unknown := Throughput(h, llama8b, QuantByID("fp16"), 4096, 1, 1, Opts{})
+	if unknown.Support != "conditional" || !unknown.EstimateValid || unknown.Deployable ||
+		unknown.Accuracy != "scenario" || unknown.SingleTPS <= 0 {
+		t.Fatalf("unknown peak provenance must remain an explicit scenario rather than a confirmed deployment: %+v", unknown)
+	}
+}
+
+func TestMultimodalUnknownEncoderIsNotDeployable(t *testing.T) {
+	m := llama8b
+	m.Multimodal, m.EncoderParams = true, 0
+	text := Throughput(h100, m, QuantByID("fp16"), 4096, 1, 1, Opts{})
+	media := Throughput(h100, m, QuantByID("fp16"), 4096, 1, 1, Opts{MediaTokens: 576})
+	if text.Support != "conditional" || !text.EstimateValid || text.Deployable {
+		t.Fatalf("unknown encoder may only produce a conditional text-tower estimate: %+v", text)
+	}
+	if media.Support != "unknown" || media.EstimateValid || media.SingleTPS != 0 || media.Deployable {
+		t.Fatalf("unknown encoder must block media performance estimates: %+v", media)
+	}
+}
+
+func TestCatalogLoadersRejectInvalidAuditMetadata(t *testing.T) {
+	if _, err := LoadModels([]byte(`[{"id":"bad","name":"Bad","org":"x","params":3,"active":2,"layers":1,"hidden":4,"heads":3,"model_type":"llama","kvt":"gqa","kvh":1,"dim":2,"ctx":1}]`)); err == nil {
+		t.Fatal("inconsistent conventional query head geometry must fail catalog loading")
+	}
+	qwen3JSON := []byte(`[{"id":"qwen3","name":"Qwen3","org":"x","params":0.6,"active":0.6,"layers":28,"hidden":1024,"heads":16,"model_type":"qwen3","architecture":"Qwen3ForCausalLM","kvt":"gqa","kvh":8,"dim":128,"ctx":32768,"extended_ctx":131072,"param_source":"config","revision":"test"}]`)
+	models, err := LoadModels(qwen3JSON)
+	if err != nil {
+		t.Fatalf("Qwen3 hidden/head_dim is not query-head count: %v", err)
+	}
+	p := Throughput(h100, models[0], QuantByID("fp16"), 4096, 1, 1, Opts{})
+	if !p.EstimateValid || p.Support != "supported" || p.SingleTPS <= 0 {
+		t.Fatalf("explicit Qwen3 heads should be modeled without Hidden/Dim rejection: %+v", p)
+	}
+	missingHeads := models[0]
+	missingHeads.Heads = 0
+	missing := Throughput(h100, missingHeads, QuantByID("fp16"), 4096, 1, 1, Opts{})
+	if missing.Support != "unknown" || missing.EstimateValid || missing.SingleTPS != 0 {
+		t.Fatalf("missing Qwen3 heads must be unknown rather than inferred from Hidden/Dim: %+v", missing)
+	}
+	wide := models[0]
+	narrow := wide
+	narrow.Heads = 8
+	widePerf := Throughput(h100, wide, QuantByID("fp16"), 131072, 1, 1, Opts{})
+	narrowPerf := Throughput(h100, narrow, QuantByID("fp16"), 131072, 1, 1, Opts{})
+	if widePerf.TTFTms <= narrowPerf.TTFTms*1.5 {
+		t.Fatalf("attention FLOPs must use query width Heads×Dim: wide %.1fms narrow %.1fms", widePerf.TTFTms, narrowPerf.TTFTms)
+	}
+	if _, err := LoadHW([]byte(`[{"id":"bad","name":"Bad","vendor":"x","vram":1,"bw":1,"tf":1,"prec":["fp16"],"peak_kind":"marketing"}]`)); err == nil {
+		t.Fatal("unknown peak provenance kind must fail catalog loading")
 	}
 }
