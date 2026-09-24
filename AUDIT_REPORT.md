@@ -14,6 +14,7 @@
 - HF 自动目录从 2,195 增至 2,209 个，新增 14 个可解析模型；精选目录 62 个，ModelScope 0 个，总目录 **2,271 个模型**。新增包括 DeepSeek V4.1 Flash、GLM 5.3 NVFP4、DeepSeek V4 Pro NVFP4、Intern-S2 397B、Atria、MiMo V2.6、MiniCPM5、LFM2.5-VL 和 Ling 3.0 Flash 新格式。
 - 4 个近期候选因缺少标准配置或参数依据跳过；没有从仓库名猜参数量、query heads 或量化格式。新增记录均有固定 revision、query heads 和 `param_source`，其中 10 个使用 safetensors、4 个使用 config 证据。
 - 全量同步曾因 Hugging Face 出口 429/长请求停止，未写入半成品；随后使用公开最新官方仓库清单定向同步。下一次全量同步应在有 HF token 或较低限流时运行。
+- 提交 `2891647c027965a7931a2aed4ad40a13efdfbbd7` 已构建并部署到线上，服务二进制 SHA-256 为 `6477d15416b1bcc5ed8624d7627384eff2f2c760a3ac2c0008b4403d6ef8a1d5`。公网 `/api/models` 已核对 2,271 条记录及新增官方模型，Qwen3.8-27B 的 query heads、revision、参数来源仍完整。
 
 ### 线上旧目录覆盖问题（2026-09-05 追加）
 
