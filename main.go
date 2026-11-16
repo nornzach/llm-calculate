@@ -416,8 +416,8 @@ func sanitizeWorkload(workload []calc.WorkloadBucket) ([]calc.WorkloadBucket, er
 		}
 		total += bucket.Share
 	}
-	if total <= 0 {
-		return nil, fmt.Errorf("workload share total must be positive")
+	if math.Abs(total-1) > 1e-6 {
+		return nil, fmt.Errorf("workload share total must be 1 (got %g)", total)
 	}
 	return workload, nil
 }
