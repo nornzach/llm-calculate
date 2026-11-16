@@ -520,7 +520,7 @@ func (o Opts) hasScenarioInputs() bool {
 		o.BWUtil > 0 || o.FlopsUtil > 0 || o.LinkUtil > 0 ||
 		o.ScheduleMS > 0 || o.KVOverhead != 1 || o.KVOffload > 0 ||
 		o.OffloadBW > 0 || o.RouterSkew > 1 || o.MediaTokens > 0 ||
-		o.HitRate > 0
+		o.HitRate > 0 || (o.PrefillChunk != 0 && o.PrefillChunk != 8192)
 }
 
 // kvSupport separates cache storage/dequantization from native low-precision
