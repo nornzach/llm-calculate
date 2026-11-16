@@ -709,7 +709,7 @@ func newHandler() http.Handler {
 				writeErr(w, 422, "hardware has no local roofline inputs")
 				return
 			}
-			if req.Cards < 0 || req.Cards > 8 {
+			if req.Cards < 1 || req.Cards > 8 {
 				writeErr(w, 400, "cards must be between 1 and 8")
 				return
 			}
