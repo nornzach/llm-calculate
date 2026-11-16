@@ -3158,9 +3158,6 @@ func Recommend(hws []HW, models []Model, m Model, workload []WorkloadBucket, opt
 
 	var items []Prescription
 	if opts.Direction == "card" {
-		if opts.Cards <= 0 {
-			opts.Cards = 1
-		}
 		for _, h := range hws {
 			if h.ID == opts.HW {
 				items = recommendForCard(models, h, workload, opts, st)
