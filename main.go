@@ -487,6 +487,9 @@ func newHandler() http.Handler {
 	mux.HandleFunc("GET /index.html", serveIndex)
 	mux.Handle("/", http.FileServer(http.FS(webFS)))
 
+	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]string{"version": "1.0.0"})
+	})
 	mux.HandleFunc("GET /api/hardware", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, hws)
 	})
