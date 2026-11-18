@@ -582,7 +582,7 @@ func LoadHW(b []byte) ([]HW, error) {
 	}
 	seen := make(map[string]bool, len(v))
 	for _, h := range v {
-		if h.ID == "" || h.Name == "" || h.Vendor == "" || seen[h.ID] {
+		if h.ID == "" || strings.TrimSpace(h.Name) == "" || h.Vendor == "" || seen[h.ID] {
 			return nil, fmt.Errorf("invalid or duplicate hardware %q", h.ID)
 		}
 		seen[h.ID] = true
