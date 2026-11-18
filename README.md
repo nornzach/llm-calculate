@@ -140,6 +140,7 @@ M/M/c 使用泊松到达、指数服务和独立副本假设，仅用于候选�
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
+| `GET` | `/version` | 当前运行版本（JSON `version`） |
 | `GET` | `/api/hardware` | 硬件列表 |
 | `GET` | `/api/models` | 模型列表 |
 | `GET` | `/api/quants` | 量化档位 |
