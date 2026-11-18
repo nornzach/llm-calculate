@@ -490,6 +490,11 @@ func newHandler() http.Handler {
 	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"version": "1.0.0"})
 	})
+	// 轻量存活探针：仅报告进程可服务请求，不做任何计算。
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, map[string]string{"status": "ok"})
+	})
 	mux.HandleFunc("GET /api/hardware", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, hws)
 	})
