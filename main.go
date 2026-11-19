@@ -521,6 +521,14 @@ func newHandler() http.Handler {
 	mux.HandleFunc("GET /api/quick", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, calc.QuickTable(hws))
 	})
+	// /api/stats 仅返回已加载 catalog 的计数，便于轻量探测规模。
+	mux.HandleFunc("GET /api/stats", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, struct {
+			Models   int `json:"models"`
+			Hardware int `json:"hardware"`
+			Quants   int `json:"quants"`
+		}{len(models), len(hws), len(calc.Quants)})
+	})
 
 	mux.HandleFunc("POST /api/fit", func(w http.ResponseWriter, r *http.Request) {
 		var req fitReq
