@@ -487,7 +487,13 @@ func newHandler() http.Handler {
 	mux.HandleFunc("GET /index.html", serveIndex)
 	mux.Handle("/", http.FileServer(http.FS(webFS)))
 
-	mux.HandleFunc("GET /version", func(w http.ResponseWriter, r *http.Request) {
+	// /version 单独注册（不带方法），以便不支持的 method 返回 405 而不是落到静态文件 404。
+	mux.HandleFunc("/version", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
 		writeJSON(w, map[string]string{"version": "1.0.0"})
 	})
 	mux.HandleFunc("GET /api/hardware", func(w http.ResponseWriter, r *http.Request) {
