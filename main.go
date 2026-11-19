@@ -540,6 +540,11 @@ func newHandler() http.Handler {
 			writeErr(w, 422, "hardware has no local roofline inputs")
 			return
 		}
+		// 显式卡数越界必须报错，避免静默钳制后返回误导性结果；n<=0（含缺省）仍走默认单卡。
+		if req.N > 8 {
+			writeErr(w, 400, "cards must be between 1 and 8")
+			return
+		}
 		n := clamp(req.N, 1, 8, 1)
 		ctx := clamp(req.Ctx, 512, 1048576, 8192)
 		batch := clamp(req.Batch, 1, 256, 8)
