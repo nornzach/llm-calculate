@@ -494,6 +494,8 @@ func newHandler() http.Handler {
 			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
+		// 版本响应不应被缓存，客户端需始终读到当前部署的版本。
+		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, map[string]string{"version": "1.0.0"})
 	})
 	mux.HandleFunc("GET /api/hardware", func(w http.ResponseWriter, r *http.Request) {
