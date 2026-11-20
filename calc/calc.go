@@ -2355,6 +2355,12 @@ func Percentile(values []float64, p float64) (float64, error) {
 	return sorted[lo] + (sorted[hi]-sorted[lo])*frac, nil
 }
 
+// Median 返回样本的中位数（等价于 Percentile(values, 50)）。
+// 空样本返回错误；其余边界与 Percentile 一致，不会修改调用方切片。
+func Median(values []float64) (float64, error) {
+	return Percentile(values, 50)
+}
+
 // ---------- 模式 1：能装什么 ----------
 
 type FitCell struct {
