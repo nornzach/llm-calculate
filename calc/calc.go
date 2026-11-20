@@ -3323,6 +3323,15 @@ func joinWarn(a, b string) string {
 	return a + "; " + b
 }
 
+// Sum 返回整数切片元素之和；nil 或空切片返回 0。
+func Sum(values []int) int {
+	total := 0
+	for _, v := range values {
+		total += v
+	}
+	return total
+}
+
 func precHas(h HW, p string) bool {
 	for _, x := range h.Prec {
 		if x == p {
