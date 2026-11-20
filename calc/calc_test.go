@@ -1264,3 +1264,40 @@ func TestCatalogLoadersRejectInvalidAuditMetadata(t *testing.T) {
 		t.Fatal("unknown peak provenance kind must fail catalog loading")
 	}
 }
+
+func TestClamp(t *testing.T) {
+	cases := []struct {
+		name     string
+		v, lo, hi float64
+		want     float64
+	}{
+		// 基本情况
+		{"v < lo", 1, 5, 10, 5},
+		{"lo < v < hi", 7, 5, 10, 7},
+		{"v > hi", 15, 5, 10, 10},
+		// 边界值
+		{"v = lo", 5, 5, 10, 5},
+		{"v = hi", 10, 5, 10, 10},
+		// lo > hi 时自动交换
+		{"lo > hi: v < hi", 3, 10, 5, 5},
+		{"lo > hi: v between", 7, 10, 5, 7},
+		{"lo > hi: v > lo", 12, 10, 5, 10},
+		// NaN 处理
+		{"NaN v", math.NaN(), 5, 10, 5},
+		// 负数
+		{"v < lo (negative)", -20, -10, 0, -10},
+		{"v in range (negative)", -5, -10, 0, -5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Clamp(tc.v, tc.lo, tc.hi)
+			if math.IsNaN(tc.want) {
+				if !math.IsNaN(got) {
+					t.Errorf("Clamp(%v, %v, %v) = %v, want NaN", tc.v, tc.lo, tc.hi, got)
+				}
+			} else if got != tc.want {
+				t.Errorf("Clamp(%v, %v, %v) = %v, want %v", tc.v, tc.lo, tc.hi, got, tc.want)
+			}
+		})
+	}
+}
