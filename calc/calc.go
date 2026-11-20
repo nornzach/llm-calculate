@@ -3332,6 +3332,20 @@ func Sum(values []int) int {
 	return total
 }
 
+// Max 返回整数切片中的最大元素；nil 或空切片返回 0。
+func Max(values []int) int {
+	if len(values) == 0 {
+		return 0
+	}
+	best := values[0]
+	for _, v := range values[1:] {
+		if v > best {
+			best = v
+		}
+	}
+	return best
+}
+
 func precHas(h HW, p string) bool {
 	for _, x := range h.Prec {
 		if x == p {
