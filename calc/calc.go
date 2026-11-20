@@ -2320,6 +2320,41 @@ func round4(v float64) float64 {
 	return math.Round(v*10000) / 10000
 }
 
+// Percentile 返回样本的第 p 百分位（p 取值 0–100），使用线性插值。
+// 空样本、p 为 NaN 或超出 [0,100] 时返回错误；不会修改调用方切片。
+func Percentile(values []float64, p float64) (float64, error) {
+	if len(values) == 0 {
+		return 0, fmt.Errorf("percentile: empty sample")
+	}
+	if math.IsNaN(p) || p < 0 || p > 100 {
+		return 0, fmt.Errorf("percentile: p %v out of range [0,100]", p)
+	}
+	sorted := make([]float64, len(values))
+	copy(sorted, values)
+	sort.Float64s(sorted)
+	n := len(sorted)
+	if n == 1 {
+		return sorted[0], nil
+	}
+	rank := p / 100 * float64(n-1)
+	lo := int(math.Floor(rank))
+	hi := int(math.Ceil(rank))
+	if lo < 0 {
+		lo = 0
+	}
+	if hi >= n {
+		hi = n - 1
+	}
+	if lo >= n {
+		lo = n - 1
+	}
+	if lo == hi {
+		return sorted[lo], nil
+	}
+	frac := rank - float64(lo)
+	return sorted[lo] + (sorted[hi]-sorted[lo])*frac, nil
+}
+
 // ---------- 模式 1：能装什么 ----------
 
 type FitCell struct {
