@@ -186,6 +186,140 @@ func TestAPIContracts(t *testing.T) {
 	}
 }
 
+func TestHomepageCalcNote(t *testing.T) {
+	index, err := inlineIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(index)
+	for _, id := range []string{"calc-note", "calc-disclaimer"} {
+		if strings.Count(html, `id="`+id+`"`) != 1 {
+			t.Fatalf("homepage must contain exactly one paragraph with id %q", id)
+		}
+	}
+
+	mapStart := strings.Index(html, `<section class="view on" id="v-map">`)
+	fitStart := strings.Index(html, `<section class="view" id="v-fit">`)
+	if mapStart < 0 || fitStart <= mapStart {
+		t.Fatal("homepage map section boundaries are missing or out of order")
+	}
+	home := html[mapStart:fitStart]
+
+	note, noteAt, ok := paragraphByID(home, "calc-note")
+	if !ok {
+		t.Fatal("local computation note must be inside the homepage map section")
+	}
+	if openTag := note[:strings.Index(note, ">")+1]; !strings.Contains(openTag, `class="calc-note"`) || !strings.Contains(openTag, `role="note"`) {
+		t.Fatal("local computation note must be a calc-note read-only paragraph")
+	}
+	if text, ok := paragraphText(note); !ok || text != "结果由本地计算得出，不上传输入。" {
+		t.Fatalf("local computation note text = %q", text)
+	}
+
+	disclaimer, _, ok := paragraphByID(home, "calc-disclaimer")
+	if !ok {
+		t.Fatal("the earlier read-only disclaimer must stay in the homepage map section")
+	}
+	if openTag := disclaimer[:strings.Index(disclaimer, ">")+1]; !strings.Contains(openTag, `class="calc-note"`) || !strings.Contains(openTag, `role="note"`) {
+		t.Fatal("the earlier disclaimer must keep its read-only paragraph styling")
+	}
+	if text, ok := paragraphText(disclaimer); !ok || !strings.HasPrefix(text, "本页为只读提示：") {
+		t.Fatalf("the earlier disclaimer lost its text: %q", text)
+	}
+
+	// A result card opens with this marker. Check the closing tag of every
+	// occurrence so the note cannot be moved into or above any of them.
+	const cardOpen = `<div class="chart mapcard"`
+	cards := 0
+	for search := 0; ; {
+		rel := strings.Index(home[search:], cardOpen)
+		if rel < 0 {
+			break
+		}
+		cardAt := search + rel
+		cardEnd := closingDivEnd(home, cardAt)
+		if cardEnd < 0 {
+			t.Fatalf("result card at offset %d has no closing div", cardAt)
+		}
+		if noteAt < cardEnd {
+			t.Fatalf("local computation note must follow every result card (card at %d ends at %d)", cardAt, cardEnd)
+		}
+		cards++
+		search = cardEnd
+	}
+	if cards == 0 {
+		t.Fatal("homepage map section has no result cards")
+	}
+	for _, cardID := range []string{"mapScatterCard", "mapHeatCard"} {
+		if strings.Count(home, `id="`+cardID+`"`) != 1 {
+			t.Fatalf("homepage result card %q must have a unique id", cardID)
+		}
+	}
+
+	// Actual visibility and horizontal overflow at 390px/1280px are browser
+	// checks; assert the CSS hooks that let the note wrap at narrow widths.
+	for _, style := range []string{".calc-note {", "display: block; max-width: 100%;", "overflow-wrap: anywhere;", "white-space: normal;"} {
+		if !strings.Contains(html, style) {
+			t.Fatalf("calc-note CSS is missing %q", style)
+		}
+	}
+}
+
+// paragraphByID returns the paragraph containing the unique id and its offset.
+func paragraphByID(html, id string) (string, int, bool) {
+	marker := `id="` + id + `"`
+	if strings.Count(html, marker) != 1 {
+		return "", 0, false
+	}
+	at := strings.Index(html, marker)
+	open := strings.LastIndex(html[:at], "<p")
+	close := strings.Index(html[at:], "</p>")
+	if open < 0 || close < 0 {
+		return "", 0, false
+	}
+	close += at + len("</p>")
+	return html[open:close], open, true
+}
+
+func paragraphText(element string) (string, bool) {
+	open := strings.Index(element, ">")
+	if open < 0 || !strings.HasSuffix(element, "</p>") {
+		return "", false
+	}
+	return element[open+1 : len(element)-len("</p>")], true
+}
+
+// closingDivEnd returns the offset just after the </div> matching the <div> at start.
+func closingDivEnd(html string, start int) int {
+	depth := 0
+	for i := start; i < len(html); {
+		open := strings.Index(html[i:], "<div")
+		close := strings.Index(html[i:], "</div>")
+		if close < 0 {
+			return -1
+		}
+		if open >= 0 && open < close {
+			j := i + open
+			if j+len("<div") < len(html) {
+				switch html[j+len("<div")] {
+				case ' ', '\t', '\n', '\r', '>':
+					depth++
+					i = j + len("<div")
+					continue
+				}
+			}
+			i = j + len("<div")
+			continue
+		}
+		depth--
+		i += close + len("</div>")
+		if depth == 0 {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestEnrichModelPreservesCuratedInferenceData(t *testing.T) {
 	dst := calc.Model{ID: "qwen", Params: 7, Layers: 28, Src: "curated", Conf: "official"}
 	src := calc.Model{

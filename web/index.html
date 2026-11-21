@@ -49,7 +49,7 @@
       <label class="mapfield"><span>并发</span><input type="number" id="map-conc" value="16" min="1" max="256"></label>
     </div>
     <p class="field-note" id="mapWorkloadNote"></p>
-    <p id="calc-note" class="calc-note" role="note">本页为只读提示：所有数字都是场景估算，不代表实测校准、基准验证或采购报价；显存装得下不等于可部署。This is a read-only note: figures are what-if estimates, not benchmarks, quotes, or proof of deployability.</p>
+    <p id="calc-disclaimer" class="calc-note" role="note">本页为只读提示：所有数字都是场景估算，不代表实测校准、基准验证或采购报价；显存装得下不等于可部署。This is a read-only note: figures are what-if estimates, not benchmarks, quotes, or proof of deployability.</p>
     <div class="mapgrid">
       <div class="chart mapcard" id="mapScatterCard">
         <h3 id="mapScatterTitle">成本 × 单流速度</h3>
@@ -71,6 +71,7 @@
       <div class="tblwrap"><table class="tbl heat" id="mapHeat"></table></div>
       <div class="chart-legend" id="mapHeatLegend"></div>
     </div>
+    <p id="calc-note" class="calc-note" role="note">结果由本地计算得出，不上传输入。</p>
   </div>
 </section>
 
