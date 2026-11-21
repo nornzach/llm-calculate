@@ -718,6 +718,10 @@ button:focus-visible, input:focus-visible, .cs-btn:focus-visible, .planrow:focus
   display: grid; grid-template-columns: minmax(220px, 1.2fr) minmax(170px, .8fr) 110px 110px;
   gap: 10px; margin-bottom: 16px; align-items: end;
 }
+/* 首页参数栏桌面端位于 300px 侧栏内，单列排列并允许内容收缩 */
+#v-map .mapaside .mapbar { grid-template-columns: minmax(0, 1fr); }
+#v-map .mapaside .mapbar > * { min-width: 0; }
+#v-map .mapaside #mapWorkloadNote { margin-bottom: 0; }
 .mapfield span { display: block; font-size: 9px; letter-spacing: .08em; color: var(--faint); font-weight: 700; text-transform: uppercase; margin-bottom: 4px; }
 .mapfield input { min-height: 42px; }
 .mapgrid { display: grid; grid-template-columns: 3fr 2fr; gap: 14px; }
@@ -774,6 +778,7 @@ button:focus-visible, input:focus-visible, .cs-btn:focus-visible, .planrow:focus
   #mapLandscape { flex: none; min-height: 0; aspect-ratio: 520 / 380; }
   .mapbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mapbar > div { min-width: 0; }
+  #v-map .mapaside .mapbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 /* 悬浮提示（即时，不等原生 title 延迟） */
@@ -806,6 +811,8 @@ button:focus-visible, input:focus-visible, .cs-btn:focus-visible, .planrow:focus
   .view.on { display: block; }
   aside { position: static; width: auto; margin-bottom: 18px; padding: 0 0 18px; border: 0; border-bottom: 1px solid var(--line); }
   .view .result, .view .result.wide { padding: 0; border-radius: 0; }
+  .map-picks { grid-template-columns: minmax(0, 1fr); }
+  #v-map .mapcard > p, .map-picks .minibtn, .mapfield { overflow-wrap: anywhere; }
   .hero { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; }
   .stat { padding: 14px; }
   .stat .v { font-size: 25px; }
