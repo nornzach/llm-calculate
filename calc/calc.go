@@ -2361,6 +2361,16 @@ func Median(values []float64) (float64, error) {
 	return Percentile(values, 50)
 }
 
+// Clamp 将 v 约束在 [lo, hi] 范围内。
+// 若 lo > hi，会先交换二者；返回约束后的值。
+// NaN 值返回 lo。
+func Clamp(v, lo, hi float64) float64 {
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	return clamp(v, lo, hi)
+}
+
 // ---------- 模式 1：能装什么 ----------
 
 type FitCell struct {
