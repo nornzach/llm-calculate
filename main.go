@@ -461,7 +461,29 @@ func inlineIndex() ([]byte, error) {
 func main() {
 	addr := flag.String("addr", ":8317", "listen address")
 	dataDir := flag.String("data-dir", "", "explicit HF/ModelScope catalog override directory; default: embedded release data")
+
+	// Cost estimation flags
+	inputTokens := flag.Float64("input-tokens", 0, "input tokens per request (cost estimation mode)")
+	outputTokens := flag.Float64("output-tokens", 0, "output tokens per request (cost estimation mode)")
+	inputPrice := flag.Float64("input-price", 0, "price per million input tokens in USD (cost estimation mode)")
+	outputPrice := flag.Float64("output-price", 0, "price per million output tokens in USD (cost estimation mode)")
+	requestsPerDay := flag.Float64("requests-per-day", 0, "number of requests per day (cost estimation mode)")
+
 	flag.Parse()
+
+	// If any cost estimation flag is provided, run cost estimation mode
+	if *inputTokens > 0 || *outputTokens > 0 || *inputPrice > 0 || *outputPrice > 0 || *requestsPerDay > 0 {
+		costResult, err := calc.Cost(*inputTokens, *outputTokens, *inputPrice, *outputPrice, *requestsPerDay)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Cost estimation error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Single request cost: $%.6f\n", costResult.SingleRequestUSD)
+		fmt.Printf("Daily cost: $%.2f\n", costResult.DailyCostUSD)
+		fmt.Printf("Monthly cost (30 days): $%.2f\n", costResult.MonthlyCostUSD)
+		return
+	}
+
 	mustLoad(*dataDir)
 	fmt.Printf("LLM 推理计算器 → http://localhost%s  (硬件 %d · 模型 %d)\n", *addr, len(hws), len(models))
 	log.Fatal(http.ListenAndServe(*addr, newHandler()))

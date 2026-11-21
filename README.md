@@ -175,6 +175,32 @@ curl -sS http://localhost:8317/api/perf \
   }'
 ```
 
+## 成本估算
+
+命令行工具支持按 token 单价估算 API 使用成本。提供输入/输出 token 数、每百万 token 的单价（美元）和每日请求数，计算单次请求、每日和每月（按 30 天）的成本。
+
+参数非法（负数或非有限数）时返回明确的错误，不会 panic。
+
+```bash
+go run . -input-tokens 100 -output-tokens 200 \
+         -input-price 0.5 -output-price 1.5 \
+         -requests-per-day 1000
+```
+
+输出格式：
+
+```
+Single request cost: $0.000350
+Daily cost: $350.00
+Monthly cost (30 days): $10500.00
+```
+
+- `-input-tokens`：每次请求的输入 token 数
+- `-output-tokens`：每次请求的输出 token 数
+- `-input-price`：每百万输入 token 的价格（美元）
+- `-output-price`：每百万输出 token 的价格（美元）
+- `-requests-per-day`：每天的请求数
+
 ## 全量同步模型库
 
 采集器同步 Hugging Face 和 ModelScope 的模型详情、架构配置、MoE 路由、上下文、dtype、许可证、发布时间及 safetensors payload。`-all` 只分页扫描内置的已核实发布机构，并覆盖文本、图文、多模态问答和音频文本等 LLM 任务，避免全站社区衍生仓库挤掉官方模型：
