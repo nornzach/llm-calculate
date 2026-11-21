@@ -186,6 +186,25 @@ func TestAPIContracts(t *testing.T) {
 	}
 }
 
+func TestHomepageCalcNote(t *testing.T) {
+	index, err := inlineIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(index)
+	const note = `<p id="calc-note" class="calc-note" role="note">结果由本地计算得出，不上传输入。</p>`
+	if strings.Count(html, note) != 1 || strings.Count(html, `id="calc-note"`) != 1 {
+		t.Fatal("homepage must contain exactly one local computation note")
+	}
+	if strings.Count(html, `id="calc-disclaimer"`) != 1 {
+		t.Fatal("the earlier read-only disclaimer must keep a unique id")
+	}
+	heat, noteAt, fit := strings.Index(html, `id="mapHeatCard"`), strings.Index(html, `id="calc-note"`), strings.Index(html, `id="v-fit"`)
+	if heat < 0 || noteAt < heat || fit < noteAt {
+		t.Fatal("local computation note must follow every homepage result card")
+	}
+}
+
 func TestEnrichModelPreservesCuratedInferenceData(t *testing.T) {
 	dst := calc.Model{ID: "qwen", Params: 7, Layers: 28, Src: "curated", Conf: "official"}
 	src := calc.Model{
