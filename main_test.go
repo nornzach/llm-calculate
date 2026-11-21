@@ -193,14 +193,32 @@ func TestHomepageCalcNote(t *testing.T) {
 	}
 	html := string(index)
 	const note = `<p id="calc-note" class="calc-note" role="note">结果由本地计算得出，不上传输入。</p>`
+	const disclaimer = `<p id="calc-disclaimer" class="calc-note" role="note">本页为只读提示：所有数字都是场景估算，不代表实测校准、基准验证或采购报价；显存装得下不等于可部署。This is a read-only note: figures are what-if estimates, not benchmarks, quotes, or proof of deployability.</p>`
 	if strings.Count(html, note) != 1 || strings.Count(html, `id="calc-note"`) != 1 {
 		t.Fatal("homepage must contain exactly one local computation note")
 	}
-	if strings.Count(html, `id="calc-disclaimer"`) != 1 {
-		t.Fatal("the earlier read-only disclaimer must keep a unique id")
+	if strings.Count(html, disclaimer) != 1 || strings.Count(html, `id="calc-disclaimer"`) != 1 {
+		t.Fatal("the earlier read-only disclaimer must keep its text and a unique id")
 	}
-	heat, noteAt, fit := strings.Index(html, `id="mapHeatCard"`), strings.Index(html, `id="calc-note"`), strings.Index(html, `id="v-fit"`)
-	if heat < 0 || noteAt < heat || fit < noteAt {
+	mapStart := strings.Index(html, `<section class="view on" id="v-map">`)
+	fitStart := strings.Index(html, `<section class="view" id="v-fit">`)
+	if mapStart < 0 || fitStart <= mapStart {
+		t.Fatal("homepage map section boundaries are missing or out of order")
+	}
+	home := html[mapStart:fitStart]
+	noteAt := strings.Index(home, note)
+	if noteAt < 0 {
+		t.Fatal("local computation note must be inside the homepage map section")
+	}
+	for _, cardID := range []string{`id="mapScatterCard"`, `id="mapHeatCard"`} {
+		if strings.Count(home, cardID) != 1 {
+			t.Fatalf("homepage result card %s must have a unique id", cardID)
+		}
+		if cardAt := strings.Index(home, cardID); cardAt > noteAt {
+			t.Fatalf("local computation note must follow result card %s", cardID)
+		}
+	}
+	if lastCard := strings.LastIndex(home, `<div class="chart mapcard"`); lastCard < 0 || noteAt < lastCard {
 		t.Fatal("local computation note must follow every homepage result card")
 	}
 }
