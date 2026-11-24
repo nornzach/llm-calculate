@@ -12,6 +12,48 @@ import (
 	"llmcalc/calc"
 )
 
+func TestRecentCatalogModels(t *testing.T) {
+	mustLoad("")
+	w := httptest.NewRecorder()
+	newHandler().ServeHTTP(w, httptest.NewRequest("GET", "/api/models", nil))
+	if w.Code != 200 {
+		t.Fatalf("GET /api/models returned %d", w.Code)
+	}
+	var models []calc.Model
+	if err := json.Unmarshal(w.Body.Bytes(), &models); err != nil {
+		t.Fatal(err)
+	}
+	type entry struct {
+		id, license, revision, src, paramSource string
+		params, active                          float64
+		layers, heads, kvh                      int
+		hidden                                  float64
+		moe                                     bool
+	}
+	for _, want := range []entry{
+		{"microsoft--aion-1.0-instruct-2.3b", "mit", "28902cbfd9f4e0347d6c853aa1301f5d559b2fc0", "hf", "config", 2.3, 2.3, 28, 24, 8, 2048, false},
+		{"ibm-granite--granite-switch-4.1-8b", "apache-2.0", "fb4aa7877e13e5fe09ca328713dc1db72a3f93ce", "hf", "config", 8.8, 8.8, 42, 32, 8, 4096, false},
+		{"ornith-ai--ornith-1.5-122b", "mit", "7681ef608624e7532d8164128bcffdbdbaf1b1af", "hf", "safetensors", 125.1, 12.8, 48, 32, 2, 3072, true},
+	} {
+		t.Run(want.id, func(t *testing.T) {
+			count := 0
+			for _, m := range models {
+				if m.ID != want.id {
+					continue
+				}
+				count++
+				got := entry{m.ID, m.License, m.Revision, m.Src, m.ParamSource, m.Params, m.Active, m.Layers, m.Heads, m.KVH, m.Hidden, m.MoE}
+				if got != want {
+					t.Errorf("got %+v, want %+v", got, want)
+				}
+			}
+			if count != 1 {
+				t.Errorf("found %d entries, want 1", count)
+			}
+		})
+	}
+}
+
 func TestBinaryUpdateIgnoresStaleWorkingDirectoryCatalog(t *testing.T) {
 	// Reproduce a binary-only deployment with a pre-metadata-refresh JSON
 	// left in its working directory. The released catalog must still win.

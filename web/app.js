@@ -886,8 +886,8 @@ async function boot() {
   mountAdvanced("pl", false);
 
   $("#dbMeta").innerHTML =
-    tr(`Hardware <b>${HW.length}</b> · Models <b>${MODELS.length}</b> · Data 2026-09`, `硬件 <b>${HW.length}</b> 款 · 模型 <b>${MODELS.length}</b> 个 · 数据 2026-09`);
-  $("#footMeta").textContent = `v0.3 · ${HW.length} HW / ${MODELS.length} MODELS`;
+    tr(`Hardware <b>${HW.length}</b> · Models <b>${MODELS.length}</b> · Data 2026-11`, `硬件 <b>${HW.length}</b> 款 · 模型 <b>${MODELS.length}</b> 个 · 数据 2026-11`);
+  $("#footMeta").textContent = `v0.4 · ${HW.length} HW / ${MODELS.length} MODELS`;
 
   // 硬件下拉（按厂商分组，带搜索）
   const hwGroups = () => {
