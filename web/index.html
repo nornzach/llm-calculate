@@ -41,7 +41,7 @@
 
 <!-- ============ 首页：部署地图 ============ -->
 <section class="view on" id="v-map">
-  <div class="mapwrap">
+  <aside class="mapaside">
     <div class="mapbar">
       <div><label class="lab" id="map-model-label">模型 · MODEL</label><div class="cs" id="map-model" aria-labelledby="map-model-label"></div></div>
       <div><label class="lab" id="map-preset-label">工作负载模板 · WORKLOAD PRESET</label><div class="cs" id="map-preset" aria-labelledby="map-preset-label"></div></div>
@@ -49,6 +49,8 @@
       <label class="mapfield"><span>并发</span><input type="number" id="map-conc" value="16" min="1" max="256"></label>
     </div>
     <p class="field-note" id="mapWorkloadNote"></p>
+  </aside>
+  <div class="result mapwrap">
     <p id="calc-note" class="calc-note" role="note">本页为只读提示：所有数字都是场景估算，不代表实测校准、基准验证或采购报价；显存装得下不等于可部署。This is a read-only note: figures are what-if estimates, not benchmarks, quotes, or proof of deployability.</p>
     <div class="mapgrid">
       <div class="chart mapcard" id="mapScatterCard">
