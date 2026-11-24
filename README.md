@@ -1,6 +1,6 @@
 # llm-calculate
 
-面向大语言模型推理部署的本地容量与吞吐计算器。内置 **121 款硬件**、**2,271 个模型**，覆盖显存可行性、吞吐/时延估算、部署方案搜索、硬件库、模型库、速查表和术语库。
+面向大语言模型推理部署的本地容量与吞吐计算器。内置 **121 款硬件**、**2,274 个模型**，覆盖显存可行性、吞吐/时延估算、部署方案搜索、硬件库、模型库、速查表和术语库。
 
 > 这是容量规划和方案初筛工具，不是基准测试。`analytical` 与用户参数驱动的 `scenario` 均无统计置信区间；显存满足不等于部署有效，填写利用率也不构成实测校准。
 
@@ -217,6 +217,8 @@ go run ./scripts/collect -source modelscope -all -min-year 2023
 采集器按 SHA 固定 config、index 和单文件元数据读取；逻辑参数量与打包存储量分开，处理 tied embeddings、显式嵌套量化格式及 MQA。缺少证据时不再由 payload/参数量反推位宽，也不猜 GQA-8。`param_source` 区分 config、未打包逻辑计数、model_card、name 和 unknown。旧记录未经刷新不会自动获得核验标记；精选目录的 attention 结构补录附有对应 config 链接，沿用的参数规模仍按未绑定 checkpoint 的条件场景处理；官方发布机构不等于所有字段已核验。
 
 ModelScope OpenAPI 对单个发布机构查询设有 3,000 条上限；超过该上限需要按更细的发布机构范围分批同步。
+
+2026-11-24 更新后，内置目录共收录 62 个精选模型、2,212 个 HF 模型。此次从发布方的 Hugging Face 仓库补入 Aion 1.0 Instruct 2.3B、Granite Switch 4.1 8B 正式版和 Ornith 1.5 122B。Granite preview 版仍可单独选择。固定版本与参数依据见[审计报告](AUDIT_REPORT.md)。
 
 截至 2026-09-25，HF 目录新增 14 个通过配置、参数来源和固定 revision 校验的官方模型，包含 DeepSeek V4.1 Flash、GLM 5.3 NVFP4、DeepSeek V4 Pro NVFP4、Intern-S2 397B、Atria、MiMo V2.6、MiniCPM5、LFM2.5-VL 和 Ling 3.0 Flash 新格式。缺少标准 `config.json` 或参数依据的候选被跳过，不以名称推断结构。当前 ModelScope 库为空。自动采集目录仍有大量未绑定 revision 或缺 encoder 几何的条目；保留其检索信息，但不把不完整输入当作已支持部署。已有来源核对和剩余边界见审计报告。
 
